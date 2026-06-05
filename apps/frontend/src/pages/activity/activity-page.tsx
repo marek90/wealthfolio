@@ -1,19 +1,28 @@
 import { getAccounts, getTransferPairForActivity } from "@/adapters";
+import { ActionPalette, type ActionPaletteGroup } from "@/components/action-palette";
+import { SwipablePage, type SwipablePageView } from "@/components/page";
+import {
+  SpendingTransactionsTab,
+  type SpendingTransactionsTabHandle,
+} from "@/features/spending/components/spending-transactions-tab";
+import { useSpendingSettings } from "@/features/spending/hooks/use-spending-settings";
+import { SyncButton } from "@/features/wealthfolio-connect/components/sync-button";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { usePortfolios } from "@/hooks/use-portfolios";
 import { useIsCompactTableViewport, useIsMobileViewport } from "@/hooks/use-platform";
-import { debounce } from "@/lib/debounce";
+import { getActivityRestrictionLevel } from "@/lib/activity-restrictions";
 import { ActivityType } from "@/lib/constants";
+import { debounce } from "@/lib/debounce";
 import { QueryKeys } from "@/lib/query-keys";
 import { Account, AccountScope, ActivityDetails } from "@/lib/types";
+import { AlternativeAssetQuickAddModal } from "@/pages/asset/alternative-assets";
 import { useQuery } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
 import { Button, Icons, Page, PageContent, PageHeader } from "@wealthfolio/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { getActivityRestrictionLevel } from "@/lib/activity-restrictions";
-import { ActivityDeleteModal } from "./components/activity-delete-modal";
 import { ActivityDataGrid } from "./components/activity-data-grid/activity-data-grid";
+import { ActivityDeleteModal } from "./components/activity-delete-modal";
 import { ActivityForm } from "./components/activity-form";
 import { ActivityMobileControls } from "./components/activity-mobile-controls";
 import { ActivityPagination } from "./components/activity-pagination";
@@ -24,15 +33,6 @@ import { BulkHoldingsModal } from "./components/forms/bulk-holdings-modal";
 import { MobileActivityForm } from "./components/mobile-forms/mobile-activity-form";
 import { useActivityMutations } from "./hooks/use-activity-mutations";
 import { useActivitySearch, type ActivityStatusFilter } from "./hooks/use-activity-search";
-import { SyncButton } from "@/features/wealthfolio-connect/components/sync-button";
-import { AlternativeAssetQuickAddModal } from "@/pages/asset/alternative-assets";
-import { ActionPalette, type ActionPaletteGroup } from "@/components/action-palette";
-import { SwipablePage, type SwipablePageView } from "@/components/page";
-import { useSpendingSettings } from "@/features/spending/hooks/use-spending-settings";
-import {
-  SpendingTransactionsTab,
-  type SpendingTransactionsTabHandle,
-} from "@/features/spending/components/spending-transactions-tab";
 import {
   clearActivityUrlFilters,
   resolveActivityTabFromUrlFilters,
@@ -713,7 +713,7 @@ const ActivityPage = () => {
   if (!isSpendingEnabled) {
     return (
       <Page>
-        <PageHeader heading="Activity" actions={investmentActions} />
+        <PageHeader actions={investmentActions} />
         <PageContent className="pb-2 md:pb-4 lg:pb-5">{investmentContent}</PageContent>
         {sharedModals}
       </Page>
