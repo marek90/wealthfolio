@@ -162,6 +162,7 @@ export default function PortfolioPage() {
         defaultView="investments"
         withPadding={false}
         withMobileNavOffset={false}
+        mobileActionsPlacement="header"
         persistKey="dashboard-tab"
       />
       <AlternativeAssetQuickAddModal
