@@ -151,16 +151,6 @@ const ROWS_WITH_USER_SYNCABLE_ACTIVITY_FILTER_SQL: &str = "\
                AND (source_record_id IS NULL OR TRIM(source_record_id) = ''))
     )";
 
-const OVERWRITE_RISK_ACTIVITY_TAXONOMY_ASSIGNMENTS_FILTER_SQL: &str = "\
-    UPPER(COALESCE(source, '')) = 'MANUAL'
-    OR activity_id IN (
-        SELECT id FROM activities
-        WHERE UPPER(COALESCE(source_system, '')) IN ('MANUAL', 'CSV')
-           OR ((source_system IS NULL OR TRIM(source_system) = '')
-               AND (import_run_id IS NULL OR TRIM(import_run_id) = '')
-               AND (source_record_id IS NULL OR TRIM(source_record_id) = ''))
-    )";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncRowFilter {
     UserSyncableHoldingsSnapshots,
@@ -168,10 +158,7 @@ enum SyncRowFilter {
     ManualQuotes,
     UserImportRuns,
     UserSyncableActivities,
-    OverwriteRiskImportTemplates,
-    OverwriteRiskImportAccountTemplates,
     SpendingSettings,
-    SpendingSettingsOverwriteRisk,
     UserTaxonomies,
     SyncableTaxonomyCategories,
     UserModifiedBudgetGroups,
@@ -179,13 +166,9 @@ enum SyncRowFilter {
     BudgetGroupAssignmentsWithExistingDependencies,
     BudgetTargetsWithExistingDependencies,
     BudgetRolloverSettingsWithExistingDependencies,
-    UserModifiedSpendingEventTypes,
     OverwriteRiskAccounts,
-    OverwriteRiskPlatforms,
-    OverwriteRiskAssets,
     ValidPortfolioAccounts,
     RowsWithUserSyncableActivity,
-    OverwriteRiskActivityTaxonomyAssignments,
 }
 
 impl SyncRowFilter {
@@ -206,18 +189,7 @@ impl SyncRowFilter {
                 "UPPER(run_type) = 'IMPORT' AND UPPER(source_system) IN ('CSV', 'MANUAL')"
             }
             Self::UserSyncableActivities => USER_SYNCABLE_ACTIVITIES_FILTER_SQL,
-            Self::OverwriteRiskImportTemplates => {
-                "UPPER(scope) != 'SYSTEM' AND UPPER(kind) != 'BROKER_ACTIVITY'"
-            }
-            Self::OverwriteRiskImportAccountTemplates => {
-                "UPPER(context_kind) != 'BROKER_ACTIVITY' \
-                 AND UPPER(COALESCE(source_system, '')) IN ('', 'CSV', 'MANUAL')"
-            }
             Self::SpendingSettings => "setting_key IN ('spending.enabled', 'spending.account_ids')",
-            Self::SpendingSettingsOverwriteRisk => {
-                "setting_key = 'spending.account_ids' \
-                 OR (setting_key = 'spending.enabled' AND LOWER(setting_value) != 'true')"
-            }
             Self::UserTaxonomies => "is_system = 0",
             // Spending/income seed category IDs use the `cat_` prefix; user-created rows use UUIDs.
             Self::SyncableTaxonomyCategories => {
@@ -260,21 +232,13 @@ impl SyncRowFilter {
                  OR (target_type = 'group' \
                     AND group_id IN (SELECT id FROM budget_groups))"
             }
-            Self::UserModifiedSpendingEventTypes => "key IS NULL OR updated_at != created_at",
             Self::OverwriteRiskAccounts => {
                 "provider_account_id IS NULL OR TRIM(provider_account_id) = ''"
-            }
-            Self::OverwriteRiskPlatforms => "external_id IS NULL OR TRIM(external_id) = ''",
-            Self::OverwriteRiskAssets => {
-                "kind IN ('PROPERTY', 'VEHICLE', 'COLLECTIBLE', 'PRECIOUS_METAL', 'PRIVATE_EQUITY', 'LIABILITY', 'OTHER')"
             }
             Self::ValidPortfolioAccounts => {
                 "account_id IN (SELECT id FROM accounts) AND portfolio_id IN (SELECT id FROM portfolios)"
             }
             Self::RowsWithUserSyncableActivity => ROWS_WITH_USER_SYNCABLE_ACTIVITY_FILTER_SQL,
-            Self::OverwriteRiskActivityTaxonomyAssignments => {
-                OVERWRITE_RISK_ACTIVITY_TAXONOMY_ASSIGNMENTS_FILTER_SQL
-            }
         }
     }
 }
@@ -284,70 +248,12 @@ struct SyncTableFilterSpec {
     filter: SyncRowFilter,
 }
 
-const OVERWRITE_RISK_UNFILTERED_TABLES: &[&str] = &[
-    "market_data_custom_providers",
-    "goals",
-    "goal_plans",
-    "ai_threads",
-    "ai_messages",
-    "ai_thread_tags",
-    "contribution_limits",
-    "spending_activity_events",
-    "spending_categorization_rules",
-    "spending_preset_rule_deletions",
-    "spending_events",
-    "budget_targets",
-    "budget_rollover_settings",
-    "asset_taxonomy_assignments",
-    "goals_allocation",
-    "allocation_targets",
-    "allocation_target_weights",
-];
+const OVERWRITE_RISK_UNFILTERED_TABLES: &[&str] = &["goals"];
 
 const OVERWRITE_RISK_FILTERED_TABLES: &[SyncTableFilterSpec] = &[
     SyncTableFilterSpec {
-        table: "platforms",
-        filter: SyncRowFilter::OverwriteRiskPlatforms,
-    },
-    SyncTableFilterSpec {
         table: "accounts",
         filter: SyncRowFilter::OverwriteRiskAccounts,
-    },
-    SyncTableFilterSpec {
-        table: "assets",
-        filter: SyncRowFilter::OverwriteRiskAssets,
-    },
-    SyncTableFilterSpec {
-        table: "quotes",
-        filter: SyncRowFilter::ManualQuotes,
-    },
-    SyncTableFilterSpec {
-        table: "import_runs",
-        filter: SyncRowFilter::UserImportRuns,
-    },
-    SyncTableFilterSpec {
-        table: "activities",
-        filter: SyncRowFilter::UserSyncableActivities,
-    },
-    SyncTableFilterSpec {
-        table: "import_templates",
-        filter: SyncRowFilter::OverwriteRiskImportTemplates,
-    },
-    SyncTableFilterSpec {
-        table: "import_account_templates",
-        filter: SyncRowFilter::OverwriteRiskImportAccountTemplates,
-    },
-    SyncTableFilterSpec {
-        table: "activity_taxonomy_assignments",
-        filter: SyncRowFilter::OverwriteRiskActivityTaxonomyAssignments,
-    },
-    SyncTableFilterSpec {
-        table: "app_settings",
-        filter: SyncRowFilter::SpendingSettingsOverwriteRisk,
-    },
-    SyncTableFilterSpec {
-        table: "spending_event_types",
-        filter: SyncRowFilter::UserModifiedSpendingEventTypes,
     },
     SyncTableFilterSpec {
         table: "budget_groups",
@@ -358,12 +264,12 @@ const OVERWRITE_RISK_FILTERED_TABLES: &[SyncTableFilterSpec] = &[
         filter: SyncRowFilter::UserModifiedBudgetGroupAssignments,
     },
     SyncTableFilterSpec {
-        table: "taxonomies",
-        filter: SyncRowFilter::UserTaxonomies,
+        table: "budget_targets",
+        filter: SyncRowFilter::BudgetTargetsWithExistingDependencies,
     },
     SyncTableFilterSpec {
-        table: "taxonomy_categories",
-        filter: SyncRowFilter::SyncableTaxonomyCategories,
+        table: "budget_rollover_settings",
+        filter: SyncRowFilter::BudgetRolloverSettingsWithExistingDependencies,
     },
 ];
 
@@ -5364,7 +5270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwrite_risk_summary_counts_accounts_and_goals() {
+    async fn overwrite_risk_summary_counts_accounts_goals_and_budgets() {
         let (pool, writer) = setup_db();
         let repo = AppSyncRepository::new(pool.clone(), writer);
 
@@ -5372,13 +5278,27 @@ mod tests {
             let mut conn = get_connection(&pool).expect("conn");
             insert_account_for_test(&mut conn, "acc-overwrite-risk").expect("insert account");
             insert_goal_for_test(&mut conn, "goal-overwrite-risk").expect("insert goal");
+            conn.batch_execute(
+                "INSERT INTO budget_targets \
+                 (id, period_key, target_type, taxonomy_id, category_id, group_id, amount, created_at, updated_at) \
+                 VALUES ('budget-target-overwrite-risk', '2026-01', 'group_buffer', NULL, NULL, \
+                         '032ecb02-5912-42e8-9724-2cd566fc08d5', '100.00', \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO budget_rollover_settings \
+                 (id, target_type, taxonomy_id, category_id, group_id, enabled, start_month, \
+                  starting_balance, created_at, updated_at) \
+                 VALUES ('budget-rollover-overwrite-risk', 'group', NULL, NULL, \
+                         '032ecb02-5912-42e8-9724-2cd566fc08d5', 1, '2026-01', '0', \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .expect("insert budget rows");
         }
 
         let summary = repo
             .get_local_sync_overwrite_risk_summary()
             .expect("overwrite risk summary");
 
-        assert_eq!(summary.total_rows, 2);
+        assert_eq!(summary.total_rows, 4);
         assert!(summary
             .non_empty_tables
             .iter()
@@ -5387,6 +5307,14 @@ mod tests {
             .non_empty_tables
             .iter()
             .any(|row| row.table == "goals" && row.rows == 1));
+        assert!(summary
+            .non_empty_tables
+            .iter()
+            .any(|row| row.table == "budget_targets" && row.rows == 1));
+        assert!(summary
+            .non_empty_tables
+            .iter()
+            .any(|row| row.table == "budget_rollover_settings" && row.rows == 1));
     }
 
     #[tokio::test]
@@ -5456,7 +5384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwrite_risk_summary_counts_manual_broker_activity_sidecars() {
+    async fn overwrite_risk_summary_ignores_broker_activity_sidecars() {
         let (pool, writer) = setup_db();
         let repo = AppSyncRepository::new(pool.clone(), writer);
 
@@ -5515,23 +5443,12 @@ mod tests {
             .get_local_sync_overwrite_risk_summary()
             .expect("overwrite risk summary");
 
-        assert_eq!(summary.total_rows, 3);
-        assert!(summary
-            .non_empty_tables
-            .iter()
-            .any(|row| row.table == "activity_taxonomy_assignments" && row.rows == 1));
-        assert!(summary
-            .non_empty_tables
-            .iter()
-            .any(|row| row.table == "spending_events" && row.rows == 1));
-        assert!(summary
-            .non_empty_tables
-            .iter()
-            .any(|row| row.table == "spending_activity_events" && row.rows == 1));
+        assert_eq!(summary.total_rows, 0);
+        assert!(summary.non_empty_tables.is_empty());
     }
 
     #[tokio::test]
-    async fn overwrite_risk_summary_counts_only_standalone_asset_kinds() {
+    async fn overwrite_risk_summary_ignores_standalone_asset_kinds() {
         let (pool, writer) = setup_db();
         let repo = AppSyncRepository::new(pool.clone(), writer);
         let counted_kinds = [
@@ -5563,19 +5480,12 @@ mod tests {
             .get_local_sync_overwrite_risk_summary()
             .expect("overwrite risk summary");
 
-        assert_eq!(summary.total_rows, counted_kinds.len() as i64);
-        assert_eq!(
-            summary
-                .non_empty_tables
-                .iter()
-                .find(|row| row.table == "assets")
-                .map(|row| row.rows),
-            Some(counted_kinds.len() as i64)
-        );
+        assert_eq!(summary.total_rows, 0);
+        assert!(summary.non_empty_tables.is_empty());
     }
 
     #[tokio::test]
-    async fn overwrite_risk_summary_counts_user_curated_sync_tables() {
+    async fn overwrite_risk_summary_ignores_non_account_goal_budget_tables() {
         let (pool, writer) = setup_db();
         let repo = AppSyncRepository::new(pool.clone(), writer);
 
@@ -5719,44 +5629,19 @@ mod tests {
         let summary = repo
             .get_local_sync_overwrite_risk_summary()
             .expect("overwrite risk summary");
-        let expected_tables = [
-            "platforms",
-            "market_data_custom_providers",
-            "accounts",
-            "quotes",
-            "goals",
-            "goal_plans",
-            "goals_allocation",
-            "ai_threads",
-            "ai_messages",
-            "ai_thread_tags",
-            "contribution_limits",
-            "import_runs",
-            "activities",
-            "import_templates",
-            "import_account_templates",
-            "taxonomies",
-            "taxonomy_categories",
-            "asset_taxonomy_assignments",
-        ];
-
-        assert_eq!(summary.total_rows, expected_tables.len() as i64);
-        for table in expected_tables {
-            assert!(
-                summary
-                    .non_empty_tables
-                    .iter()
-                    .any(|row| row.table == table && row.rows == 1),
-                "expected overwrite risk for {table}"
-            );
-        }
-        assert!(
-            summary
-                .non_empty_tables
-                .iter()
-                .all(|row| row.table != "assets"),
-            "investment support asset should not count as overwrite risk"
-        );
+        assert_eq!(summary.total_rows, 2);
+        assert!(summary
+            .non_empty_tables
+            .iter()
+            .any(|row| row.table == "accounts" && row.rows == 1));
+        assert!(summary
+            .non_empty_tables
+            .iter()
+            .any(|row| row.table == "goals" && row.rows == 1));
+        assert!(summary
+            .non_empty_tables
+            .iter()
+            .all(|row| matches!(row.table.as_str(), "accounts" | "goals")));
     }
 
     #[tokio::test]
