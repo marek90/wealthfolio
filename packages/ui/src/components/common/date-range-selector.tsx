@@ -105,17 +105,19 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
   const selectedLabel = getSelectedRange();
   const isCustomRange = !selectedLabel;
   const isDraftRangeComplete = !draftRange || (!!draftRange.from && !!draftRange.to);
+  const allTimeRange = visibleRanges.find((range) => range.label === "ALL")?.getValue();
+  const appliedDraftRange = draftRange ?? allTimeRange;
 
   const handleCustomPickerOpenChange = (open: boolean) => {
     if (open) {
-      setDraftRange(value);
+      setDraftRange(value ?? allTimeRange);
     }
     setIsCustomPickerOpen(open);
   };
 
   const handleApplyDraftRange = () => {
     if (!isDraftRangeComplete) return;
-    onChange(draftRange);
+    onChange(appliedDraftRange);
     setIsCustomPickerOpen(false);
   };
 
@@ -201,8 +203,8 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
                 type="button"
                 variant="ghost"
                 className="text-muted-foreground hover:text-foreground"
-                onClick={() => setDraftRange(undefined)}
-                disabled={!draftRange}
+                onClick={() => setDraftRange(allTimeRange)}
+                disabled={!draftRange && !allTimeRange}
               >
                 Clear
               </Button>
