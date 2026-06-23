@@ -16,7 +16,7 @@ import { findMappedActivityType } from "./activity-type-mapping";
 import { normalizeInstrumentType, splitInstrumentPrefixedSymbol } from "./instrument-type";
 
 // Ticker symbol validation regex
-const tickerRegex = /^(CASH:[A-Z]{3}|[A-Z0-9]{1,21}([.-][A-Z0-9]+){0,2})$/;
+const tickerRegex = /^(CASH:[A-Z]{3}|[A-Z0-9_]{1,100}([.-][A-Z0-9]+){0,2})$/;
 
 // CUSIP: 9 alphanumeric chars ending in a digit
 const cusipRegex = /^[A-Z0-9]{8}\d$/;

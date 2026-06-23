@@ -4,10 +4,39 @@ import {
   validateActivityImport,
   normalizeNumericValue,
   parseAndAbsoluteValue,
+  validateTickerSymbol,
 } from "./validation-utils";
 import { ImportFormat, ActivityType, ImportType } from "@/lib/types";
 
 describe("validation-utils", () => {
+  describe("validateTickerSymbol (length)", () => {
+    it("accepts common ticker formats", () => {
+      expect(validateTickerSymbol("AAPL")).toBe(true);
+      expect(validateTickerSymbol("CASH:USD")).toBe(true);
+      expect(validateTickerSymbol("BRK.B")).toBe(true);
+    });
+
+    it("accepts symbols longer than the old 20/21 cap (issue #1145)", () => {
+      expect(validateTickerSymbol("A".repeat(21))).toBe(true);
+      expect(validateTickerSymbol("A".repeat(50))).toBe(true);
+      expect(validateTickerSymbol("A".repeat(100))).toBe(true);
+    });
+
+    it("still rejects symbols beyond the 100-char bound", () => {
+      expect(validateTickerSymbol("A".repeat(101))).toBe(false);
+    });
+
+    it("accepts underscores used by custom-provider symbols", () => {
+      expect(validateTickerSymbol("GOLD_KRUGERRAND")).toBe(true);
+      expect(validateTickerSymbol("XAU_1OZ")).toBe(true);
+    });
+
+    it("still rejects free-text/whitespace garbage", () => {
+      expect(validateTickerSymbol("bad symbol")).toBe(false);
+      expect(validateTickerSymbol("Some Company Inc.")).toBe(false);
+    });
+  });
+
   describe("normalizeNumericValue", () => {
     it("should handle currency symbols", () => {
       expect(normalizeNumericValue("$48.945")).toBe(48.945);
