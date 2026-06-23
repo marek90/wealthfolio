@@ -191,7 +191,7 @@ impl AllocationTargetService {
             band_type: input
                 .band_type
                 .or_else(|| existing.as_ref().map(|target| target.band_type.clone()))
-                .unwrap_or(BandType::Absolute),
+                .unwrap_or(BandType::Hybrid),
             relative_factor_bps: input
                 .relative_factor_bps
                 .or_else(|| existing.as_ref().map(|target| target.relative_factor_bps))
@@ -279,7 +279,9 @@ impl AllocationTargetServiceTrait for AllocationTargetService {
             taxonomy_id: input.taxonomy_id,
             trigger_type: input.trigger_type,
             drift_band_bps: input.drift_band_bps,
-            band_type: input.band_type.unwrap_or(BandType::Absolute),
+            // New targets default to Hybrid (#1070). Existing DB rows
+            // keep Absolute via migration; updates preserve the saved value.
+            band_type: input.band_type.unwrap_or(BandType::Hybrid),
             relative_factor_bps: input.relative_factor_bps.unwrap_or(2000),
             rebalance_goal: input.rebalance_goal.unwrap_or(RebalanceGoal::NearestBand),
             min_trade_amount: input.min_trade_amount.unwrap_or_else(|| "0".to_string()),
@@ -802,5 +804,42 @@ mod tests {
 
         assert_eq!(updated.taxonomy_id, "asset_classes");
         assert_eq!(updated.name, "Updated target");
+    }
+
+    #[tokio::test]
+    async fn create_target_defaults_band_type_to_hybrid_when_omitted() {
+        let service = AllocationTargetService::new(
+            Arc::new(MockAllocationTargetRepository {
+                target: target("asset_classes"),
+                weights: vec![saved_weight("asset_classes")],
+            }),
+            Arc::new(MockTaxonomyService),
+        );
+
+        let mut input = target_input("asset_classes");
+        input.band_type = None;
+
+        let created = service.create_target(input).await.unwrap();
+        assert_eq!(created.band_type, BandType::Hybrid);
+    }
+
+    #[tokio::test]
+    async fn update_target_preserves_existing_band_type_when_omitted() {
+        let mut existing = target("asset_classes");
+        existing.band_type = BandType::Hybrid;
+
+        let service = AllocationTargetService::new(
+            Arc::new(MockAllocationTargetRepository {
+                target: existing,
+                weights: vec![saved_weight("asset_classes")],
+            }),
+            Arc::new(MockTaxonomyService),
+        );
+
+        let mut input = target_input("asset_classes");
+        input.band_type = None;
+
+        let updated = service.update_target("target-1", input).await.unwrap();
+        assert_eq!(updated.band_type, BandType::Hybrid);
     }
 }

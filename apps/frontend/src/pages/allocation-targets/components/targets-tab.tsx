@@ -273,7 +273,9 @@ function TargetEditor({
   const [targetName, setTargetName] = useState(target?.name ?? "");
   const [nameTouched, setNameTouched] = useState(!!target);
   const [driftBandPct, setDriftBandPct] = useState(target ? target.driftBandBps / 100 : 1);
-  const [bandType, setBandType] = useState<BandType>(target?.bandType ?? "hybrid");
+  const [bandType, setBandType] = useState<BandType>(
+    target ? (target.bandType ?? "absolute") : "hybrid",
+  );
   const [relativeFactorPct, setRelativeFactorPct] = useState(
     target ? target.relativeFactorBps / 100 : 20,
   );
@@ -292,7 +294,7 @@ function TargetEditor({
   const resetTargetTaxonomyId = target?.taxonomyId ?? "asset_classes";
   const resetTargetName = target?.name ?? "";
   const resetTargetDriftBandBps = target?.driftBandBps ?? 100;
-  const resetTargetBandType = target?.bandType ?? "hybrid";
+  const resetTargetBandType = target?.bandType ?? "absolute";
   const resetTargetRelativeFactorBps = target?.relativeFactorBps ?? 2000;
 
   const { data: taxonomy, isLoading: taxonomyLoading } = useTaxonomy(taxonomyId);
@@ -835,6 +837,9 @@ function TargetEditor({
                 weights={weights}
                 currentAllocation={currentAllocation}
                 categoryLabel={categoryLabelForTaxonomy(selectedTaxonomy?.name)}
+                bandType={bandType}
+                driftBandBps={Math.round(driftBandPct * 100)}
+                relativeFactorBps={Math.round(relativeFactorPct * 100)}
                 onChange={(nextWeights) => {
                   setWeights(nextWeights);
                   markDirty();

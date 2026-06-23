@@ -1198,4 +1198,112 @@ mod tests {
             "filtered sells must not alter the state used by the buy phase"
         );
     }
+
+    fn make_two_sleeve_input(band_type: BandType) -> RebalanceInput {
+        // EQUITY 60% target, currently 68% (overweight +800 bps)
+        // BOND   40% target, currently 32% (underweight -800 bps)
+        // Cash: $500. Band floor: 500 bps. Relative factor: 20%.
+        //
+        // Absolute effective bands: EQUITY=500, BOND=500
+        //   → BOND desired = 4000-500 = 3500 bps, current 3200 → greedy buys BOND first
+        //
+        // Hybrid effective bands: EQUITY=max(6000*20%,500)=1200, BOND=max(4000*20%,500)=800
+        //   → BOND desired = 4000-800 = 3200 bps, current 3200 → already at desired
+        //   → greedy has nothing to do, all cash goes to proportional top-up
+        RebalanceInput {
+            profile: RebalanceProfile {
+                target_id: "test".to_string(),
+                drift_band_bps: 500,
+                band_type,
+                relative_factor_bps: 2000,
+                rebalance_goal: RebalanceGoal::NearestBand,
+                min_trade_amount: Decimal::ZERO,
+                whole_shares_only: false,
+            },
+            scenario_mode: ScenarioMode::CashFlowOnly,
+            available_cash: dec!(500),
+            total_value: dec!(10000),
+            categories: vec![
+                CategoryState {
+                    category_id: "equity".to_string(),
+                    category_name: "Equity".to_string(),
+                    target_bps: 6000,
+                    current_value: dec!(6800),
+                    is_cash: false,
+                    is_required: true,
+                },
+                CategoryState {
+                    category_id: "bond".to_string(),
+                    category_name: "Bond".to_string(),
+                    target_bps: 4000,
+                    current_value: dec!(3200),
+                    is_cash: false,
+                    is_required: true,
+                },
+            ],
+            candidates: vec![
+                AssetCandidate {
+                    holding_id: "h-vti".to_string(),
+                    asset_id: "a-vti".to_string(),
+                    symbol: "VTI".to_string(),
+                    name: Some("Vanguard Total Stock".to_string()),
+                    price: dec!(50),
+                    exposure_per_share: HashMap::from([("equity".to_string(), dec!(50))]),
+                },
+                AssetCandidate {
+                    holding_id: "h-bnd".to_string(),
+                    asset_id: "a-bnd".to_string(),
+                    symbol: "BND".to_string(),
+                    name: Some("Vanguard Total Bond".to_string()),
+                    price: dec!(50),
+                    exposure_per_share: HashMap::from([("bond".to_string(), dec!(50))]),
+                },
+            ],
+            sell_candidates: vec![],
+            warnings: vec![],
+        }
+    }
+
+    fn buy_amount_for(plan: &RebalancePlan, symbol: &str) -> Decimal {
+        plan.trades
+            .iter()
+            .filter(|t| t.action == "buy" && t.symbol.as_deref() == Some(symbol))
+            .map(|t| t.estimated_amount)
+            .sum()
+    }
+
+    #[test]
+    fn hybrid_vs_absolute_produces_different_trade_allocation() {
+        let optimizer = DriftPriorityOptimizer;
+
+        let abs_plan = optimizer
+            .plan(make_two_sleeve_input(BandType::Absolute))
+            .unwrap();
+        let hyb_plan = optimizer
+            .plan(make_two_sleeve_input(BandType::Hybrid))
+            .unwrap();
+
+        let abs_bnd = buy_amount_for(&abs_plan, "BND");
+        let abs_vti = buy_amount_for(&abs_plan, "VTI");
+        let hyb_bnd = buy_amount_for(&hyb_plan, "BND");
+        let hyb_vti = buy_amount_for(&hyb_plan, "VTI");
+
+        // Absolute: BOND is underweight outside band → greedy prioritizes BND
+        assert!(
+            abs_bnd > abs_vti,
+            "absolute should buy more BND ({abs_bnd}) than VTI ({abs_vti})"
+        );
+
+        // Hybrid: BOND is at desired level → proportional top-up favors larger-weight EQUITY
+        assert!(
+            hyb_vti > hyb_bnd,
+            "hybrid should buy more VTI ({hyb_vti}) than BND ({hyb_bnd})"
+        );
+
+        // Both use all available cash
+        let abs_total = abs_bnd + abs_vti;
+        let hyb_total = hyb_bnd + hyb_vti;
+        assert!(abs_total > Decimal::ZERO);
+        assert!(hyb_total > Decimal::ZERO);
+    }
 }
