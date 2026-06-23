@@ -788,6 +788,13 @@ impl ActivityService {
         let (score, confidence) = Self::transfer_candidate_score(day_diff);
         let mut reasons = Vec::new();
         let mut warnings = Vec::new();
+        let is_same_account_cash_fx =
+            crate::activities::is_same_account_cash_fx_conversion(source, candidate)
+                || crate::activities::is_same_account_cash_fx_conversion(candidate, source);
+
+        if source.account_id == candidate.account_id && !is_same_account_cash_fx {
+            return None;
+        }
 
         if source_is_security || candidate_is_security {
             let source_asset = Self::non_cash_transfer_asset_key(source)?;
@@ -833,9 +840,7 @@ impl ActivityService {
             });
         }
 
-        if crate::activities::is_same_account_cash_fx_conversion(source, candidate)
-            || crate::activities::is_same_account_cash_fx_conversion(candidate, source)
-        {
+        if is_same_account_cash_fx {
             reasons.push("Same account".to_string());
             reasons.push("Cash FX conversion".to_string());
             if day_diff == 0 {
@@ -852,10 +857,6 @@ impl ActivityService {
                 reasons,
                 warnings,
             });
-        }
-
-        if source.account_id == candidate.account_id {
-            return None;
         }
 
         if !source.currency.eq_ignore_ascii_case(&candidate.currency) {

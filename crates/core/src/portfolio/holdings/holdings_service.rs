@@ -695,10 +695,10 @@ impl HoldingsService {
             ),
             Err(e) => {
                 warn!(
-                    "Failed to load activities for holdings realized-gain disposal filtering on account {}: {}. Disposals remain unfiltered.",
+                    "Failed to load activities for holdings realized-gain disposal filtering on account {}: {}. Disposals will be ignored.",
                     account_id, e
                 );
-                None
+                Some(HashSet::new())
             }
         }
     }
@@ -2079,11 +2079,22 @@ mod tests {
 
     struct MockActivityRepository {
         activities: Vec<Activity>,
+        fail_get_activities_by_account_id: bool,
     }
 
     impl MockActivityRepository {
         fn new(activities: Vec<Activity>) -> Self {
-            Self { activities }
+            Self {
+                activities,
+                fail_get_activities_by_account_id: false,
+            }
+        }
+
+        fn failing_get_activities_by_account_id() -> Self {
+            Self {
+                activities: Vec::new(),
+                fail_get_activities_by_account_id: true,
+            }
         }
     }
 
@@ -2117,6 +2128,12 @@ mod tests {
         }
 
         fn get_activities_by_account_id(&self, account_id: &str) -> Result<Vec<Activity>> {
+            if self.fail_get_activities_by_account_id {
+                return Err(CoreError::Repository(
+                    "failed to load account activities".to_string(),
+                ));
+            }
+
             Ok(self
                 .activities
                 .iter()
@@ -3253,6 +3270,56 @@ mod tests {
         assert_eq!(holding.return_basis.as_ref().unwrap().base, dec!(150));
         assert_eq!(holding.total_gain.as_ref().unwrap().base, dec!(50));
         assert_eq!(holding.total_gain_pct, Some(dec!(0.33333333)));
+    }
+
+    #[tokio::test]
+    async fn holdings_realized_gain_skips_disposals_when_activity_lookup_fails() {
+        let account_id = "acc-1";
+        let asset_id = "AAPL";
+        let mut position = test_position(account_id, asset_id);
+        position.total_cost_basis = dec!(100);
+
+        let snapshot = AccountStateSnapshot {
+            account_id: account_id.to_string(),
+            currency: "USD".to_string(),
+            positions: HashMap::from([(asset_id.to_string(), position)]),
+            ..Default::default()
+        };
+
+        let mut sell_disposal =
+            test_lot_disposal(account_id, asset_id, dec!(50), dec!(50), dec!(20), dec!(20));
+        sell_disposal.id = "sell-disposal".to_string();
+        sell_disposal.disposal_activity_id = "sell-1".to_string();
+        let mut transfer_disposal =
+            test_lot_disposal(account_id, asset_id, dec!(40), dec!(40), dec!(15), dec!(15));
+        transfer_disposal.id = "transfer-disposal".to_string();
+        transfer_disposal.disposal_activity_id = "transfer-out-1".to_string();
+
+        let lot_repository = MockLotRepository::new(vec![test_lot_record(
+            account_id,
+            asset_id,
+            "USD",
+            dec!(100),
+        )])
+        .with_disposals(vec![sell_disposal, transfer_disposal]);
+        let mut service = test_service(
+            snapshot,
+            vec![test_asset(asset_id, "AAPL", InstrumentType::Equity)],
+            HashMap::from([(asset_id.to_string(), dec!(130))]),
+        )
+        .with_lot_repository(Arc::new(lot_repository));
+        service.activity_repository = Some(Arc::new(
+            MockActivityRepository::failing_get_activities_by_account_id(),
+        ));
+
+        let holdings = service.get_holdings(account_id, "USD").await.unwrap();
+
+        assert_eq!(holdings.len(), 1);
+        let holding = &holdings[0];
+        assert!(holding.realized_gain.is_none());
+        assert_eq!(holding.return_basis.as_ref().unwrap().base, dec!(100));
+        assert_eq!(holding.total_gain.as_ref().unwrap().base, dec!(30));
+        assert_eq!(holding.total_gain_pct, Some(dec!(0.3)));
     }
 
     #[tokio::test]

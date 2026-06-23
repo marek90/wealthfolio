@@ -8371,6 +8371,15 @@ mod tests {
             dec!(153),
         ));
         activity_repository.add_activity(create_security_transfer_activity(
+            "same-account-security",
+            "acc-a",
+            "TRANSFER_IN",
+            "2024-01-15T00:00:00Z",
+            "SEC:AAPL:XNAS",
+            dec!(10),
+            dec!(150),
+        ));
+        activity_repository.add_activity(create_security_transfer_activity(
             "wrong-quantity",
             "acc-b",
             "TRANSFER_IN",
