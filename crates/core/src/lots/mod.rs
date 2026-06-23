@@ -404,7 +404,7 @@ pub fn extract_lot_records_with_cost_basis_method(
                 id: lot.id.clone(),
                 account_id: snapshot.account_id.clone(),
                 asset_id: position.asset_id.clone(),
-                open_date: lot.acquisition_date.format("%Y-%m-%d").to_string(),
+                open_date: lot.acquisition_date_key().to_string(),
                 open_activity_id: lot.source_activity_id.clone(),
                 original_quantity: orig_qty.to_string(),
                 remaining_quantity: lot.quantity.to_string(),
@@ -502,6 +502,7 @@ mod tests {
             acquisition_date: Utc
                 .with_ymd_and_hms(date_ymd.0, date_ymd.1, date_ymd.2, 0, 0, 0)
                 .unwrap(),
+            acquisition_local_date: None,
             quantity: qty,
             original_quantity: qty,
             cost_basis: qty * price + fee,
@@ -509,6 +510,10 @@ mod tests {
             acquisition_fees: fee,
             original_acquisition_fees: fee,
             fx_rate_to_position: None,
+            fx_rate_to_account: None,
+            account_currency: None,
+            fx_rate_to_base: None,
+            base_currency: None,
             source_activity_id: None,
             split_ratio: Decimal::ONE,
         }

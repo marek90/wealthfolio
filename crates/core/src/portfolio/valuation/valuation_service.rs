@@ -1,6 +1,6 @@
 use crate::activities::{
-    Activity, ActivityRepositoryTrait, TransferPairResolution, ACTIVITY_TYPE_TRANSFER_IN,
-    ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
+    Activity, ActivityRepositoryTrait, TransferPairResolution, ACTIVITY_TYPE_SPLIT,
+    ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
 use crate::errors::{CalculatorError, Error as CoreError, Result as CoreResult};
 use crate::fx::currency::normalize_currency_code;
@@ -26,7 +26,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use log::{debug, error, warn};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -47,7 +47,7 @@ pub enum ValuationRecalcMode {
     Full,
     /// Resume from the latest saved valuation date, only computing new dates forward.
     IncrementalFromLast,
-    /// Delete valuations from `date` forward and recalculate from that date.
+    /// Delete valuations from `date` forward, recalculating with the previous day as an anchor.
     SinceDate(NaiveDate),
 }
 
@@ -58,7 +58,7 @@ pub trait ValuationServiceTrait: Send + Sync {
     /// The `mode` controls how much history is recomputed:
     /// - `Full`: delete all valuations and recalculate from the first snapshot.
     /// - `IncrementalFromLast`: resume from the latest saved valuation date.
-    /// - `SinceDate(date)`: delete valuations from `date` forward and recalculate from that date.
+    /// - `SinceDate(date)`: delete valuations from `date` forward, recalculating with the previous day as an anchor.
     ///
     /// Args:
     ///     account_id: The ID of a real account.
@@ -139,6 +139,17 @@ pub trait ValuationServiceTrait: Send + Sync {
     ) -> CoreResult<Vec<NegativeBalanceInfo>>;
 }
 
+fn since_date_calculation_window(date: NaiveDate) -> (NaiveDate, Option<NaiveDate>) {
+    let start_date = date.checked_sub_signed(Duration::days(1)).unwrap_or(date);
+    let anchor_date = if start_date < date {
+        Some(start_date)
+    } else {
+        None
+    };
+
+    (start_date, anchor_date)
+}
+
 #[derive(Clone)]
 pub struct ValuationService {
     base_currency: Arc<RwLock<String>>,
@@ -179,6 +190,13 @@ impl DailyFlowAmounts {
             source,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct QuoteAdjustedSplitEvent {
+    asset_id: String,
+    split_date: NaiveDate,
+    ratio: Decimal,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -824,6 +842,167 @@ impl ValuationService {
         activities
     }
 
+    fn split_ratio_from_activity(activity: &Activity) -> Option<Decimal> {
+        let amount = activity.amt();
+        if amount.is_sign_positive() && !amount.is_zero() {
+            return Some(amount);
+        }
+
+        let quantity = activity.qty();
+        if quantity.is_sign_positive() && !quantity.is_zero() {
+            return Some(quantity);
+        }
+
+        None
+    }
+
+    fn quote_close_by_asset_date(
+        quotes: &[Quote],
+    ) -> HashMap<String, BTreeMap<NaiveDate, Decimal>> {
+        let mut by_asset: HashMap<String, BTreeMap<NaiveDate, Decimal>> = HashMap::new();
+        for quote in quotes {
+            if quote.close.is_zero() || !quote.close.is_sign_positive() {
+                continue;
+            }
+            by_asset
+                .entry(quote.asset_id.clone())
+                .or_default()
+                .insert(quote.timestamp.date_naive(), quote.close);
+        }
+        by_asset
+    }
+
+    fn relative_distance(value: Decimal, target: Decimal) -> Decimal {
+        let target_abs = target.abs();
+        let denominator = if target_abs > Decimal::ONE {
+            target_abs
+        } else {
+            Decimal::ONE
+        };
+        (value - target).abs() / denominator
+    }
+
+    fn quotes_appear_split_adjusted(
+        quote_closes_by_asset_date: &HashMap<String, BTreeMap<NaiveDate, Decimal>>,
+        asset_id: &str,
+        split_date: NaiveDate,
+        ratio: Decimal,
+    ) -> bool {
+        if !ratio.is_sign_positive() || ratio.is_zero() || ratio == Decimal::ONE {
+            return false;
+        }
+
+        let Some(asset_quotes) = quote_closes_by_asset_date.get(asset_id) else {
+            return false;
+        };
+        let Some((_, previous_close)) = asset_quotes.range(..split_date).next_back() else {
+            return false;
+        };
+        let Some((_, split_or_next_close)) = asset_quotes.range(split_date..).next() else {
+            return false;
+        };
+        if previous_close.is_zero()
+            || split_or_next_close.is_zero()
+            || !previous_close.is_sign_positive()
+            || !split_or_next_close.is_sign_positive()
+        {
+            return false;
+        }
+
+        let observed_price_ratio = *previous_close / *split_or_next_close;
+        let adjusted_distance = Self::relative_distance(observed_price_ratio, Decimal::ONE);
+        let raw_distance = Self::relative_distance(observed_price_ratio, ratio);
+
+        adjusted_distance < raw_distance
+    }
+
+    fn quote_adjusted_split_events_for_account(
+        &self,
+        account_id: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        quote_closes_by_asset_date: &HashMap<String, BTreeMap<NaiveDate, Decimal>>,
+    ) -> CoreResult<Vec<QuoteAdjustedSplitEvent>> {
+        let Some(activity_repository) = &self.activity_repository else {
+            return Ok(Vec::new());
+        };
+
+        let timezone = {
+            let timezone_guard = self.timezone.read().unwrap();
+            time_utils::parse_user_timezone_or_default(&timezone_guard)
+        };
+        let account_ids = vec![account_id.to_string()];
+        let (start_utc, end_exclusive_utc) =
+            Self::activity_query_utc_bounds(Some(start_date), Some(end_date));
+        let activities = activity_repository.get_activities_by_account_ids_in_date_range(
+            &account_ids,
+            start_utc.expect("start bound is provided"),
+            end_exclusive_utc.expect("end bound is provided"),
+        )?;
+
+        let mut events = Vec::new();
+        for activity in activities {
+            if !activity.is_posted() || activity.effective_type() != ACTIVITY_TYPE_SPLIT {
+                continue;
+            }
+
+            let split_date = time_utils::activity_date_in_tz(activity.activity_date, timezone);
+            if !Self::activity_date_in_range(split_date, Some(start_date), Some(end_date)) {
+                continue;
+            }
+
+            let Some(asset_id) = activity
+                .asset_id
+                .as_ref()
+                .filter(|asset_id| !asset_id.is_empty())
+            else {
+                continue;
+            };
+            let Some(ratio) = Self::split_ratio_from_activity(&activity) else {
+                continue;
+            };
+
+            if Self::quotes_appear_split_adjusted(
+                quote_closes_by_asset_date,
+                asset_id,
+                split_date,
+                ratio,
+            ) {
+                events.push(QuoteAdjustedSplitEvent {
+                    asset_id: asset_id.clone(),
+                    split_date,
+                    ratio,
+                });
+            }
+        }
+
+        events.sort_by_key(|event| event.split_date);
+        Ok(events)
+    }
+
+    fn apply_quote_adjusted_split_events(
+        snapshot: &mut AccountStateSnapshot,
+        events: &[QuoteAdjustedSplitEvent],
+    ) {
+        for event in events {
+            if snapshot.snapshot_date >= event.split_date {
+                continue;
+            }
+
+            let Some(position) = snapshot.positions.get_mut(&event.asset_id) else {
+                continue;
+            };
+            if position.quantity.is_zero() {
+                continue;
+            }
+
+            position.quantity *= event.ratio;
+            if !position.quantity.is_zero() {
+                position.average_cost = position.total_cost_basis / position.quantity;
+            }
+        }
+    }
+
     fn disposal_cost_basis_base(
         &self,
         disposal: &LotDisposal,
@@ -1317,7 +1496,9 @@ impl ValuationServiceTrait for ValuationService {
         match &mode {
             ValuationRecalcMode::Full => {}
             ValuationRecalcMode::SinceDate(date) => {
-                calculation_start_date = Some(*date);
+                let (start_date, anchor_date) = since_date_calculation_window(*date);
+                calculation_start_date = Some(start_date);
+                incremental_anchor_date = anchor_date;
             }
             ValuationRecalcMode::IncrementalFromLast => {
                 let last_saved_date_opt = self
@@ -1383,12 +1564,18 @@ impl ValuationServiceTrait for ValuationService {
                 }
                 if position_currency != base_curr {
                     required_fx_pairs.insert((position_currency.to_string(), base_curr.clone()));
-                    if !position.lots.is_empty() {
+                }
+                if !position.lots.is_empty() {
+                    if position_currency != account_curr {
+                        acquisition_fx_pairs
+                            .insert((position_currency.to_string(), account_curr.to_string()));
+                    }
+                    if position_currency != base_curr {
                         acquisition_fx_pairs
                             .insert((position_currency.to_string(), base_curr.clone()));
-                        for lot in &position.lots {
-                            acquisition_fx_dates.insert(lot.acquisition_date.date_naive());
-                        }
+                    }
+                    for lot in &position.lots {
+                        acquisition_fx_dates.insert(lot.acquisition_date_key());
                     }
                 }
             }
@@ -1410,6 +1597,13 @@ impl ValuationServiceTrait for ValuationService {
             &required_asset_ids,
             actual_calculation_start_date,
             calculation_end_date,
+        )?;
+        let quote_closes_by_asset_date = Self::quote_close_by_asset_date(&quotes_vec);
+        let quote_adjusted_split_events = self.quote_adjusted_split_events_for_account(
+            account_id,
+            actual_calculation_start_date,
+            calculation_end_date,
+            &quote_closes_by_asset_date,
         )?;
 
         for quote in &quotes_vec {
@@ -1451,9 +1645,14 @@ impl ValuationServiceTrait for ValuationService {
         let mut newly_calculated_valuations: Vec<DailyAccountValuation> = snapshots_to_process
             .into_iter()
             .filter_map(|holdings_snapshot| {
+                let mut holdings_snapshot = holdings_snapshot;
                 let current_date = holdings_snapshot.snapshot_date;
                 let account_id_clone = account_id.to_string();
                 let base_curr_clone = base_curr.clone();
+                Self::apply_quote_adjusted_split_events(
+                    &mut holdings_snapshot,
+                    &quote_adjusted_split_events,
+                );
 
                 let quotes_for_current_date =
                     quotes_by_date.get(&current_date).cloned().unwrap_or_default();
@@ -1774,6 +1973,7 @@ impl ValuationServiceTrait for ValuationService {
 mod tests {
     use super::*;
     use crate::activities::ActivityStatus;
+    use crate::portfolio::snapshot::SnapshotSource;
     use chrono::{DateTime, Utc};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -2076,6 +2276,22 @@ mod tests {
         NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap()
     }
 
+    #[test]
+    fn since_date_recalc_uses_previous_day_as_discarded_anchor() {
+        let (start_date, anchor_date) = since_date_calculation_window(date("2025-03-02"));
+
+        assert_eq!(start_date, date("2025-03-01"));
+        assert_eq!(anchor_date, Some(date("2025-03-01")));
+    }
+
+    #[test]
+    fn since_date_recalc_anchor_saturates_at_min_date() {
+        let (start_date, anchor_date) = since_date_calculation_window(NaiveDate::MIN);
+
+        assert_eq!(start_date, NaiveDate::MIN);
+        assert_eq!(anchor_date, None);
+    }
+
     fn transfer_activity_on_date(
         id: &str,
         activity_type: &str,
@@ -2154,10 +2370,14 @@ mod tests {
     }
 
     fn quote(asset_id: &str, close: Decimal, currency: &str) -> Quote {
+        quote_on_date(asset_id, close, currency, "2026-06-01")
+    }
+
+    fn quote_on_date(asset_id: &str, close: Decimal, currency: &str, date_str: &str) -> Quote {
         Quote {
             id: format!("quote-{asset_id}"),
             asset_id: asset_id.to_string(),
-            timestamp: activity_time("2026-06-01"),
+            timestamp: activity_time(date_str),
             open: close,
             high: close,
             low: close,
@@ -2166,9 +2386,103 @@ mod tests {
             volume: Decimal::ZERO,
             currency: currency.to_string(),
             data_source: "TEST".to_string(),
-            created_at: activity_time("2026-06-01"),
+            created_at: activity_time(date_str),
             notes: None,
         }
+    }
+
+    fn snapshot_with_position(
+        snapshot_date: &str,
+        asset_id: &str,
+        quantity: Decimal,
+    ) -> AccountStateSnapshot {
+        let date = date(snapshot_date);
+        AccountStateSnapshot {
+            id: format!("account-1-{snapshot_date}"),
+            account_id: "account-1".to_string(),
+            snapshot_date: date,
+            currency: "USD".to_string(),
+            positions: HashMap::from([(
+                asset_id.to_string(),
+                Position {
+                    id: format!("POS-{asset_id}-account-1"),
+                    account_id: "account-1".to_string(),
+                    asset_id: asset_id.to_string(),
+                    quantity,
+                    average_cost: dec!(10),
+                    total_cost_basis: quantity * dec!(10),
+                    currency: "USD".to_string(),
+                    inception_date: activity_time(snapshot_date),
+                    ..Position::default()
+                },
+            )]),
+            cash_balances: HashMap::new(),
+            cost_basis: quantity * dec!(10),
+            net_contribution: Decimal::ZERO,
+            net_contribution_base: Decimal::ZERO,
+            cash_total_account_currency: Decimal::ZERO,
+            cash_total_base_currency: Decimal::ZERO,
+            calculated_at: activity_time(snapshot_date).naive_utc(),
+            source: SnapshotSource::Calculated,
+        }
+    }
+
+    #[test]
+    fn detects_split_adjusted_quote_series() {
+        let quote_closes = ValuationService::quote_close_by_asset_date(&[
+            quote_on_date("NFLX", dec!(111.22), "USD", "2025-11-14"),
+            quote_on_date("NFLX", dec!(110.29), "USD", "2025-11-17"),
+        ]);
+
+        assert!(ValuationService::quotes_appear_split_adjusted(
+            &quote_closes,
+            "NFLX",
+            date("2025-11-17"),
+            dec!(10),
+        ));
+    }
+
+    #[test]
+    fn skips_raw_quote_series_around_split() {
+        let quote_closes = ValuationService::quote_close_by_asset_date(&[
+            quote_on_date("NFLX", dec!(1112.20), "USD", "2025-11-14"),
+            quote_on_date("NFLX", dec!(110.29), "USD", "2025-11-17"),
+        ]);
+
+        assert!(!ValuationService::quotes_appear_split_adjusted(
+            &quote_closes,
+            "NFLX",
+            date("2025-11-17"),
+            dec!(10),
+        ));
+    }
+
+    #[test]
+    fn quote_adjusted_split_event_adjusts_pre_split_snapshot_quantity_only() {
+        let mut before_split = snapshot_with_position("2025-11-14", "NFLX", dec!(20));
+        let mut split_day = snapshot_with_position("2025-11-17", "NFLX", dec!(200));
+        let events = vec![QuoteAdjustedSplitEvent {
+            asset_id: "NFLX".to_string(),
+            split_date: date("2025-11-17"),
+            ratio: dec!(10),
+        }];
+
+        ValuationService::apply_quote_adjusted_split_events(&mut before_split, &events);
+        ValuationService::apply_quote_adjusted_split_events(&mut split_day, &events);
+
+        assert_eq!(
+            before_split.positions.get("NFLX").unwrap().quantity,
+            dec!(200)
+        );
+        assert_eq!(
+            before_split.positions.get("NFLX").unwrap().average_cost,
+            dec!(1)
+        );
+        assert_eq!(split_day.positions.get("NFLX").unwrap().quantity, dec!(200));
+        assert_eq!(
+            split_day.positions.get("NFLX").unwrap().average_cost,
+            dec!(10)
+        );
     }
 
     #[test]
@@ -2584,6 +2898,54 @@ mod tests {
         assert_eq!(
             values[1].external_flow_source,
             ExternalFlowSource::RemovedLotBasisFallback
+        );
+    }
+
+    #[test]
+    fn boundary_external_flow_survives_after_since_date_anchor_is_removed() {
+        let anchor_date = date("2025-03-01");
+        let flow_date = date("2025-03-02");
+        let mut values = vec![
+            valuation(
+                "account-1",
+                &anchor_date.to_string(),
+                dec!(49840.28),
+                dec!(36246.26),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            ),
+            valuation(
+                "account-1",
+                &flow_date.to_string(),
+                dec!(81805.52),
+                dec!(68214.49),
+                Decimal::ZERO,
+                Decimal::ZERO,
+            ),
+        ];
+        let mut flows_by_date = HashMap::new();
+        flows_by_date.insert(
+            flow_date,
+            DailyFlowAmounts {
+                inflow: dec!(31968.23),
+                outflow: Decimal::ZERO,
+                source: ExternalFlowSource::QuoteDerivedMarketValue,
+            },
+        );
+
+        ValuationService::set_external_flows_from_activity_map_or_net_contribution_base(
+            &mut values,
+            &flows_by_date,
+        );
+        values.retain(|valuation| valuation.valuation_date != anchor_date);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].valuation_date, flow_date);
+        assert_eq!(values[0].external_inflow_base, dec!(31968.23));
+        assert_eq!(values[0].external_outflow_base, Decimal::ZERO);
+        assert_eq!(
+            values[0].external_flow_source,
+            ExternalFlowSource::QuoteDerivedMarketValue
         );
     }
 

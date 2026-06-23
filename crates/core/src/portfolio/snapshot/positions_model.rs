@@ -77,6 +77,11 @@ pub struct Lot {
     pub id: String,
     pub position_id: String,
     pub acquisition_date: DateTime<Utc>,
+    /// Calendar date in the user's configured timezone at acquisition time.
+    /// Used as the stable key for historical FX lookup. Old snapshots fall
+    /// back to the UTC date.
+    #[serde(default)]
+    pub acquisition_local_date: Option<NaiveDate>,
     pub quantity: Decimal,
     /// The quantity when the lot was first created. Never modified by sells or
     /// splits. Used as the anchor for historical as-of queries (replay reducing
@@ -108,6 +113,19 @@ pub struct Lot {
     /// Stored for audit trail when cross-currency purchases occur.
     /// None when activity currency matches position currency.
     pub fx_rate_to_position: Option<Decimal>,
+    /// FX rate from position currency to the account currency at acquisition.
+    /// When supplied by the broker/user, this preserves book cost exactly.
+    #[serde(default)]
+    pub fx_rate_to_account: Option<Decimal>,
+    /// Account currency that `fx_rate_to_account` converts into.
+    #[serde(default)]
+    pub account_currency: Option<String>,
+    /// FX rate from position currency to the app base currency at acquisition.
+    #[serde(default)]
+    pub fx_rate_to_base: Option<Decimal>,
+    /// Base currency that `fx_rate_to_base` converts into.
+    #[serde(default)]
+    pub base_currency: Option<String>,
     /// The activity that opened this lot, if it corresponds to a real
     /// activity row. Used to populate `LotRecord.open_activity_id` when the
     /// lot is persisted, which then drives the FK CASCADE that removes the
@@ -165,6 +183,35 @@ impl Lot {
         self.quantity * self.effective_split_ratio()
     }
 
+    pub fn acquisition_date_key(&self) -> NaiveDate {
+        self.acquisition_local_date
+            .unwrap_or_else(|| self.acquisition_date.date_naive())
+    }
+
+    pub fn stored_fx_rate_to(&self, target_currency: &str) -> Option<Decimal> {
+        if self
+            .account_currency
+            .as_deref()
+            .is_some_and(|currency| currency.eq_ignore_ascii_case(target_currency))
+        {
+            if let Some(rate) = self.fx_rate_to_account.filter(|rate| !rate.is_zero()) {
+                return Some(rate);
+            }
+        }
+
+        if self
+            .base_currency
+            .as_deref()
+            .is_some_and(|currency| currency.eq_ignore_ascii_case(target_currency))
+        {
+            if let Some(rate) = self.fx_rate_to_base.filter(|rate| !rate.is_zero()) {
+                return Some(rate);
+            }
+        }
+
+        None
+    }
+
     /// Returns the immutable original fee allocated to this lot at acquisition.
     /// Falls back to `acquisition_fees` for snapshots serialized before
     /// `original_acquisition_fees` existed (in which case the lot has not been
@@ -176,6 +223,15 @@ impl Lot {
             self.original_acquisition_fees
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LotBookBasis {
+    pub acquisition_local_date: Option<NaiveDate>,
+    pub fx_rate_to_account: Option<Decimal>,
+    pub account_currency: Option<String>,
+    pub fx_rate_to_base: Option<Decimal>,
+    pub base_currency: Option<String>,
 }
 
 /// Result of a FIFO lot reduction, containing both aggregate values
@@ -400,6 +456,7 @@ impl Position {
             id: activity.id.clone(), // Use activity ID as Lot ID
             position_id: self.id.clone(),
             acquisition_date: activity.activity_date,
+            acquisition_local_date: Some(activity.activity_date.date_naive()),
             quantity,
             original_quantity: quantity,
             cost_basis,        // Store unrounded in position currency
@@ -407,6 +464,10 @@ impl Position {
             acquisition_fees,  // Store unrounded; mutated on partial sells
             original_acquisition_fees: acquisition_fees, // Immutable original
             fx_rate_to_position: None, // No currency conversion in this method
+            fx_rate_to_account: None,
+            account_currency: None,
+            fx_rate_to_base: None,
+            base_currency: None,
             // BUY lot: source activity is the activity itself.
             source_activity_id: Some(activity.id.clone()),
             split_ratio: Decimal::ONE,
@@ -452,6 +513,7 @@ impl Position {
         acquisition_date: DateTime<Utc>,
         fx_rate_used: Option<Decimal>,
         source_activity_id: Option<String>,
+        book_basis: LotBookBasis,
     ) -> Result<Decimal> {
         if !quantity.is_sign_positive() {
             warn!(
@@ -475,6 +537,7 @@ impl Position {
             id: lot_id,
             position_id: self.id.clone(),
             acquisition_date,
+            acquisition_local_date: book_basis.acquisition_local_date,
             quantity,
             original_quantity: quantity,
             cost_basis,
@@ -482,6 +545,10 @@ impl Position {
             acquisition_fees: fee,
             original_acquisition_fees: fee,
             fx_rate_to_position: fx_rate_used,
+            fx_rate_to_account: book_basis.fx_rate_to_account,
+            account_currency: book_basis.account_currency,
+            fx_rate_to_base: book_basis.fx_rate_to_base,
+            base_currency: book_basis.base_currency,
             source_activity_id,
             split_ratio: Decimal::ONE,
         };
@@ -542,6 +609,7 @@ impl Position {
                 },
                 position_id: self.id.clone(),
                 acquisition_date: src_lot.acquisition_date, // Preserve original date
+                acquisition_local_date: src_lot.acquisition_local_date,
                 quantity: src_lot.quantity,
                 original_quantity: src_lot.quantity,
                 cost_basis,
@@ -549,6 +617,26 @@ impl Position {
                 acquisition_fees: fee,
                 original_acquisition_fees: fee,
                 fx_rate_to_position: rate_used,
+                fx_rate_to_account: if fx_rate.is_some() {
+                    None
+                } else {
+                    src_lot.fx_rate_to_account
+                },
+                account_currency: if fx_rate.is_some() {
+                    None
+                } else {
+                    src_lot.account_currency.clone()
+                },
+                fx_rate_to_base: if fx_rate.is_some() {
+                    None
+                } else {
+                    src_lot.fx_rate_to_base
+                },
+                base_currency: if fx_rate.is_some() {
+                    None
+                } else {
+                    src_lot.base_currency.clone()
+                },
                 // The TRANSFER_IN activity owns these sub-lots — deleting it
                 // should cascade-remove them. `lot_id_prefix` is the
                 // TRANSFER_IN activity id.
@@ -695,6 +783,7 @@ impl Position {
                 id: lot.id.clone(),
                 position_id: lot.position_id.clone(),
                 acquisition_date: lot.acquisition_date,
+                acquisition_local_date: lot.acquisition_local_date,
                 quantity: qty_from_this_lot,
                 original_quantity: qty_from_this_lot,
                 cost_basis: cost_basis_removed,
@@ -702,6 +791,10 @@ impl Position {
                 acquisition_fees: fees_removed,
                 original_acquisition_fees: fees_removed,
                 fx_rate_to_position: lot.fx_rate_to_position,
+                fx_rate_to_account: lot.fx_rate_to_account,
+                account_currency: lot.account_currency.clone(),
+                fx_rate_to_base: lot.fx_rate_to_base,
+                base_currency: lot.base_currency.clone(),
                 source_activity_id: lot.source_activity_id.clone(),
                 split_ratio: lot_split_ratio,
             });

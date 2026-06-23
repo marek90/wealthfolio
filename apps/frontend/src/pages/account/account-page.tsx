@@ -36,7 +36,11 @@ import {
   HoldingType,
   isLiabilityAccountType,
 } from "@/lib/constants";
-import { performanceSummaryReturn, performancePeriodPnl } from "@/lib/performance";
+import {
+  performanceSummaryReturn,
+  performancePeriodPnl,
+  simpleReturnFromNetContribution,
+} from "@/lib/performance";
 import { getPerformanceDateRangeForRequest } from "@/lib/performance-date-range";
 import { QueryKeys } from "@/lib/query-keys";
 import { useSettingsContext } from "@/lib/settings-provider";
@@ -332,6 +336,22 @@ const AccountPage = () => {
 
   const currentValuation = valuationHistory?.[valuationHistory.length - 1];
   const currentAccountValuation = liveCurrentValuation?.accounts[0];
+  const metricsValuation = useMemo(() => {
+    if (!currentValuation || !currentAccountValuation) return currentValuation;
+
+    return {
+      ...currentValuation,
+      accountCurrency: currentAccountValuation.accountCurrency,
+      baseCurrency: currentAccountValuation.baseCurrency,
+      cashBalance: currentAccountValuation.cashBalance,
+      investmentMarketValue: currentAccountValuation.investmentMarketValue,
+      totalValue: currentAccountValuation.totalValue,
+      cashBalanceBase: currentAccountValuation.cashBalanceBase,
+      investmentMarketValueBase: currentAccountValuation.investmentMarketValueBase,
+      totalValueBase: currentAccountValuation.totalValueBase,
+      calculatedAt: currentAccountValuation.calculatedAt,
+    };
+  }, [currentAccountValuation, currentValuation]);
   const currentCashBalanceIsNegative = (currentValuation?.cashBalance ?? 0) < 0;
   const shouldLoadCashAuditValuationHistory =
     currentCashBalanceIsNegative && !isHoldingsMode && !isLiabilityAccount;
@@ -404,8 +424,7 @@ const AccountPage = () => {
   );
 
   const selectedCashAuditTarget =
-    negativeCashAuditTarget &&
-    toDateKey(selectedActivityDate, appTimezone) === negativeCashAuditTarget.activityDate
+    toDateKey(selectedActivityDate, appTimezone) === negativeCashAuditTarget?.activityDate
       ? negativeCashAuditTarget
       : null;
   const selectedCashAuditActivities = useMemo(() => {
@@ -416,7 +435,18 @@ const AccountPage = () => {
   }, [appTimezone, cashAuditActivities, selectedCashAuditTarget]);
 
   const frontendGainLossAmount = performancePeriodPnl(accountPerformance);
-  const frontendSimpleReturn = performanceSummaryReturn(accountPerformance);
+  const frontendSummaryReturn = performanceSummaryReturn(accountPerformance);
+  const allTimeReturnAmount = metricsValuation
+    ? metricsValuation.totalValue - metricsValuation.netContribution
+    : null;
+  const allTimeSimpleReturn = simpleReturnFromNetContribution(
+    allTimeReturnAmount,
+    metricsValuation?.netContribution,
+  );
+  const gainLossAmountToDisplay =
+    selectedIntervalCode === "ALL" && !isHoldingsMode
+      ? allTimeReturnAmount
+      : frontendGainLossAmount;
   const displayedValueCurrency =
     account?.currency ??
     currentAccountValuation?.accountCurrency ??
@@ -436,8 +466,10 @@ const AccountPage = () => {
   const isCurrentValuationUnavailable =
     !isCurrentValuationLoading && !currentAccountValuation && Boolean(currentValuationError);
   const performanceCurrency = accountPerformance?.scope.currency ?? baseCurrency;
-  const showPerformanceCurrency =
-    performanceCurrency.toUpperCase() !== displayedValueCurrency.toUpperCase();
+  const gainLossCurrencyToDisplay =
+    selectedIntervalCode === "ALL" && !isHoldingsMode ? displayedValueCurrency : performanceCurrency;
+  const showGainLossCurrency =
+    gainLossCurrencyToDisplay.toUpperCase() !== displayedValueCurrency.toUpperCase();
 
   const chartData: HistoryChartData[] = useMemo(() => {
     if (!valuationHistory) return [];
@@ -464,16 +496,22 @@ const AccountPage = () => {
   const percentageToDisplay = useMemo(() => {
     // Holdings mode has no transaction cash-flow history, so show value return.
     if (isHoldingsMode) {
-      return frontendSimpleReturn;
+      return frontendSummaryReturn;
     }
     if (selectedIntervalCode === "ALL") {
-      return frontendSimpleReturn;
+      return allTimeSimpleReturn;
     }
     if (accountPerformance) {
       return performanceSummaryReturn(accountPerformance);
     }
     return null;
-  }, [accountPerformance, selectedIntervalCode, frontendSimpleReturn, isHoldingsMode]);
+  }, [
+    accountPerformance,
+    selectedIntervalCode,
+    frontendSummaryReturn,
+    allTimeSimpleReturn,
+    isHoldingsMode,
+  ]);
 
   const handleAccountSwitch = (selectedAccount: Account) => {
     navigate(`/accounts/${selectedAccount.id}`);
@@ -731,16 +769,16 @@ const AccountPage = () => {
                           </p>
                           {!hasPerformanceError && (
                             <div className="flex items-center gap-2 text-sm">
-                              {frontendGainLossAmount == null ? (
+                              {gainLossAmountToDisplay == null ? (
                                 <span className="text-muted-foreground text-sm font-light">
                                   N/A
                                 </span>
                               ) : (
                                 <GainAmount
                                   className="text-sm font-light"
-                                  value={frontendGainLossAmount}
-                                  currency={performanceCurrency}
-                                  displayCurrency={showPerformanceCurrency}
+                                  value={gainLossAmountToDisplay}
+                                  currency={gainLossCurrencyToDisplay}
+                                  displayCurrency={showGainLossCurrency}
                                 />
                               )}
                               {percentageToDisplay == null ? (
@@ -818,9 +856,10 @@ const AccountPage = () => {
               </Card>
 
               <div className="flex flex-col space-y-4">
-                <AccountMetrics
-                  valuation={currentValuation}
+	                <AccountMetrics
+	                  valuation={metricsValuation}
                   performance={accountPerformance}
+                  cashCurrencySplit={liveCurrentValuation?.summary.cashCurrencySplit}
                   className="grow"
                   isLoading={isLoading}
                   isPerformanceLoading={isPerformanceHistoryLoading}

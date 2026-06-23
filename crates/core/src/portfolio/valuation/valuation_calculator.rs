@@ -61,6 +61,7 @@ pub fn calculate_valuation(
     let cost_basis_acct_ccy = calculate_cost_basis_acct(
         holdings_snapshot,
         fx_rates_today,
+        fx_rates_by_date,
         target_date,
         normalized_account_currency,
     )?;
@@ -145,6 +146,22 @@ fn calculate_cost_basis_base(
     target_date: NaiveDate,
     base_currency: &str,
 ) -> Result<Decimal> {
+    calculate_cost_basis_in_currency(
+        holdings_snapshot,
+        fx_rates_today,
+        fx_rates_by_date,
+        target_date,
+        base_currency,
+    )
+}
+
+fn calculate_cost_basis_in_currency(
+    holdings_snapshot: &AccountStateSnapshot,
+    fx_rates_today: &DailyFxRateMap,
+    fx_rates_by_date: &HashMap<NaiveDate, DailyFxRateMap>,
+    target_date: NaiveDate,
+    target_currency: &str,
+) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
 
     for position in holdings_snapshot.positions.values() {
@@ -159,7 +176,7 @@ fn calculate_cost_basis_base(
         let position_currency = normalize_currency_code(&position.currency);
 
         if position.lots.is_empty() {
-            if position_currency != base_currency {
+            if position_currency != target_currency {
                 warn!(
                     "Position {} has no materialized lots on {}. Falling back to valuation-date FX for cost basis.",
                     position.asset_id, target_date
@@ -168,7 +185,7 @@ fn calculate_cost_basis_base(
             let rate = get_rate_from_map(
                 fx_rates_today,
                 position_currency,
-                base_currency,
+                target_currency,
                 target_date,
             )?;
             total += position.total_cost_basis * rate;
@@ -179,13 +196,18 @@ fn calculate_cost_basis_base(
             if lot.cost_basis.is_zero() {
                 continue;
             }
-            let acquisition_date = lot.acquisition_date.date_naive();
+            if let Some(rate) = lot.stored_fx_rate_to(target_currency) {
+                total += lot.cost_basis * rate;
+                continue;
+            }
+
+            let acquisition_date = lot.acquisition_date_key();
             let empty_rates = DailyFxRateMap::new();
             let rates = fx_rates_by_date
                 .get(&acquisition_date)
                 .unwrap_or(&empty_rates);
             let rate =
-                get_rate_from_map(rates, position_currency, base_currency, acquisition_date)?;
+                get_rate_from_map(rates, position_currency, target_currency, acquisition_date)?;
             total += lot.cost_basis * rate;
         }
     }
@@ -196,38 +218,17 @@ fn calculate_cost_basis_base(
 fn calculate_cost_basis_acct(
     holdings_snapshot: &AccountStateSnapshot,
     fx_rates_today: &DailyFxRateMap,
+    fx_rates_by_date: &HashMap<NaiveDate, DailyFxRateMap>,
     target_date: NaiveDate,
     account_currency: &str,
 ) -> Result<Decimal> {
-    if !holdings_snapshot
-        .positions
-        .values()
-        .any(|position| position.is_alternative)
-    {
-        return Ok(holdings_snapshot.cost_basis);
-    }
-
-    let mut total = Decimal::ZERO;
-    for position in holdings_snapshot.positions.values() {
-        if position.is_alternative || position.total_cost_basis.is_zero() {
-            continue;
-        }
-
-        let position_currency = normalize_currency_code(&position.currency);
-        let rate = if position_currency == account_currency {
-            Decimal::ONE
-        } else {
-            get_rate_from_map(
-                fx_rates_today,
-                position_currency,
-                account_currency,
-                target_date,
-            )?
-        };
-        total += position.total_cost_basis * rate;
-    }
-
-    Ok(total)
+    calculate_cost_basis_in_currency(
+        holdings_snapshot,
+        fx_rates_today,
+        fx_rates_by_date,
+        target_date,
+        account_currency,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -786,16 +787,18 @@ mod tests {
     }
 
     #[test]
-    fn cost_basis_base_uses_lot_acquisition_date_fx() {
+    fn cost_basis_uses_lot_acquisition_date_fx() {
         let target_date = NaiveDate::from_ymd_opt(2024, 6, 4).unwrap();
         let acquisition_date = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let now = Utc::now();
 
         let lot = Lot {
             id: "lot-1".to_string(),
             position_id: "POS-ETF-acc_1".to_string(),
             acquisition_date,
+            acquisition_local_date: Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
             quantity: dec!(1),
             original_quantity: dec!(1),
             cost_basis: dec!(100),
@@ -803,6 +806,10 @@ mod tests {
             acquisition_fees: Decimal::ZERO,
             original_acquisition_fees: Decimal::ZERO,
             fx_rate_to_position: None,
+            fx_rate_to_account: None,
+            account_currency: None,
+            fx_rate_to_base: None,
+            base_currency: None,
             source_activity_id: Some("buy-1".to_string()),
             split_ratio: Decimal::ONE,
         };
@@ -849,9 +856,25 @@ mod tests {
             HashMap::from([(("EUR".to_string(), "USD".to_string()), dec!(1.5))]),
         )]);
 
+        let quote = Quote {
+            id: "quote-etf".to_string(),
+            asset_id: "ETF".to_string(),
+            timestamp: now,
+            open: dec!(120),
+            high: dec!(120),
+            low: dec!(120),
+            close: dec!(120),
+            adjclose: dec!(120),
+            volume: Decimal::ZERO,
+            currency: "EUR".to_string(),
+            data_source: "MANUAL".to_string(),
+            created_at: now,
+            notes: None,
+        };
+
         let result = calculate_valuation(
             &snapshot,
-            &HashMap::new(),
+            &HashMap::from([("ETF".to_string(), quote)]),
             &fx_rates_today,
             &fx_rates_by_date,
             target_date,
@@ -859,7 +882,107 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.cost_basis, dec!(200));
+        assert_eq!(result.investment_market_value, dec!(240));
+        assert_eq!(result.cost_basis, dec!(150.0));
         assert_eq!(result.cost_basis_base, dec!(150.0));
+    }
+
+    #[test]
+    fn cost_basis_prefers_stored_lot_fx_over_market_fx() {
+        let target_date = NaiveDate::from_ymd_opt(2026, 6, 22).unwrap();
+        let acquisition_date = DateTime::parse_from_rfc3339("2026-06-20T23:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let acquisition_local_date = NaiveDate::from_ymd_opt(2026, 6, 20).unwrap();
+        let now = Utc::now();
+
+        let lot = Lot {
+            id: "lot-1".to_string(),
+            position_id: "POS-US-STOCK-acc_1".to_string(),
+            acquisition_date,
+            acquisition_local_date: Some(acquisition_local_date),
+            quantity: dec!(1),
+            original_quantity: dec!(1),
+            cost_basis: dec!(100),
+            acquisition_price: dec!(100),
+            acquisition_fees: Decimal::ZERO,
+            original_acquisition_fees: Decimal::ZERO,
+            fx_rate_to_position: None,
+            fx_rate_to_account: Some(dec!(1.3586)),
+            account_currency: Some("SGD".to_string()),
+            fx_rate_to_base: Some(dec!(1.3586)),
+            base_currency: Some("SGD".to_string()),
+            source_activity_id: Some("transfer-in-1".to_string()),
+            split_ratio: Decimal::ONE,
+        };
+
+        let snapshot = AccountStateSnapshot {
+            id: "acc_1_2026-06-22".to_string(),
+            account_id: "acc_1".to_string(),
+            snapshot_date: target_date,
+            currency: "SGD".to_string(),
+            positions: HashMap::from([(
+                "US-STOCK".to_string(),
+                Position {
+                    id: "POS-US-STOCK-acc_1".to_string(),
+                    account_id: "acc_1".to_string(),
+                    asset_id: "US-STOCK".to_string(),
+                    quantity: dec!(1),
+                    average_cost: dec!(100),
+                    total_cost_basis: dec!(100),
+                    currency: "USD".to_string(),
+                    inception_date: acquisition_date,
+                    lots: VecDeque::from([lot]),
+                    created_at: acquisition_date,
+                    last_updated: acquisition_date,
+                    is_alternative: false,
+                    contract_multiplier: Decimal::ONE,
+                },
+            )]),
+            cash_balances: HashMap::new(),
+            cost_basis: dec!(135.86),
+            net_contribution: dec!(135.86),
+            net_contribution_base: dec!(135.86),
+            cash_total_account_currency: Decimal::ZERO,
+            cash_total_base_currency: Decimal::ZERO,
+            calculated_at: Utc::now().naive_utc(),
+            source: SnapshotSource::Calculated,
+        };
+
+        let market_rate = dec!(1.2903);
+        let fx_rates_today = HashMap::from([(("USD".to_string(), "SGD".to_string()), market_rate)]);
+        let fx_rates_by_date = HashMap::from([(
+            acquisition_local_date,
+            HashMap::from([(("USD".to_string(), "SGD".to_string()), market_rate)]),
+        )]);
+        let quote = Quote {
+            id: "quote-us-stock".to_string(),
+            asset_id: "US-STOCK".to_string(),
+            timestamp: now,
+            open: dec!(100),
+            high: dec!(100),
+            low: dec!(100),
+            close: dec!(100),
+            adjclose: dec!(100),
+            volume: Decimal::ZERO,
+            currency: "USD".to_string(),
+            data_source: "MANUAL".to_string(),
+            created_at: now,
+            notes: None,
+        };
+
+        let result = calculate_valuation(
+            &snapshot,
+            &HashMap::from([("US-STOCK".to_string(), quote)]),
+            &fx_rates_today,
+            &fx_rates_by_date,
+            target_date,
+            "SGD",
+        )
+        .unwrap();
+
+        assert_eq!(result.investment_market_value, dec!(129.0300));
+        assert_eq!(result.cost_basis, dec!(135.8600));
+        assert_eq!(result.cost_basis_base, dec!(135.8600));
     }
 }

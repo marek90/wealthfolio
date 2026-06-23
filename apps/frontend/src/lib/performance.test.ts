@@ -1,7 +1,12 @@
 import type { PerformanceResult } from "@/lib/types";
 import { describe, expect, it } from "vitest";
 
-import { performancePeriodPnl, performanceSummaryReturn } from "./performance";
+import {
+  performancePeriodPnl,
+  performanceSummaryReturn,
+  shouldDisplayAnnualizedPerformanceReturn,
+  simpleReturnFromNetContribution,
+} from "./performance";
 
 const baseResult = (): PerformanceResult => ({
   scope: { id: "account-1", currency: "CAD" },
@@ -134,5 +139,32 @@ describe("performanceSummaryReturn", () => {
     result.summary!.basisStatus = "partialUnknown";
 
     expect(performanceSummaryReturn(result)).toBe(0.12);
+  });
+});
+
+describe("simpleReturnFromNetContribution", () => {
+  it("divides return amount by net contribution", () => {
+    expect(simpleReturnFromNetContribution(75_000, 188_000)).toBeCloseTo(0.3989, 4);
+  });
+
+  it("returns null when net contribution is not positive", () => {
+    expect(simpleReturnFromNetContribution(75_000, 0)).toBeNull();
+    expect(simpleReturnFromNetContribution(75_000, -100)).toBeNull();
+  });
+});
+
+describe("shouldDisplayAnnualizedPerformanceReturn", () => {
+  it("uses annualized display for periods of at least one year", () => {
+    const result = baseResult();
+    result.period = { startDate: "2025-06-22", endDate: "2026-06-22" };
+
+    expect(shouldDisplayAnnualizedPerformanceReturn(result)).toBe(true);
+  });
+
+  it("keeps period returns for periods under one year", () => {
+    const result = baseResult();
+    result.period = { startDate: "2026-01-01", endDate: "2026-06-30" };
+
+    expect(shouldDisplayAnnualizedPerformanceReturn(result)).toBe(false);
   });
 });

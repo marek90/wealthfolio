@@ -114,6 +114,63 @@ function createPerformance(overrides: Partial<PerformanceResult> = {}): Performa
 }
 
 describe("AccountMetrics", () => {
+  it("shows unrealized P&L after cost basis for transaction accounts with complete basis", () => {
+    render(
+      <AccountMetrics
+        valuation={createValuation({
+          investmentMarketValue: 125,
+          costBasis: 100,
+          cashBalance: 75,
+          totalValue: 200,
+          netContribution: 160,
+          basisStatus: "complete",
+        })}
+        cashCurrencySplit={[
+          { currency: "USD", valueBase: 50, valueLocal: 50, percentage: 66.67 },
+          { currency: "CAD", valueBase: 25, valueLocal: 34, percentage: 33.33 },
+        ]}
+      />,
+    );
+
+    const costBasis = screen.getByText("Cost Basis");
+    const allTimeReturn = screen.getByText("All-time Return");
+    const unrealizedPnl = screen.getByText("Unrealized P&L");
+
+    expect(costBasis).toBeInTheDocument();
+    expect(allTimeReturn).toBeInTheDocument();
+    expect(unrealizedPnl).toBeInTheDocument();
+    expect(
+      costBasis.compareDocumentPosition(allTimeReturn) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      allTimeReturn.compareDocumentPosition(unrealizedPnl) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByText("gain-amount:40")).toBeInTheDocument();
+    expect(screen.getByText("gain-amount:25")).toBeInTheDocument();
+    expect(screen.queryByText("gain-percent:0.25")).not.toBeInTheDocument();
+    expect(screen.getByText("USD")).toBeInTheDocument();
+    expect(screen.getByText("value:USD:50")).toBeInTheDocument();
+    expect(screen.getByText("CAD")).toBeInTheDocument();
+    expect(screen.getByText("value:CAD:34")).toBeInTheDocument();
+  });
+
+  it("does not show unrealized P&L when cost basis is incomplete", () => {
+    render(
+      <AccountMetrics
+        valuation={createValuation({
+          investmentMarketValue: 125,
+          costBasis: 100,
+          basisStatus: "partialUnknown",
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Unrealized P&L")).toBeInTheDocument();
+    expect(screen.getAllByText("N/A").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("gain-amount:25")).not.toBeInTheDocument();
+    expect(screen.queryByText(/gain-percent:/)).not.toBeInTheDocument();
+  });
+
   it("does not derive holdings P&L from raw valuation amounts", () => {
     render(
       <AccountMetrics
