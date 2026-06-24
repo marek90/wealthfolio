@@ -111,6 +111,30 @@ impl AllocationService {
             .collect()
     }
 
+    async fn get_holdings_for_allocation(
+        &self,
+        account_ids: &[String],
+        base_currency: &str,
+        aggregated_account_id: &str,
+        cash_overrides: &HashMap<String, String>,
+    ) -> Result<Vec<Holding>> {
+        if cash_overrides.is_empty() {
+            return self
+                .holdings_service
+                .get_holdings_for_accounts(account_ids, base_currency, aggregated_account_id)
+                .await;
+        }
+        let mut all_holdings: Vec<Holding> = Vec::new();
+        for account_id in account_ids {
+            let holdings = self
+                .holdings_service
+                .get_holdings(account_id, base_currency)
+                .await?;
+            all_holdings.extend(holdings);
+        }
+        Ok(all_holdings)
+    }
+
     fn rollup_to_top_level(taxonomy_id: &str) -> bool {
         matches!(
             taxonomy_id,
@@ -970,9 +994,14 @@ impl AllocationServiceTrait for AllocationService {
         base_currency: &str,
         aggregated_account_id: &str,
     ) -> Result<PortfolioAllocations> {
+        let cash_overrides = self.load_cash_overrides(account_ids);
         let holdings = self
-            .holdings_service
-            .get_holdings_for_accounts(account_ids, base_currency, aggregated_account_id)
+            .get_holdings_for_allocation(
+                account_ids,
+                base_currency,
+                aggregated_account_id,
+                &cash_overrides,
+            )
             .await?;
         self.compute_allocations_from_holdings(&holdings, base_currency, account_ids)
             .await
@@ -1008,11 +1037,15 @@ impl AllocationServiceTrait for AllocationService {
         category_id: &str,
         aggregated_account_id: &str,
     ) -> Result<AllocationHoldings> {
-        let holdings = self
-            .holdings_service
-            .get_holdings_for_accounts(account_ids, base_currency, aggregated_account_id)
-            .await?;
         let overrides = self.load_cash_overrides(account_ids);
+        let holdings = self
+            .get_holdings_for_allocation(
+                account_ids,
+                base_currency,
+                aggregated_account_id,
+                &overrides,
+            )
+            .await?;
         self.compute_holdings_by_allocation_from_holdings(
             &holdings,
             base_currency,
@@ -1030,11 +1063,15 @@ impl AllocationServiceTrait for AllocationService {
         taxonomy_id: &str,
         aggregated_account_id: &str,
     ) -> Result<TaxonomyHoldingContributions> {
-        let holdings = self
-            .holdings_service
-            .get_holdings_for_accounts(account_ids, base_currency, aggregated_account_id)
-            .await?;
         let overrides = self.load_cash_overrides(account_ids);
+        let holdings = self
+            .get_holdings_for_allocation(
+                account_ids,
+                base_currency,
+                aggregated_account_id,
+                &overrides,
+            )
+            .await?;
         self.compute_holding_contributions_for_taxonomy_from_holdings(
             &holdings,
             base_currency,
