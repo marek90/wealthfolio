@@ -1995,6 +1995,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn holdings_by_allocation_excludes_default_cash_from_fixed_income() {
+        let default_cash_account_id = "checking";
+        let fixed_income_cash_account_id = "business-cash";
+        let holdings = vec![
+            make_cash_holding_for_account("CAD", dec!(1000), default_cash_account_id),
+            make_cash_holding_for_account("USD", dec!(2000), fixed_income_cash_account_id),
+        ];
+        let taxonomies = StaticTaxonomies {
+            taxonomies: vec![TaxonomyWithCategories {
+                taxonomy: make_taxonomy("asset_classes", "Asset Classes", true),
+                categories: vec![
+                    make_category_for_taxonomy("asset_classes", "CASH", None),
+                    make_category_for_taxonomy("asset_classes", "CASH_BANK_DEPOSITS", Some("CASH")),
+                    make_category_for_taxonomy("asset_classes", "FIXED_INCOME", None),
+                ],
+            }],
+            assignments_by_asset: HashMap::new(),
+        };
+        let svc = AllocationService::new(Arc::new(NoopHoldings), Arc::new(taxonomies));
+        let overrides = HashMap::from([(
+            fixed_income_cash_account_id.to_string(),
+            "FIXED_INCOME".to_string(),
+        )]);
+
+        let fixed_income = svc
+            .compute_holdings_by_allocation_from_holdings(
+                &holdings,
+                "USD",
+                "asset_classes",
+                "FIXED_INCOME",
+                &overrides,
+            )
+            .await
+            .unwrap();
+        let bank_deposits = svc
+            .compute_holdings_by_allocation_from_holdings(
+                &holdings,
+                "USD",
+                "asset_classes",
+                "CASH_BANK_DEPOSITS",
+                &overrides,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fixed_income.total_value, dec!(2000));
+        assert_eq!(fixed_income.holdings.len(), 1);
+        assert_eq!(fixed_income.holdings[0].symbol, "USD");
+
+        assert_eq!(bank_deposits.total_value, dec!(1000));
+        assert_eq!(bank_deposits.holdings.len(), 1);
+        assert_eq!(bank_deposits.holdings[0].symbol, "CAD");
+    }
+
+    #[tokio::test]
+    async fn holdings_by_allocation_excludes_cash_from_equity_when_overrides_exist() {
+        let default_cash_account_id = "checking";
+        let fixed_income_cash_account_id = "business-cash";
+        let holdings = vec![
+            make_holding("AAPL", dec!(3000)),
+            make_cash_holding_for_account("CAD", dec!(1000), default_cash_account_id),
+            make_cash_holding_for_account("USD", dec!(2000), fixed_income_cash_account_id),
+        ];
+        let taxonomies = StaticTaxonomies {
+            taxonomies: vec![TaxonomyWithCategories {
+                taxonomy: make_taxonomy("asset_classes", "Asset Classes", true),
+                categories: vec![
+                    make_category_for_taxonomy("asset_classes", "EQUITY", None),
+                    make_category_for_taxonomy("asset_classes", "CASH", None),
+                    make_category_for_taxonomy("asset_classes", "CASH_BANK_DEPOSITS", Some("CASH")),
+                    make_category_for_taxonomy("asset_classes", "FIXED_INCOME", None),
+                ],
+            }],
+            assignments_by_asset: HashMap::from([(
+                "AAPL".to_string(),
+                vec![make_assignment("AAPL", "asset_classes", "EQUITY", 10000)],
+            )]),
+        };
+        let svc = AllocationService::new(Arc::new(NoopHoldings), Arc::new(taxonomies));
+        let overrides = HashMap::from([(
+            fixed_income_cash_account_id.to_string(),
+            "FIXED_INCOME".to_string(),
+        )]);
+
+        let equity = svc
+            .compute_holdings_by_allocation_from_holdings(
+                &holdings,
+                "USD",
+                "asset_classes",
+                "EQUITY",
+                &overrides,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(equity.total_value, dec!(3000));
+        assert_eq!(equity.holdings.len(), 1);
+        assert_eq!(equity.holdings[0].symbol, "AAPL");
+        assert_ne!(equity.holdings[0].holding_type, HoldingType::Cash);
+    }
+
+    #[tokio::test]
     async fn holdings_by_allocation_merges_duplicate_non_cash_rows() {
         let holdings = vec![
             Holding {
