@@ -12,8 +12,8 @@ use wealthfolio_core::{
     accounts::AccountPurpose,
     portfolio::allocation_targets::{
         AllocationTarget, AllocationTargetWeight, CalculateRebalancePlanInput, DriftReport,
-        NewAllocationTarget, NewAllocationTargetWeight, RebalancePlan, SaveAllocationTargetResult,
-        ScenarioMode, ScopeType,
+        NewAllocationTarget, NewAllocationTargetWeight, RebalancePlan, RebalanceSellConstraint,
+        SaveAllocationTargetResult, ScenarioMode, ScopeType,
     },
     portfolios::AccountScope,
 };
@@ -257,6 +257,30 @@ async fn calculate_plan(
     Ok(Json(plan))
 }
 
+// ── Sell constraints ─────────────────────────────────────────────────────────
+
+async fn list_sell_constraints_handler(
+    State(state): State<Arc<AppState>>,
+    Path(target_id): Path<String>,
+) -> ApiResult<Json<Vec<RebalanceSellConstraint>>> {
+    let constraints = state
+        .allocation_target_service
+        .list_sell_constraints(&target_id)?;
+    Ok(Json(constraints))
+}
+
+async fn save_sell_constraints_handler(
+    State(state): State<Arc<AppState>>,
+    Path(target_id): Path<String>,
+    Json(constraints): Json<Vec<RebalanceSellConstraint>>,
+) -> ApiResult<Json<Vec<RebalanceSellConstraint>>> {
+    let saved = state
+        .allocation_target_service
+        .save_sell_constraints(&target_id, constraints)
+        .await?;
+    Ok(Json(saved))
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -274,6 +298,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/allocation-targets/{id}/weights",
             get(list_weights).post(save_weights),
+        )
+        .route(
+            "/allocation-targets/{id}/sell-constraints",
+            get(list_sell_constraints_handler).post(save_sell_constraints_handler),
         )
         .route("/allocation-targets/{id}/drift", post(get_drift_for_target))
         .route(

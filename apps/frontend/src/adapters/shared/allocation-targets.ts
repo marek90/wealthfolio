@@ -7,6 +7,7 @@ import type {
   AllocationTarget,
   SaveAllocationTargetResult,
   RebalancePlan,
+  RebalanceSellConstraint,
   ScenarioMode,
 } from "@/lib/types";
 
@@ -81,6 +82,22 @@ export const getAllocationTargetDrift = async (
     targetId,
     filter,
     includeHoldings: options?.includeHoldings ?? false,
+  });
+};
+
+// ── Sell constraints ─────────────────────────────────────────────────────────
+
+export const listSellConstraints = async (targetId: string): Promise<RebalanceSellConstraint[]> => {
+  return invoke<RebalanceSellConstraint[]>("list_sell_constraints", { targetId });
+};
+
+export const saveSellConstraints = async (
+  targetId: string,
+  constraints: RebalanceSellConstraint[],
+): Promise<RebalanceSellConstraint[]> => {
+  return invoke<RebalanceSellConstraint[]>("save_sell_constraints", {
+    targetId,
+    constraints,
   });
 };
 

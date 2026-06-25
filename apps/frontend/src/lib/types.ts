@@ -2498,6 +2498,16 @@ export interface SaveAllocationTargetResult {
   weights: AllocationTargetWeight[];
 }
 
+export type SellConstraintEntityType = "asset" | "account";
+
+export interface RebalanceSellConstraint {
+  id: string;
+  targetId: string;
+  entityType: SellConstraintEntityType;
+  entityId: string;
+  createdAt: string;
+}
+
 export interface DriftRow {
   categoryId: string;
   categoryName: string;
