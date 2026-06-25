@@ -65,6 +65,14 @@ impl RebalanceService {
         Decimal::ONE / Decimal::from(10_i64.pow(Self::currency_fraction_digits(currency)))
     }
 
+    fn asset_key(holding: &crate::portfolio::holdings::Holding) -> String {
+        holding
+            .instrument
+            .as_ref()
+            .map(|i| i.id.clone())
+            .unwrap_or_else(|| holding.id.clone())
+    }
+
     fn base_price_per_unit(holding: &crate::portfolio::holdings::Holding) -> Option<Decimal> {
         if holding.quantity > Decimal::ZERO && holding.market_value.base > Decimal::ZERO {
             return Some(holding.market_value.base / holding.quantity);
@@ -94,25 +102,23 @@ impl RebalanceService {
     /// - Holdings with no usable price: skip (warn `MissingQuote` if whole_shares_only).
     fn build_candidates(
         contributions: &[HoldingAllocationContribution],
-        price_by_holding: &HashMap<String, Decimal>,
+        price_by_asset: &HashMap<String, Decimal>,
         whole_shares_only: bool,
     ) -> (Vec<AssetCandidate>, Vec<RebalanceWarning>) {
-        // Group contributions by holding_id.
-        let mut by_holding: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
+        // Group contributions by asset_id (instrument ID).
+        let mut by_asset: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
         for c in contributions {
-            by_holding.entry(c.holding_id.as_str()).or_default().push(c);
+            by_asset.entry(c.asset_id.as_str()).or_default().push(c);
         }
 
         let mut candidates: Vec<AssetCandidate> = Vec::new();
         let mut warnings: Vec<RebalanceWarning> = Vec::new();
 
-        // Iterate holdings in a stable order so emitted warnings are reproducible
-        // run-to-run (HashMap iteration order is otherwise non-deterministic).
-        let mut holding_ids: Vec<&str> = by_holding.keys().copied().collect();
-        holding_ids.sort_unstable();
+        let mut asset_ids: Vec<&str> = by_asset.keys().copied().collect();
+        asset_ids.sort_unstable();
 
-        for holding_id in holding_ids {
-            let contribs = &by_holding[holding_id];
+        for asset_id in asset_ids {
+            let contribs = &by_asset[asset_id];
             // Skip cash holdings.
             if contribs.iter().all(|c| c.holding_type == HoldingType::Cash) {
                 continue;
@@ -149,7 +155,7 @@ impl RebalanceService {
             }
 
             // Derive price.
-            let price = match price_by_holding.get(holding_id) {
+            let price = match price_by_asset.get(asset_id) {
                 Some(&p) if p > Decimal::ZERO => p,
                 _ => {
                     if whole_shares_only {
@@ -184,7 +190,7 @@ impl RebalanceService {
             }
 
             candidates.push(AssetCandidate {
-                holding_id: holding_id.to_string(),
+                holding_id: asset_id.to_string(),
                 asset_id: repr.asset_id.clone(),
                 symbol: symbol.clone(),
                 name: Some(repr.name.clone()),
@@ -200,20 +206,20 @@ impl RebalanceService {
     /// taxonomy classifications. All holdings with quantity > 0 are eligible.
     fn build_sell_candidates(
         contributions: &[HoldingAllocationContribution],
-        price_by_holding: &HashMap<String, Decimal>,
-        quantity_by_holding: &HashMap<String, Decimal>,
+        price_by_asset: &HashMap<String, Decimal>,
+        quantity_by_asset: &HashMap<String, Decimal>,
     ) -> Vec<SellCandidate> {
-        let mut by_holding: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
+        let mut by_asset: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
         for c in contributions {
-            by_holding.entry(c.holding_id.as_str()).or_default().push(c);
+            by_asset.entry(c.asset_id.as_str()).or_default().push(c);
         }
 
         let mut sell_candidates: Vec<SellCandidate> = Vec::new();
-        let mut holding_ids: Vec<&str> = by_holding.keys().copied().collect();
-        holding_ids.sort_unstable();
+        let mut asset_ids: Vec<&str> = by_asset.keys().copied().collect();
+        asset_ids.sort_unstable();
 
-        for holding_id in holding_ids {
-            let contribs = &by_holding[holding_id];
+        for asset_id in asset_ids {
+            let contribs = &by_asset[asset_id];
             if contribs.iter().all(|c| c.holding_type == HoldingType::Cash) {
                 continue;
             }
@@ -222,11 +228,11 @@ impl RebalanceService {
                 continue;
             }
 
-            let price = match price_by_holding.get(holding_id) {
+            let price = match price_by_asset.get(asset_id) {
                 Some(&p) if p > Decimal::ZERO => p,
                 _ => continue,
             };
-            let qty_owned = match quantity_by_holding.get(holding_id) {
+            let qty_owned = match quantity_by_asset.get(asset_id) {
                 Some(&q) if q > Decimal::ZERO => q,
                 _ => continue,
             };
@@ -249,7 +255,7 @@ impl RebalanceService {
             }
 
             sell_candidates.push(SellCandidate {
-                holding_id: holding_id.to_string(),
+                holding_id: asset_id.to_string(),
                 asset_id: repr.asset_id.clone(),
                 symbol: repr.symbol.clone(),
                 name: Some(repr.name.clone()),
@@ -360,21 +366,22 @@ impl RebalanceServiceTrait for RebalanceService {
             )
             .await?;
 
-        // Price map and quantity map: holding_id → value in base currency.
-        let price_by_holding: HashMap<String, Decimal> = all_holdings
+        // Price map and quantity map keyed by asset (instrument) ID so the keys
+        // match contribution.asset_id regardless of holding aggregation.
+        let price_by_asset: HashMap<String, Decimal> = all_holdings
             .iter()
             .filter(|h| h.holding_type != HoldingType::Cash)
-            .filter_map(|h| Some((h.id.clone(), Self::base_price_per_unit(h)?)))
+            .filter_map(|h| Some((Self::asset_key(h), Self::base_price_per_unit(h)?)))
             .collect();
-        let quantity_by_holding: HashMap<String, Decimal> = all_holdings
+        let quantity_by_asset: HashMap<String, Decimal> = all_holdings
             .iter()
             .filter(|h| h.holding_type != HoldingType::Cash)
-            .map(|h| (h.id.clone(), h.quantity))
+            .map(|h| (Self::asset_key(h), h.quantity))
             .collect();
 
         let (candidates, classification_warnings) = Self::build_candidates(
             &taxonomy_contributions.contributions,
-            &price_by_holding,
+            &price_by_asset,
             profile.whole_shares_only,
         );
 
@@ -385,8 +392,8 @@ impl RebalanceServiceTrait for RebalanceService {
             ) {
             Self::build_sell_candidates(
                 &taxonomy_contributions.contributions,
-                &price_by_holding,
-                &quantity_by_holding,
+                &price_by_asset,
+                &quantity_by_asset,
             )
         } else {
             vec![]
