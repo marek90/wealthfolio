@@ -189,9 +189,8 @@ async fn snapshot_get_health_status() {
 async fn categorization_tool_descriptions_require_widget_for_deterministic_matches() {
     let list_tool = adapted(ListCategorizationContext);
     let list_def = list_tool.definition(String::new()).await;
-    let propose_def = ProposeCategoriesTool::new(env())
-        .definition(String::new())
-        .await;
+    let propose_tool = ProposeCategoriesTool::new(env());
+    let propose_def = Tool::definition(&propose_tool, String::new()).await;
 
     assert!(list_def.description.contains("summary.total > 0"));
     assert!(list_def.description.contains("aiProposals: []"));
