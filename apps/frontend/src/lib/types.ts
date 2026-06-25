@@ -615,6 +615,8 @@ export interface Instrument {
   notes?: string | null;
   quoteMode: QuoteMode;
   preferredProvider?: string | null;
+  isin?: string | null;
+  exchangeMic?: string | null;
 
   // Taxonomy-based classifications
   classifications?: AssetClassifications | null;
