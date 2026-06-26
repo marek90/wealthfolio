@@ -400,6 +400,13 @@ export interface AgentAccessToken {
   revokedAt: string | null;
 }
 
+/** Input for creating a personal access token. */
+export interface CreateAgentAccessTokenInput {
+  name: string;
+  expiresAt?: string;
+  scopes: string[];
+}
+
 /** Created personal access token. `token` is shown exactly once. */
 export interface CreatedAgentAccessToken {
   token: string;

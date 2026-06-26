@@ -52,6 +52,7 @@ export type {
   McpConnectionInfo,
   AgentAccessStatus,
   AgentAccessToken,
+  CreateAgentAccessTokenInput,
   CreatedAgentAccessToken,
   AgentAuditEntry,
   AgentAuditPage,

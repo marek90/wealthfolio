@@ -4,6 +4,7 @@ import type {
   AgentAccessToken,
   AgentAuditPage,
   AgentAuditQuery,
+  CreateAgentAccessTokenInput,
   CreatedAgentAccessToken,
   McpConnectionInfo,
   McpRotatedToken,
@@ -30,14 +31,14 @@ export const listAgentAccessTokens = async (): Promise<AgentAccessToken[]> => {
   }
 };
 
-export const createAgentAccessToken = async (input: {
-  name: string;
-  expiresAt?: string;
-}): Promise<CreatedAgentAccessToken> => {
+export const createAgentAccessToken = async (
+  input: CreateAgentAccessTokenInput,
+): Promise<CreatedAgentAccessToken> => {
   try {
     return await invoke<CreatedAgentAccessToken>("create_agent_access_token", {
       name: input.name,
       expiresAt: input.expiresAt,
+      scopes: input.scopes,
     });
   } catch (error) {
     logger.error("Error creating personal access token.");

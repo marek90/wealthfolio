@@ -95,6 +95,7 @@ describe("useAccessTokens", () => {
       await result.current.createMutation.mutateAsync({
         name: "Claude",
         expiresAt: "2026-09-09T00:00:00.000Z",
+        scopes: ["accounts:read"],
       });
       await result.current.revokeMutation.mutateAsync("t1");
     });
@@ -102,6 +103,7 @@ describe("useAccessTokens", () => {
     expect(adapterMocks.createAgentAccessToken).toHaveBeenCalledWith({
       name: "Claude",
       expiresAt: "2026-09-09T00:00:00.000Z",
+      scopes: ["accounts:read"],
     });
     expect(adapterMocks.revokeAgentAccessToken).toHaveBeenCalledWith("t1");
   });

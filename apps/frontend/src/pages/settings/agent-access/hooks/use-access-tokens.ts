@@ -1,6 +1,6 @@
 import {
   createAgentAccessToken,
-  isWeb,
+  type CreateAgentAccessTokenInput,
   listAgentAccessTokens,
   logger,
   revokeAgentAccessToken,
@@ -15,11 +15,10 @@ export function useAccessTokens() {
   const tokensQuery = useQuery({
     queryKey: [QueryKeys.AGENT_ACCESS_TOKENS],
     queryFn: listAgentAccessTokens,
-    enabled: isWeb,
   });
 
   const createMutation = useMutation({
-    mutationFn: (input: { name: string; expiresAt?: string }) => createAgentAccessToken(input),
+    mutationFn: (input: CreateAgentAccessTokenInput) => createAgentAccessToken(input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [QueryKeys.AGENT_ACCESS_TOKENS] });
     },

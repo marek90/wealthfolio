@@ -9,18 +9,19 @@ import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Separator } from "@wealthfolio/ui/components/ui/separator";
 import { SettingsHeader } from "../settings-header";
 import { AuditLogTable } from "./components/audit-log-table";
-import { ConnectClientCard } from "./components/copy-config-card";
 import { McpServerCard } from "./components/mcp-server-card";
 import { PatTable } from "./components/pat-table";
 import { useMcpServer } from "./hooks/use-mcp-server";
 
 function DesktopAgentAccess() {
   const { status } = useMcpServer();
+  const serverUrl =
+    status?.running && status.port ? `http://127.0.0.1:${status.port}/mcp` : undefined;
 
   return (
     <>
       <McpServerCard />
-      <ConnectClientCard running={status?.running ?? false} />
+      <PatTable serverUrl={serverUrl} />
       <AuditLogTable
         disabledNotice={
           status && !status.auditEnabled
@@ -70,7 +71,7 @@ function WebAgentAccess() {
           </AlertDescription>
         </Alert>
       )}
-      <PatTable />
+      <PatTable serverUrl={status?.endpoint} />
       <AuditLogTable
         disabledNotice={
           status && !status.auditEnabled
@@ -89,7 +90,7 @@ export default function AgentAccessPage() {
     <div className="space-y-6">
       <SettingsHeader
         heading="Agent Access"
-        text="Let AI agents read your portfolio over MCP. Access is read-only."
+        text="Let AI agents access your portfolio over MCP. Each token's scopes control what it can do."
       />
       <Separator />
 

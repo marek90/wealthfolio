@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import {
@@ -13,19 +12,10 @@ import { Label } from "@wealthfolio/ui/components/ui/label";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { Switch } from "@wealthfolio/ui/components/ui/switch";
 import { useMcpServer } from "../hooks/use-mcp-server";
-import { TokenRotateDialog } from "./token-rotate-dialog";
 
 export function McpServerCard() {
-  const {
-    status,
-    isLoading,
-    isError,
-    refetchStatus,
-    setEnabledMutation,
-    setAuditEnabledMutation,
-    rotateTokenMutation,
-  } = useMcpServer();
-  const [rotateOpen, setRotateOpen] = useState(false);
+  const { status, isLoading, isError, refetchStatus, setEnabledMutation, setAuditEnabledMutation } =
+    useMcpServer();
 
   if (isError) {
     return (
@@ -129,34 +119,10 @@ export function McpServerCard() {
           />
         </div>
 
-        <div className="space-y-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={rotateTokenMutation.isPending}
-            onClick={() => setRotateOpen(true)}
-          >
-            <Icons.RefreshCw className="mr-2 h-4 w-4" />
-            Rotate token
-          </Button>
-          <p className="text-muted-foreground text-xs">
-            Disabling stops the server but keeps the token valid. Rotate the token to revoke access.
-          </p>
-        </div>
+        <p className="text-muted-foreground text-xs">
+          Disabling stops the server but keeps tokens valid. Revoke a token below to cut off access.
+        </p>
       </CardContent>
-
-      <TokenRotateDialog
-        open={rotateOpen}
-        onOpenChange={(open) => {
-          setRotateOpen(open);
-          if (!open) rotateTokenMutation.reset();
-        }}
-        onRotate={async () => {
-          const result = await rotateTokenMutation.mutateAsync();
-          return result.token;
-        }}
-        isRotating={rotateTokenMutation.isPending}
-      />
     </Card>
   );
 }

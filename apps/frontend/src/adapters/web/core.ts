@@ -1983,8 +1983,12 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     }
     // Agent Access
     case "create_agent_access_token": {
-      const { name, expiresAt } = payload as { name: string; expiresAt?: string };
-      body = JSON.stringify({ name, expiresAt });
+      const { name, expiresAt, scopes } = payload as {
+        name: string;
+        expiresAt?: string;
+        scopes: string[];
+      };
+      body = JSON.stringify({ name, expiresAt, scopes });
       break;
     }
     case "revoke_agent_access_token": {

@@ -19,51 +19,7 @@ import {
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { toast } from "@wealthfolio/ui/components/ui/use-toast";
 import { useMcpConnectionInfo } from "../hooks/use-mcp-server";
-
-interface ClientPreset {
-  id: string;
-  label: string;
-  build: (url: string, token: string) => unknown;
-}
-
-const CLIENT_PRESETS: ClientPreset[] = [
-  {
-    id: "mcp-servers",
-    label: "Claude / Cursor (mcpServers)",
-    build: (url, token) => ({
-      mcpServers: {
-        wealthfolio: {
-          type: "http",
-          url,
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      },
-    }),
-  },
-  {
-    id: "jan",
-    label: "Jan",
-    build: (url, token) => ({
-      Wealthfolio: {
-        active: true,
-        args: [],
-        command: "",
-        env: {},
-        headers: { Authorization: `Bearer ${token}` },
-        type: "http",
-        url,
-      },
-    }),
-  },
-  {
-    id: "generic",
-    label: "Generic HTTP",
-    build: (url, token) => ({
-      url,
-      headers: { Authorization: `Bearer ${token}` },
-    }),
-  },
-];
+import { buildClientConfig, CLIENT_PRESETS } from "../mcp-client-config";
 
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
@@ -112,7 +68,7 @@ export function ConnectClientCard({ running }: { running: boolean }) {
   }
 
   const preset = CLIENT_PRESETS.find((entry) => entry.id === presetId) ?? CLIENT_PRESETS[0];
-  const configJson = info ? JSON.stringify(preset.build(info.url, info.token), null, 2) : "";
+  const configJson = info ? buildClientConfig(preset.id, info.url, info.token) : "";
 
   return (
     <Card>

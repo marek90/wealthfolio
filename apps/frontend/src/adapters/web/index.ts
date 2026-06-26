@@ -31,6 +31,7 @@ export type {
   BackendSyncReconcileReadyResult,
   BackendSyncSnapshotUploadResult,
   BackendSyncStateResult,
+  CreateAgentAccessTokenInput,
   CreatedAgentAccessToken,
   DataExportResult,
   EphemeralKeyPair,

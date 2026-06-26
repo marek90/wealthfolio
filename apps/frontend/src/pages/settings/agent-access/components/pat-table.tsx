@@ -31,11 +31,31 @@ import {
   TableRow,
 } from "@wealthfolio/ui/components/ui/table";
 import { useAccessTokens } from "../hooks/use-access-tokens";
+import { matchPreset, scopeLabel } from "../scopes";
 import { PatCreateDialog } from "./pat-create-dialog";
 
 const formatDate = (value: string | null) => (value ? format(new Date(value), "MMM d, yyyy") : "—");
 
-export function PatTable() {
+function ScopeBadges({ scopes }: { scopes: string[] }) {
+  if (scopes.length === 0) {
+    return <span className="text-muted-foreground text-xs">—</span>;
+  }
+  const preset = matchPreset(scopes);
+  if (preset) {
+    return <Badge variant="secondary">{preset.label}</Badge>;
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {scopes.map((scope) => (
+        <Badge key={scope} variant="secondary" className="font-normal">
+          {scopeLabel(scope)}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+export function PatTable({ serverUrl }: { serverUrl?: string } = {}) {
   const { tokens, isLoading, createMutation, revokeMutation } = useAccessTokens();
   const [createOpen, setCreateOpen] = useState(false);
   const [revoking, setRevoking] = useState<AgentAccessToken | null>(null);
@@ -47,7 +67,7 @@ export function PatTable() {
           <div className="space-y-1.5">
             <CardTitle>Personal access tokens</CardTitle>
             <CardDescription>
-              Read-only tokens for MCP clients connecting to this server&apos;s /mcp endpoint.
+              Scoped tokens for MCP clients connecting to the /mcp endpoint.
             </CardDescription>
           </div>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
@@ -85,7 +105,7 @@ export function PatTable() {
                   <TableCell className="font-medium">{token.name}</TableCell>
                   <TableCell className="font-mono text-xs">wfp_{token.tokenPrefix}…</TableCell>
                   <TableCell>
-                    <Badge variant="secondary">Read-only</Badge>
+                    <ScopeBadges scopes={token.scopes} />
                   </TableCell>
                   <TableCell className="whitespace-nowrap">{formatDate(token.createdAt)}</TableCell>
                   <TableCell className="whitespace-nowrap">
@@ -126,6 +146,7 @@ export function PatTable() {
           return created.token;
         }}
         isCreating={createMutation.isPending}
+        serverUrl={serverUrl}
       />
 
       <AlertDialog open={revoking !== null} onOpenChange={(value) => !value && setRevoking(null)}>

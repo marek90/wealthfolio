@@ -5,6 +5,7 @@ import type {
   AgentAuditEntry,
   AgentAuditPage,
   AgentAuditQuery,
+  CreateAgentAccessTokenInput,
   CreatedAgentAccessToken,
   McpConnectionInfo,
   McpRotatedToken,
@@ -121,19 +122,42 @@ export const purgeAgentAuditLog = async (): Promise<number> => {
   }
 };
 
-// Personal access tokens are a web-server concept.
-
+// The web-server status concept doesn't apply to the embedded desktop server.
 export const getAgentAccessStatus = (): Promise<AgentAccessStatus> =>
-  Promise.reject(new Error("Personal access tokens are managed in the web app"));
+  Promise.reject(new Error("Agent access status is reported via the MCP server status on desktop"));
 
-export const listAgentAccessTokens = (): Promise<AgentAccessToken[]> =>
-  Promise.reject(new Error("Personal access tokens are managed in the web app"));
+// Personal access tokens mirror the web token endpoints, backed by the embedded
+// MCP server's token store.
 
-export const createAgentAccessToken = (_input: {
-  name: string;
-  expiresAt?: string;
-}): Promise<CreatedAgentAccessToken> =>
-  Promise.reject(new Error("Personal access tokens are managed in the web app"));
+export const listAgentAccessTokens = async (): Promise<AgentAccessToken[]> => {
+  try {
+    return await invoke<AgentAccessToken[]>("mcp_list_tokens");
+  } catch (error) {
+    logger.error("Error listing personal access tokens.");
+    throw error;
+  }
+};
 
-export const revokeAgentAccessToken = (_id: string): Promise<void> =>
-  Promise.reject(new Error("Personal access tokens are managed in the web app"));
+export const createAgentAccessToken = async (
+  input: CreateAgentAccessTokenInput,
+): Promise<CreatedAgentAccessToken> => {
+  try {
+    return await invoke<CreatedAgentAccessToken>("mcp_create_token", {
+      name: input.name,
+      expiresAt: input.expiresAt,
+      scopes: input.scopes,
+    });
+  } catch (error) {
+    logger.error("Error creating personal access token.");
+    throw error;
+  }
+};
+
+export const revokeAgentAccessToken = async (id: string): Promise<void> => {
+  try {
+    await invoke<void>("mcp_revoke_token", { id });
+  } catch (error) {
+    logger.error("Error revoking personal access token.");
+    throw error;
+  }
+};
