@@ -9,6 +9,7 @@ use crate::errors::{Error as CoreError, Result as CoreResult};
 use crate::portfolio::allocation::{AllocationServiceTrait, HoldingAllocationContribution};
 use crate::portfolio::holdings::{HoldingType, HoldingsServiceTrait};
 
+use super::cash::{deployable_cash_from_contributions, tracked_cash};
 use super::drift_service::DriftServiceTrait;
 use super::model::{
     CalculateRebalancePlanInput, RebalancePlan, RebalanceWarning, RebalanceWarningKind,
@@ -63,13 +64,6 @@ impl RebalanceService {
 
     fn currency_rounding_tolerance(currency: &str) -> Decimal {
         Decimal::ONE / Decimal::from(10_i64.pow(Self::currency_fraction_digits(currency)))
-    }
-
-    fn default_cash_category_id(taxonomy_id: &str) -> Option<&'static str> {
-        match taxonomy_id {
-            "asset_classes" | "instrument_type" => Some("CASH"),
-            _ => None,
-        }
     }
 
     fn base_price_per_unit(holding: &crate::portfolio::holdings::Holding) -> Option<Decimal> {
@@ -318,19 +312,9 @@ impl RebalanceServiceTrait for RebalanceService {
             )
             .await?;
 
-        // Deployable cash = cash holdings that are classified in the default
-        // cash category.  Cash tagged into another sleeve (e.g. Fixed Income)
-        // is excluded — it belongs to that sleeve and must not be double-counted.
-        let default_cash_cat = Self::default_cash_category_id(&profile.taxonomy_id);
-        let cash_in_scope: Decimal = taxonomy_contributions
-            .contributions
-            .iter()
-            .filter(|c| {
-                c.holding_type == HoldingType::Cash
-                    && default_cash_cat.is_none_or(|cat| c.category_id == cat)
-            })
-            .map(|c| c.value)
-            .sum();
+        let cash_in_scope =
+            deployable_cash_from_contributions(&profile.taxonomy_id, &taxonomy_contributions)
+                .unwrap_or_else(|| tracked_cash(&all_holdings));
 
         let available_cash = if input.available_cash > cash_in_scope {
             let overage = input.available_cash - cash_in_scope;
@@ -920,6 +904,64 @@ mod tests {
             err.to_string().contains("exceeds tracked cash in scope"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn asset_class_tagged_cash_is_not_deployable() {
+        let cash = make_cash_holding(dec!(1000), "USD");
+        let tagged_cash = make_contribution(&cash, "FIXED_INCOME", dec!(1000));
+        let svc = RebalanceService::new(
+            Arc::new(MockTargetService {
+                profile: make_profile(RebalanceGoal::ExactTarget, false),
+            }),
+            Arc::new(MockDriftService {
+                report: make_report(
+                    vec![make_drift_row("FIXED_INCOME", 10000, 0, dec!(1000))],
+                    dec!(1000),
+                ),
+            }),
+            Arc::new(MockAllocationService {
+                contributions: make_contributions(vec![tagged_cash]),
+            }),
+            Arc::new(MockHoldingsService {
+                holdings: vec![cash],
+            }),
+        );
+
+        let err = svc
+            .calculate_plan(make_input(dec!(1000)))
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("exceeds tracked cash in scope"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_cash_taxonomy_uses_tracked_cash_for_deployment() {
+        let total = dec!(10000);
+        let h = make_holding("h1", "XLK", dec!(10), dec!(6000));
+        let c = make_contribution(&h, "45", dec!(6000));
+        let mut profile = make_profile(RebalanceGoal::ExactTarget, false);
+        profile.taxonomy_id = "industries_gics".to_string();
+        let mut contributions = make_contributions(vec![c]);
+        contributions.taxonomy_id = "industries_gics".to_string();
+        let svc = RebalanceService::new(
+            Arc::new(MockTargetService { profile }),
+            Arc::new(MockDriftService {
+                report: make_report(vec![make_drift_row("45", 6000, 7000, total)], total),
+            }),
+            Arc::new(MockAllocationService { contributions }),
+            Arc::new(MockHoldingsService {
+                holdings: vec![make_cash_holding(dec!(1000), "USD"), h],
+            }),
+        );
+
+        let plan = svc.calculate_plan(make_input(dec!(1000))).await.unwrap();
+
+        assert_eq!(plan.available_cash, dec!(1000));
     }
 
     #[tokio::test]

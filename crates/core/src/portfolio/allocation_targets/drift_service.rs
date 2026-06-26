@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use crate::errors::Result as CoreResult;
 use crate::portfolio::allocation::{AllocationServiceTrait, TaxonomyHoldingContributions};
-use crate::portfolio::holdings::HoldingType;
+use crate::portfolio::holdings::{HoldingType, HoldingsServiceTrait};
 use crate::taxonomies::TaxonomyServiceTrait;
 
+use super::cash::{deployable_cash_from_contributions, tracked_cash};
 use super::model::{
     AllocationTarget, AllocationTargetWeight, DriftHoldingRow, DriftHoldingsReport, DriftReport,
     DriftRow, DriftStatus, ScopeType,
@@ -56,6 +57,7 @@ pub trait DriftServiceTrait: Send + Sync {
 pub struct DriftService {
     target_service: Arc<dyn AllocationTargetServiceTrait>,
     allocation_service: Arc<dyn AllocationServiceTrait>,
+    holdings_service: Option<Arc<dyn HoldingsServiceTrait>>,
     taxonomy_service: Option<Arc<dyn TaxonomyServiceTrait>>,
 }
 
@@ -67,8 +69,17 @@ impl DriftService {
         Self {
             target_service,
             allocation_service,
+            holdings_service: None,
             taxonomy_service: None,
         }
+    }
+
+    pub fn with_holdings_service(
+        mut self,
+        holdings_service: Arc<dyn HoldingsServiceTrait>,
+    ) -> Self {
+        self.holdings_service = Some(holdings_service);
+        self
     }
 
     /// Provide the taxonomy service so category display names/colors can be
@@ -392,20 +403,18 @@ impl DriftService {
             Self::build_drift_holdings_report(target_id, base_currency, &weights, &contributions)
         });
 
-        let default_cash_cat = match target.taxonomy_id.as_str() {
-            "asset_classes" => Some("CASH"),
-            "instrument_type" => Some("CASH"),
-            _ => None,
+        let deployable_cash = if let Some(cash) =
+            deployable_cash_from_contributions(&target.taxonomy_id, &contributions)
+        {
+            cash
+        } else if let Some(holdings_service) = self.holdings_service.as_ref() {
+            let holdings = holdings_service
+                .get_holdings_for_accounts(account_ids, base_currency, aggregated_account_id)
+                .await?;
+            tracked_cash(&holdings)
+        } else {
+            Decimal::ZERO
         };
-        let deployable_cash: Decimal = contributions
-            .contributions
-            .iter()
-            .filter(|c| {
-                c.holding_type == HoldingType::Cash
-                    && default_cash_cat.is_none_or(|cat| c.category_id == cat)
-            })
-            .map(|c| c.value)
-            .sum();
 
         Ok(DriftReport {
             target_id: target_id.to_string(),
@@ -472,7 +481,7 @@ mod tests {
         NewAllocationTargetWeight, RebalanceGoal, SaveAllocationTargetResult, ScopeType,
         TriggerType,
     };
-    use crate::portfolio::holdings::HoldingType;
+    use crate::portfolio::holdings::{Holding, HoldingType, MonetaryValue};
     use async_trait::async_trait;
     use rust_decimal_macros::dec;
 
@@ -535,6 +544,47 @@ mod tests {
             value,
             percentage: rust_decimal::Decimal::ZERO,
             children: vec![],
+        }
+    }
+
+    fn make_cash_holding(amount: Decimal, currency: &str) -> Holding {
+        Holding {
+            id: "cash".to_string(),
+            account_id: "acc".to_string(),
+            holding_type: HoldingType::Cash,
+            instrument: None,
+            asset_kind: None,
+            quantity: amount,
+            open_date: None,
+            lots: None,
+            contract_multiplier: Decimal::ONE,
+            local_currency: currency.to_string(),
+            base_currency: currency.to_string(),
+            fx_rate: None,
+            market_value: MonetaryValue {
+                local: amount,
+                base: amount,
+            },
+            cost_basis: None,
+            price: None,
+            purchase_price: None,
+            unrealized_gain: None,
+            unrealized_gain_pct: None,
+            realized_gain: None,
+            realized_gain_pct: None,
+            total_gain: None,
+            total_gain_pct: None,
+            income: None,
+            total_return: None,
+            total_return_pct: None,
+            return_basis: None,
+            day_change: None,
+            day_change_pct: None,
+            prev_close_value: None,
+            weight: Decimal::ZERO,
+            as_of_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            metadata: None,
+            source_account_ids: vec![],
         }
     }
 
@@ -757,6 +807,44 @@ mod tests {
         }
     }
 
+    struct MockHoldingsService {
+        holdings: Vec<Holding>,
+    }
+
+    #[async_trait]
+    impl crate::portfolio::holdings::HoldingsServiceTrait for MockHoldingsService {
+        async fn get_holdings(
+            &self,
+            _account_id: &str,
+            _base_currency: &str,
+        ) -> CoreResult<Vec<Holding>> {
+            Ok(self.holdings.clone())
+        }
+        async fn get_holdings_for_accounts(
+            &self,
+            _account_ids: &[String],
+            _base_currency: &str,
+            _aggregated_account_id: &str,
+        ) -> CoreResult<Vec<Holding>> {
+            Ok(self.holdings.clone())
+        }
+        async fn get_holding(
+            &self,
+            _holding_id: &str,
+            _account_id: &str,
+            _base_currency: &str,
+        ) -> CoreResult<Option<Holding>> {
+            Ok(self.holdings.first().cloned())
+        }
+        async fn holdings_from_snapshot(
+            &self,
+            _snapshot: &crate::portfolio::snapshot::AccountStateSnapshot,
+            _base_currency: &str,
+        ) -> CoreResult<Vec<Holding>> {
+            Ok(self.holdings.clone())
+        }
+    }
+
     fn make_service(
         target: AllocationTarget,
         weights: Vec<AllocationTargetWeight>,
@@ -785,6 +873,23 @@ mod tests {
                 contributions,
             }),
         )
+    }
+
+    fn make_service_with_holdings(
+        target: AllocationTarget,
+        weights: Vec<AllocationTargetWeight>,
+        allocations: PortfolioAllocations,
+        holdings: Vec<Holding>,
+    ) -> DriftService {
+        let contributions = contributions_from_allocations(&target.taxonomy_id, &allocations);
+        DriftService::new(
+            Arc::new(MockTargetService { target, weights }),
+            Arc::new(MockAllocationService {
+                allocations,
+                contributions,
+            }),
+        )
+        .with_holdings_service(Arc::new(MockHoldingsService { holdings }))
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────
@@ -1215,6 +1320,30 @@ mod tests {
         assert_eq!(technology.current_bps, 7000);
         assert_eq!(technology.target_bps, 7000);
         assert_eq!(technology.status, DriftStatus::InBand);
+    }
+
+    #[tokio::test]
+    async fn non_asset_taxonomy_deployable_cash_uses_tracked_cash() {
+        let svc = make_service_with_holdings(
+            target_with_taxonomy("industries_gics", 500),
+            vec![weight("45", 7000), weight("40", 3000)],
+            PortfolioAllocations {
+                sectors: taxonomy_alloc(
+                    "industries_gics",
+                    vec![cat("45", dec!(7000)), cat("40", dec!(3000))],
+                ),
+                total_value: dec!(12000),
+                ..Default::default()
+            },
+            vec![make_cash_holding(dec!(2000), "USD")],
+        );
+
+        let report = svc
+            .get_drift_report_for_target("p1", &[], "USD", "agg")
+            .await
+            .unwrap();
+
+        assert_eq!(report.deployable_cash, dec!(2000));
     }
 
     #[tokio::test]

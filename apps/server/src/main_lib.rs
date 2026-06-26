@@ -468,6 +468,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             allocation_target_service.clone(),
             allocation_service.clone(),
         )
+        .with_holdings_service(holdings_service.clone())
         .with_taxonomy_service(taxonomy_service.clone()),
     );
     let rebalance_service: Arc<
