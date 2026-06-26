@@ -66,6 +66,14 @@ impl RebalanceService {
         Decimal::ONE / Decimal::from(10_i64.pow(Self::currency_fraction_digits(currency)))
     }
 
+    fn asset_key(holding: &crate::portfolio::holdings::Holding) -> String {
+        holding
+            .instrument
+            .as_ref()
+            .map(|i| i.id.clone())
+            .unwrap_or_else(|| holding.id.clone())
+    }
+
     fn base_price_per_unit(holding: &crate::portfolio::holdings::Holding) -> Option<Decimal> {
         if holding.quantity > Decimal::ZERO && holding.market_value.base > Decimal::ZERO {
             return Some(holding.market_value.base / holding.quantity);
@@ -95,25 +103,24 @@ impl RebalanceService {
     /// - Holdings with no usable price: skip (warn `MissingQuote` if whole_shares_only).
     fn build_candidates(
         contributions: &[HoldingAllocationContribution],
-        price_by_holding: &HashMap<String, Decimal>,
+        price_by_asset: &HashMap<String, Decimal>,
+        quantity_by_asset: &HashMap<String, Decimal>,
         whole_shares_only: bool,
     ) -> (Vec<AssetCandidate>, Vec<RebalanceWarning>) {
-        // Group contributions by holding_id.
-        let mut by_holding: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
+        // Group contributions by asset_id (instrument ID).
+        let mut by_asset: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
         for c in contributions {
-            by_holding.entry(c.holding_id.as_str()).or_default().push(c);
+            by_asset.entry(c.asset_id.as_str()).or_default().push(c);
         }
 
         let mut candidates: Vec<AssetCandidate> = Vec::new();
         let mut warnings: Vec<RebalanceWarning> = Vec::new();
 
-        // Iterate holdings in a stable order so emitted warnings are reproducible
-        // run-to-run (HashMap iteration order is otherwise non-deterministic).
-        let mut holding_ids: Vec<&str> = by_holding.keys().copied().collect();
-        holding_ids.sort_unstable();
+        let mut asset_ids: Vec<&str> = by_asset.keys().copied().collect();
+        asset_ids.sort_unstable();
 
-        for holding_id in holding_ids {
-            let contribs = &by_holding[holding_id];
+        for asset_id in asset_ids {
+            let contribs = &by_asset[asset_id];
             // Skip cash holdings.
             if contribs.iter().all(|c| c.holding_type == HoldingType::Cash) {
                 continue;
@@ -150,7 +157,7 @@ impl RebalanceService {
             }
 
             // Derive price.
-            let price = match price_by_holding.get(holding_id) {
+            let price = match price_by_asset.get(asset_id) {
                 Some(&p) if p > Decimal::ZERO => p,
                 _ => {
                     if whole_shares_only {
@@ -167,11 +174,12 @@ impl RebalanceService {
                 }
             };
 
-            // Build exposure per share: contribution.value / quantity, excluding __UNKNOWN__.
-            let qty = repr.quantity;
-            if qty <= Decimal::ZERO {
-                continue;
-            }
+            // Build exposure per share: contribution.value / owned quantity,
+            // excluding __UNKNOWN__.
+            let qty = match quantity_by_asset.get(asset_id) {
+                Some(&q) if q > Decimal::ZERO => q,
+                _ => continue,
+            };
             let mut exposure_per_share: HashMap<String, Decimal> = HashMap::new();
             for c in contribs.iter() {
                 if c.category_id == "__UNKNOWN__" {
@@ -185,7 +193,7 @@ impl RebalanceService {
             }
 
             candidates.push(AssetCandidate {
-                holding_id: holding_id.to_string(),
+                holding_id: asset_id.to_string(),
                 asset_id: repr.asset_id.clone(),
                 symbol: symbol.clone(),
                 name: Some(repr.name.clone()),
@@ -201,20 +209,20 @@ impl RebalanceService {
     /// taxonomy classifications. All holdings with quantity > 0 are eligible.
     fn build_sell_candidates(
         contributions: &[HoldingAllocationContribution],
-        price_by_holding: &HashMap<String, Decimal>,
-        quantity_by_holding: &HashMap<String, Decimal>,
+        price_by_asset: &HashMap<String, Decimal>,
+        quantity_by_asset: &HashMap<String, Decimal>,
     ) -> Vec<SellCandidate> {
-        let mut by_holding: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
+        let mut by_asset: HashMap<&str, Vec<&HoldingAllocationContribution>> = HashMap::new();
         for c in contributions {
-            by_holding.entry(c.holding_id.as_str()).or_default().push(c);
+            by_asset.entry(c.asset_id.as_str()).or_default().push(c);
         }
 
         let mut sell_candidates: Vec<SellCandidate> = Vec::new();
-        let mut holding_ids: Vec<&str> = by_holding.keys().copied().collect();
-        holding_ids.sort_unstable();
+        let mut asset_ids: Vec<&str> = by_asset.keys().copied().collect();
+        asset_ids.sort_unstable();
 
-        for holding_id in holding_ids {
-            let contribs = &by_holding[holding_id];
+        for asset_id in asset_ids {
+            let contribs = &by_asset[asset_id];
             if contribs.iter().all(|c| c.holding_type == HoldingType::Cash) {
                 continue;
             }
@@ -223,34 +231,30 @@ impl RebalanceService {
                 continue;
             }
 
-            let price = match price_by_holding.get(holding_id) {
+            let price = match price_by_asset.get(asset_id) {
                 Some(&p) if p > Decimal::ZERO => p,
                 _ => continue,
             };
-            let qty_owned = match quantity_by_holding.get(holding_id) {
+            let qty_owned = match quantity_by_asset.get(asset_id) {
                 Some(&q) if q > Decimal::ZERO => q,
                 _ => continue,
             };
-
-            let repr = contribs[0];
-            let qty = repr.quantity;
-            if qty <= Decimal::ZERO {
-                continue;
-            }
 
             let mut exposure_per_share: HashMap<String, Decimal> = HashMap::new();
             for c in contribs.iter() {
                 if c.category_id == "__UNKNOWN__" {
                     continue;
                 }
-                *exposure_per_share.entry(c.category_id.clone()).or_default() += c.value / qty;
+                *exposure_per_share.entry(c.category_id.clone()).or_default() +=
+                    c.value / qty_owned;
             }
             if exposure_per_share.is_empty() {
                 continue;
             }
 
+            let repr = contribs[0];
             sell_candidates.push(SellCandidate {
-                holding_id: holding_id.to_string(),
+                holding_id: asset_id.to_string(),
                 asset_id: repr.asset_id.clone(),
                 symbol: repr.symbol.clone(),
                 name: Some(repr.name.clone()),
@@ -358,21 +362,23 @@ impl RebalanceServiceTrait for RebalanceService {
             });
         }
 
-        // Price map and quantity map: holding_id → value in base currency.
-        let price_by_holding: HashMap<String, Decimal> = all_holdings
+        // Price map and quantity map keyed by asset (instrument) ID so the keys
+        // match contribution.asset_id regardless of holding aggregation.
+        let price_by_asset: HashMap<String, Decimal> = all_holdings
             .iter()
             .filter(|h| h.holding_type != HoldingType::Cash)
-            .filter_map(|h| Some((h.id.clone(), Self::base_price_per_unit(h)?)))
+            .filter_map(|h| Some((Self::asset_key(h), Self::base_price_per_unit(h)?)))
             .collect();
-        let quantity_by_holding: HashMap<String, Decimal> = all_holdings
+        let quantity_by_asset: HashMap<String, Decimal> = all_holdings
             .iter()
             .filter(|h| h.holding_type != HoldingType::Cash)
-            .map(|h| (h.id.clone(), h.quantity))
+            .map(|h| (Self::asset_key(h), h.quantity))
             .collect();
 
         let (candidates, classification_warnings) = Self::build_candidates(
             &taxonomy_contributions.contributions,
-            &price_by_holding,
+            &price_by_asset,
+            &quantity_by_asset,
             profile.whole_shares_only,
         );
 
@@ -383,8 +389,8 @@ impl RebalanceServiceTrait for RebalanceService {
             ) {
             Self::build_sell_candidates(
                 &taxonomy_contributions.contributions,
-                &price_by_holding,
-                &quantity_by_holding,
+                &price_by_asset,
+                &quantity_by_asset,
             )
         } else {
             vec![]
@@ -863,6 +869,85 @@ mod tests {
             aggregated_account_id: "agg".to_string(),
             scenario_mode: ScenarioMode::CashFlowOnly,
         }
+    }
+
+    #[test]
+    fn split_classification_single_holding_keeps_weighted_exposure_per_share() {
+        let h = make_holding("asset-a", "AAA", dec!(10), dec!(1000));
+        let c_equity = make_contribution(&h, "equity", dec!(600));
+        let c_bond = make_contribution(&h, "bond", dec!(400));
+        let price_by_asset = HashMap::from([("asset-a".to_string(), dec!(100))]);
+        let quantity_by_asset = HashMap::from([("asset-a".to_string(), dec!(10))]);
+
+        let (candidates, warnings) = RebalanceService::build_candidates(
+            &[c_equity, c_bond],
+            &price_by_asset,
+            &quantity_by_asset,
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].exposure_per_share.get("equity").copied(),
+            Some(dec!(60))
+        );
+        assert_eq!(
+            candidates[0].exposure_per_share.get("bond").copied(),
+            Some(dec!(40))
+        );
+    }
+
+    #[test]
+    fn same_asset_account_rows_use_combined_quantity_for_buy_exposure() {
+        let mut h1 = make_holding("SEC-acc-1-asset-a", "AAA", dec!(5), dec!(500));
+        let mut h2 = make_holding("SEC-acc-2-asset-a", "AAA", dec!(5), dec!(500));
+        h1.account_id = "acc-1".to_string();
+        h2.account_id = "acc-2".to_string();
+        h1.instrument.as_mut().unwrap().id = "asset-a".to_string();
+        h2.instrument.as_mut().unwrap().id = "asset-a".to_string();
+        let c1 = make_contribution(&h1, "equity", dec!(500));
+        let c2 = make_contribution(&h2, "equity", dec!(500));
+        let price_by_asset = HashMap::from([("asset-a".to_string(), dec!(100))]);
+        let quantity_by_asset = HashMap::from([("asset-a".to_string(), dec!(10))]);
+
+        let (candidates, warnings) = RebalanceService::build_candidates(
+            &[c1, c2],
+            &price_by_asset,
+            &quantity_by_asset,
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].exposure_per_share.get("equity").copied(),
+            Some(dec!(100))
+        );
+    }
+
+    #[test]
+    fn same_asset_account_rows_use_combined_quantity_for_sell_exposure() {
+        let mut h1 = make_holding("SEC-acc-1-asset-a", "AAA", dec!(5), dec!(500));
+        let mut h2 = make_holding("SEC-acc-2-asset-a", "AAA", dec!(5), dec!(500));
+        h1.account_id = "acc-1".to_string();
+        h2.account_id = "acc-2".to_string();
+        h1.instrument.as_mut().unwrap().id = "asset-a".to_string();
+        h2.instrument.as_mut().unwrap().id = "asset-a".to_string();
+        let c1 = make_contribution(&h1, "equity", dec!(500));
+        let c2 = make_contribution(&h2, "equity", dec!(500));
+        let price_by_asset = HashMap::from([("asset-a".to_string(), dec!(100))]);
+        let quantity_by_asset = HashMap::from([("asset-a".to_string(), dec!(10))]);
+
+        let sell_candidates =
+            RebalanceService::build_sell_candidates(&[c1, c2], &price_by_asset, &quantity_by_asset);
+
+        assert_eq!(sell_candidates.len(), 1);
+        assert_eq!(sell_candidates[0].quantity_owned, dec!(10));
+        assert_eq!(
+            sell_candidates[0].exposure_per_share.get("equity").copied(),
+            Some(dec!(100))
+        );
     }
 
     // ── Cash enforcement tests (unchanged behaviour from PR-A) ────────────────
