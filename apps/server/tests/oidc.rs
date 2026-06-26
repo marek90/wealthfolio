@@ -162,8 +162,18 @@ async fn oidc_only_mode_status_and_login_redirect() {
         location.contains("code_challenge="),
         "PKCE challenge present"
     );
+    assert!(
+        location.contains("code_challenge_method=S256"),
+        "PKCE must use S256, not plain, got {location}"
+    );
     assert!(location.contains("state="), "CSRF state present");
     assert!(location.contains("nonce="), "nonce present");
+    assert!(
+        location.contains("response_type=code"),
+        "authorization code flow"
+    );
+    // Configured scopes (WF_OIDC_SCOPES=openid email) are requested.
+    assert!(location.contains("scope=openid"), "openid scope present");
 
     let set_cookie = login
         .headers()
@@ -174,11 +184,44 @@ async fn oidc_only_mode_status_and_login_redirect() {
     assert!(set_cookie.contains("wf_oidc_tx="), "tx cookie present");
     assert!(set_cookie.contains("HttpOnly"), "tx cookie is HttpOnly");
     assert!(
+        set_cookie.contains("SameSite=Lax"),
+        "tx cookie must be SameSite=Lax so it survives the IdP redirect"
+    );
+    assert!(
         set_cookie.contains("Path=/api/v1/auth/oidc"),
         "tx cookie is path-scoped"
     );
 
-    // 4. Logout with no OIDC session cookie falls back to a local logout
+    // 4. Callback error paths return a generic ?oidc_error redirect (no panic,
+    //    no leakage). Both go through the rate-limited route, so set ConnectInfo.
+    let mut no_params = Request::builder()
+        .uri("/api/v1/auth/oidc/callback")
+        .body(Body::empty())
+        .unwrap();
+    no_params
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let no_params_resp = app.clone().oneshot(no_params).await.unwrap();
+    assert_eq!(
+        no_params_resp.headers().get(header::LOCATION).unwrap(),
+        "/?oidc_error=oidc_missing_params",
+    );
+
+    // code+state present but no transaction cookie -> treated as expired.
+    let mut no_tx = Request::builder()
+        .uri("/api/v1/auth/oidc/callback?code=abc&state=xyz")
+        .body(Body::empty())
+        .unwrap();
+    no_tx
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let no_tx_resp = app.clone().oneshot(no_tx).await.unwrap();
+    assert_eq!(
+        no_tx_resp.headers().get(header::LOCATION).unwrap(),
+        "/?oidc_error=oidc_expired",
+    );
+
+    // 5. Logout with no OIDC session cookie falls back to a local logout
     //    (redirect to "/") and clears the session cookie.
     let logout = app
         .clone()

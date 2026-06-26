@@ -213,38 +213,55 @@ impl OidcManager {
         .set_redirect_uri(self.redirect_url.clone())
     }
 
-    /// Whether the authenticated subject/email is permitted. With no allowlist
-    /// configured, any IdP-authenticated user is allowed (warned at startup).
+    /// Whether the authenticated subject/email is permitted. Extracts the claim
+    /// primitives and delegates to [`check_allowlist`] (kept pure for testing).
     fn is_allowed(&self, claims: &CoreIdTokenClaims) -> bool {
-        if self.allowed_emails.is_empty() && self.allowed_subs.is_empty() {
-            return true;
-        }
-        if !self.allowed_subs.is_empty() {
-            let sub = claims.subject().as_str();
-            if self.allowed_subs.iter().any(|s| s == sub) {
-                return true;
-            }
-        }
-        if !self.allowed_emails.is_empty() {
-            // Only trust the email claim when the IdP asserts it is verified.
-            // An unverified email can be attacker-chosen on multi-tenant or
-            // self-signup IdPs, which would otherwise bypass the allowlist.
-            if claims.email_verified() == Some(true) {
-                if let Some(email) = claims.email() {
-                    let email = email.as_str().to_ascii_lowercase();
-                    if self.allowed_emails.iter().any(|e| e == &email) {
-                        return true;
-                    }
-                }
-            } else if claims.email().is_some() {
-                tracing::warn!(
-                    "OIDC: ignoring an unverified `email` claim for the allowlist. \
-                     Prefer WF_OIDC_ALLOWED_SUBS, or use an IdP that sets email_verified."
-                );
-            }
-        }
-        false
+        check_allowlist(
+            &self.allowed_emails,
+            &self.allowed_subs,
+            claims.subject().as_str(),
+            claims.email().map(|e| e.as_str()),
+            claims.email_verified(),
+        )
     }
+}
+
+/// Allowlist policy, split from claim extraction so it is unit-testable.
+///
+/// - No allowlist configured → any authenticated subject is allowed.
+/// - `sub` match → allowed (stable, issuer-scoped; the strong control).
+/// - `email` match → allowed **only** when the IdP asserts `email_verified`,
+///   since an unverified email can be attacker-chosen on multi-tenant or
+///   self-signup IdPs. `allowed_emails` is expected already lowercased.
+fn check_allowlist(
+    allowed_emails: &[String],
+    allowed_subs: &[String],
+    sub: &str,
+    email: Option<&str>,
+    email_verified: Option<bool>,
+) -> bool {
+    if allowed_emails.is_empty() && allowed_subs.is_empty() {
+        return true;
+    }
+    if !allowed_subs.is_empty() && allowed_subs.iter().any(|s| s == sub) {
+        return true;
+    }
+    if !allowed_emails.is_empty() {
+        if email_verified == Some(true) {
+            if let Some(email) = email {
+                let email = email.to_ascii_lowercase();
+                if allowed_emails.iter().any(|e| e == &email) {
+                    return true;
+                }
+            }
+        } else if email.is_some() {
+            tracing::warn!(
+                "OIDC: ignoring an unverified `email` claim for the allowlist. \
+                 Prefer WF_OIDC_ALLOWED_SUBS, or use an IdP that sets email_verified."
+            );
+        }
+    }
+    false
 }
 
 /// Per-login transaction state stored (encrypted) in the `wf_oidc_tx` cookie.
@@ -684,6 +701,95 @@ mod tests {
         assert_eq!(url, "https://idp.example.com/logout?client_id=my-client");
         assert!(!url.contains("id_token_hint"));
         assert!(!url.contains("post_logout_redirect_uri"));
+    }
+
+    #[test]
+    fn allowlist_open_when_unconfigured() {
+        // No allowlist configured -> any authenticated subject is allowed.
+        assert!(check_allowlist(
+            &[],
+            &[],
+            "sub-1",
+            Some("a@b.com"),
+            Some(true)
+        ));
+        assert!(check_allowlist(&[], &[], "sub-1", None, None));
+    }
+
+    #[test]
+    fn allowlist_sub_matching() {
+        let subs = vec!["sub-123".to_string()];
+        assert!(check_allowlist(&[], &subs, "sub-123", None, None));
+        assert!(!check_allowlist(&[], &subs, "sub-999", None, None));
+    }
+
+    #[test]
+    fn allowlist_email_requires_verified() {
+        let emails = vec!["owner@example.com".to_string()];
+        // Verified + match -> allowed (case-insensitive).
+        assert!(check_allowlist(
+            &emails,
+            &[],
+            "s",
+            Some("owner@example.com"),
+            Some(true)
+        ));
+        assert!(check_allowlist(
+            &emails,
+            &[],
+            "s",
+            Some("Owner@Example.COM"),
+            Some(true)
+        ));
+        // Unverified email is NOT trusted, even if it matches (the security fix).
+        assert!(!check_allowlist(
+            &emails,
+            &[],
+            "s",
+            Some("owner@example.com"),
+            Some(false)
+        ));
+        // Missing email_verified claim -> not trusted.
+        assert!(!check_allowlist(
+            &emails,
+            &[],
+            "s",
+            Some("owner@example.com"),
+            None
+        ));
+        // Verified but a different email -> denied.
+        assert!(!check_allowlist(
+            &emails,
+            &[],
+            "s",
+            Some("attacker@example.com"),
+            Some(true)
+        ));
+        // No email claim at all -> denied.
+        assert!(!check_allowlist(&emails, &[], "s", None, Some(true)));
+    }
+
+    #[test]
+    fn allowlist_sub_match_bypasses_email_rules() {
+        let emails = vec!["owner@example.com".to_string()];
+        let subs = vec!["sub-1".to_string()];
+        // A sub match is sufficient regardless of email/verification state.
+        assert!(check_allowlist(&emails, &subs, "sub-1", None, None));
+        assert!(check_allowlist(
+            &emails,
+            &subs,
+            "sub-1",
+            Some("x@y.com"),
+            Some(false)
+        ));
+        // Neither sub nor a verified email matches -> denied.
+        assert!(!check_allowlist(
+            &emails,
+            &subs,
+            "sub-2",
+            Some("x@y.com"),
+            Some(true)
+        ));
     }
 
     #[test]
