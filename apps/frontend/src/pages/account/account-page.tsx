@@ -388,7 +388,13 @@ const AccountPage = () => {
     return undefined;
   }, [account, supportsPerformance]);
 
-  const performanceDateRange = getPerformanceDateRangeForRequest(dateRange, selectedIntervalCode);
+  // When a brush selection is active, use the brushed window for the performance
+  // history so the gain/loss numbers reflect what's visible in the chart.
+  // useValuationHistory (chart data fetch) is unaffected — brush stays client-side.
+  const isBrushed = !!brushDisplayRange;
+  const performanceDateRange = isBrushed
+    ? brushDisplayRange
+    : getPerformanceDateRangeForRequest(dateRange, selectedIntervalCode);
 
   // Pass tracking mode to the performance hook for SOTA calculations
   const {
@@ -527,7 +533,7 @@ const AccountPage = () => {
     metricsValuation?.netContribution,
   );
   const gainLossAmountToDisplay =
-    selectedIntervalCode === "ALL" && !isHoldingsMode
+    selectedIntervalCode === "ALL" && !isHoldingsMode && !isBrushed
       ? allTimeReturnAmount
       : frontendGainLossAmount;
   const displayedValueCurrency =
@@ -550,7 +556,7 @@ const AccountPage = () => {
     !isCurrentValuationLoading && !currentAccountValuation && Boolean(currentValuationError);
   const performanceCurrency = accountPerformance?.scope.currency ?? baseCurrency;
   const gainLossCurrencyToDisplay =
-    selectedIntervalCode === "ALL" && !isHoldingsMode
+    selectedIntervalCode === "ALL" && !isHoldingsMode && !isBrushed
       ? displayedValueCurrency
       : performanceCurrency;
   const showGainLossCurrency =
@@ -603,7 +609,7 @@ const AccountPage = () => {
     if (isHoldingsMode) {
       return frontendSummaryReturn;
     }
-    if (selectedIntervalCode === "ALL") {
+    if (selectedIntervalCode === "ALL" && !isBrushed) {
       return allTimeSimpleReturn;
     }
     if (accountPerformance) {
@@ -616,6 +622,7 @@ const AccountPage = () => {
     frontendSummaryReturn,
     allTimeSimpleReturn,
     isHoldingsMode,
+    isBrushed,
   ]);
 
   const handleAccountSwitch = (selectedAccount: Account) => {

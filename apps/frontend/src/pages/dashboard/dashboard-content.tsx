@@ -115,10 +115,14 @@ export function DashboardContent() {
   const { settings } = useSettingsContext();
   const baseCurrency = settings?.baseCurrency ?? "USD";
 
-  const startDate =
-    !isAllTime && dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined;
-  const endDate = !isAllTime && dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined;
-  const datesReady = isAllTime || (!!startDate && !!endDate);
+  // When a brush selection is active, use the brushed window for the performance
+  // summary so the gain/loss numbers reflect what's visible in the chart.
+  // valuationHistoryRange (chart data fetch) is unaffected — brush stays client-side.
+  const perfFrom = brushDisplayRange?.from ?? (!isAllTime ? dateRange?.from : undefined);
+  const perfTo = brushDisplayRange?.to ?? (!isAllTime ? dateRange?.to : undefined);
+  const startDate = perfFrom ? format(perfFrom, "yyyy-MM-dd") : undefined;
+  const endDate = perfTo ? format(perfTo, "yyyy-MM-dd") : undefined;
+  const datesReady = (isAllTime && !brushDisplayRange) || (!!startDate && !!endDate);
 
   const { data: portfolioPerformance, isLoading: isPortfolioPerformanceLoading } = useQuery({
     queryKey: [QueryKeys.PERFORMANCE_SUMMARY, "dashboard", "all", startDate, endDate],
@@ -258,9 +262,11 @@ export function DashboardContent() {
                     )}
                   </>
                 )}
-                {selectedIntervalDescription && (
+                {(selectedIntervalDescription || brushDisplayRange) && (
                   <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
-                    {selectedIntervalDescription}
+                    {brushDisplayRange?.from && brushDisplayRange?.to
+                      ? `${format(brushDisplayRange.from, "MMM d, yyyy")} – ${format(brushDisplayRange.to, "MMM d, yyyy")}`
+                      : selectedIntervalDescription}
                   </span>
                 )}
               </div>
