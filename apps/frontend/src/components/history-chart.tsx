@@ -5,7 +5,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay } from "@wealthfolio/ui";
 import { useId, useMemo, useRef, useState } from "react";
-import { Area, AreaChart, Brush, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Brush, ReferenceArea, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
 import {
   HistoryChartActiveDot,
@@ -157,6 +157,12 @@ export function HistoryChart({
     [data, brushIndices, startIndex, endIndex],
   );
 
+  // Drag-to-select state (FB1). Three refs track in-progress drag without re-renders.
+  const isDraggingRef = useRef(false);
+  const didDragRef = useRef(false);
+  const dragRangeRef = useRef<{ start: number; end: number } | null>(null);
+  const [dragRange, setDragRange] = useState<{ start: number; end: number } | null>(null);
+
   const scaleConfig = useMemo(
     () =>
       getAutomaticHistoryChartScale(visibleData, {
@@ -271,6 +277,12 @@ export function HistoryChart({
       setHoveredMarker(markerDateSet.has(String(chartState.activeLabel)));
     }
 
+    if (isDraggingRef.current && chartState.activeTooltipIndex != null) {
+      const newEnd = Number(chartState.activeTooltipIndex);
+      dragRangeRef.current = dragRangeRef.current ? { ...dragRangeRef.current, end: newEnd } : null;
+      setDragRange((prev) => (prev ? { ...prev, end: newEnd } : null));
+    }
+
     maybeTriggerScrubHaptic(chartState);
   };
 
@@ -280,7 +292,11 @@ export function HistoryChart({
         data={data}
         stackOffset="sign"
         style={{
-          cursor: showMarkers && isChartHovered && hoveredMarker ? "pointer" : undefined,
+          cursor: dragRange
+            ? "col-resize"
+            : showMarkers && isChartHovered && hoveredMarker
+              ? "pointer"
+              : undefined,
         }}
         margin={{
           top: 0,
@@ -293,9 +309,39 @@ export function HistoryChart({
           setIsChartHovered(false);
           setHoveredMarker(false);
           resetTouchScrubState();
+          if (isDraggingRef.current) {
+            isDraggingRef.current = false;
+            dragRangeRef.current = null;
+            setDragRange(null);
+          }
         }}
         onMouseMove={handleChartMove}
+        onMouseDown={(chartState) => {
+          const rawIdx = (chartState as unknown as MouseHandlerDataParam).activeTooltipIndex;
+          if (rawIdx == null) return;
+          const idx = Number(rawIdx);
+          isDraggingRef.current = true;
+          dragRangeRef.current = { start: idx, end: idx };
+          setDragRange({ start: idx, end: idx });
+        }}
+        onMouseUp={() => {
+          if (!isDraggingRef.current) return;
+          isDraggingRef.current = false;
+          const drag = dragRangeRef.current;
+          dragRangeRef.current = null;
+          setDragRange(null);
+          if (drag && drag.start !== drag.end) {
+            const lo = Math.min(drag.start, drag.end);
+            const hi = Math.max(drag.start, drag.end);
+            setBrushIndices({ startIndex: lo, endIndex: hi });
+            didDragRef.current = true;
+          }
+        }}
         onClick={(chartState) => {
+          if (didDragRef.current) {
+            didDragRef.current = false;
+            return;
+          }
           if (!showMarkers || chartState?.activeLabel == null) return;
           const clickedDate = String(chartState.activeLabel);
           if (markerDateSet.has(clickedDate)) {
@@ -423,13 +469,23 @@ export function HistoryChart({
             strokeWidth={2}
           />
         )}
+        {dragRange && data.length > 0 && (
+          <ReferenceArea
+            x1={data[Math.min(dragRange.start, dragRange.end)]?.date}
+            x2={data[Math.max(dragRange.start, dragRange.end)]?.date}
+            fill="var(--primary)"
+            fillOpacity={0.1}
+            stroke="var(--primary)"
+            strokeOpacity={0.4}
+          />
+        )}
         {data.length > 1 && (
           <Brush
             dataKey="date"
             height={24}
             travellerWidth={8}
             gap={1}
-            stroke="var(--border)"
+            stroke="var(--foreground)"
             fill="transparent"
             startIndex={startIndex}
             endIndex={endIndex}
