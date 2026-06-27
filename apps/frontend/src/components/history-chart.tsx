@@ -39,6 +39,9 @@ interface HistoryChartProps {
   netContributionMaxDomainSpanRatio?: number;
   /** Keeps narrow ranges from zooming too aggressively. Ratio is relative to the visible center. */
   minDomainSpanRatio?: number;
+  /** Called when the brush selection changes. Receives the visible date window (YYYY-MM-DD strings),
+   *  or undefined when the brush spans the full dataset. Client-side only — no refetch. */
+  onVisibleRangeChange?: (range: { from: string; to: string } | undefined) => void;
 }
 
 interface TooltipEntry {
@@ -131,6 +134,7 @@ export function HistoryChart({
   scaleMode,
   netContributionMaxDomainSpanRatio,
   minDomainSpanRatio,
+  onVisibleRangeChange,
 }: HistoryChartProps) {
   const { triggerHaptic } = useHapticFeedback();
   const { isBalanceHidden } = useBalancePrivacy();
@@ -335,6 +339,7 @@ export function HistoryChart({
             const hi = Math.max(drag.start, drag.end);
             setBrushIndices({ startIndex: lo, endIndex: hi });
             didDragRef.current = true;
+            onVisibleRangeChange?.({ from: data[lo].date, to: data[hi].date });
           }
         }}
         onClick={(chartState) => {
@@ -491,7 +496,10 @@ export function HistoryChart({
             endIndex={endIndex}
             onChange={(range) => {
               if (range?.startIndex != null && range?.endIndex != null) {
-                setBrushIndices({ startIndex: range.startIndex, endIndex: range.endIndex });
+                const si = range.startIndex;
+                const ei = range.endIndex;
+                setBrushIndices({ startIndex: si, endIndex: ei });
+                onVisibleRangeChange?.({ from: data[si].date, to: data[ei].date });
               }
             }}
           />

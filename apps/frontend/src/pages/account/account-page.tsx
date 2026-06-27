@@ -173,6 +173,7 @@ const AccountPage = () => {
   const [dateRange, setDateRange] = useState<DateRange | undefined>(getInitialDateRange());
   const [selectedIntervalCode, setSelectedIntervalCode] =
     useState<TimePeriod>(INITIAL_INTERVAL_CODE);
+  const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
   const [desktopSelectorOpen, setDesktopSelectorOpen] = useState(false);
   const [mobileSelectorOpen, setMobileSelectorOpen] = useState(false);
   const [actionPaletteOpen, setActionPaletteOpen] = useState(false);
@@ -587,12 +588,14 @@ const AccountPage = () => {
   ) => {
     setSelectedIntervalCode(code);
     setDateRange(range);
+    setBrushDisplayRange(undefined);
   };
 
   // Callback for the custom date range picker (sets the same dateRange the
   // period buttons use, so the existing useValuationHistory hook refetches it).
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
     setDateRange({ from: range?.from, to: range?.to });
+    setBrushDisplayRange(undefined);
   };
 
   const percentageToDisplay = useMemo(() => {
@@ -1039,6 +1042,11 @@ const AccountPage = () => {
                           isLoading={false}
                           showMarkers={showSnapshotMarkers}
                           snapshotDates={markerDates}
+                          onVisibleRangeChange={(r) =>
+                            setBrushDisplayRange(
+                              r ? { from: new Date(r.from), to: new Date(r.to) } : undefined,
+                            )
+                          }
                           onMarkerClick={(date) => {
                             if (isHoldingsMode) {
                               // Holdings mode: open edit holdings sheet
@@ -1060,7 +1068,7 @@ const AccountPage = () => {
                           />
                           <ChartRangePicker
                             className="z-10 shrink-0"
-                            value={pickerValue}
+                            value={brushDisplayRange ?? pickerValue}
                             onChange={handleCustomRangeChange}
                           />
                         </div>

@@ -84,6 +84,7 @@ export function DashboardContent() {
   );
   const [selectedInterval, setSelectedInterval] = useState<UITimePeriod>(() => intervalCode);
   const [isAllTime, setIsAllTime] = useState<boolean>(() => intervalCode === "ALL");
+  const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
 
   const { holdings: allHoldings, isLoading: isHoldingsLoading } = useHoldings({ type: "all" });
   const {
@@ -190,6 +191,7 @@ export function DashboardContent() {
     setSelectedIntervalDescription(description);
     setDateRange(range);
     setIsAllTime(code === "ALL");
+    setBrushDisplayRange(undefined);
   };
 
   // Callback for the custom date range picker (sets the same dateRange the
@@ -197,6 +199,7 @@ export function DashboardContent() {
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
     setDateRange({ from: range?.from, to: range?.to });
     setIsAllTime(false);
+    setBrushDisplayRange(undefined);
     if (range?.from && range?.to) {
       setSelectedIntervalDescription(
         `${format(range.from, "MMM d, yyyy")} - ${format(range.to, "MMM d, yyyy")}`,
@@ -280,6 +283,9 @@ export function DashboardContent() {
             scaleMode="fit-visible"
             minDomainSpanRatio={chartMinDomainSpanRatio}
             netContributionMaxDomainSpanRatio={chartNetContributionMaxDomainSpanRatio}
+            onVisibleRangeChange={(r) =>
+              setBrushDisplayRange(r ? { from: new Date(r.from), to: new Date(r.to) } : undefined)
+            }
           />
           {valuationHistory && chartData.length > 0 && (
             <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
@@ -293,7 +299,7 @@ export function DashboardContent() {
               />
               <ChartRangePicker
                 className="pointer-events-auto relative z-20 shrink-0"
-                value={pickerValue}
+                value={brushDisplayRange ?? pickerValue}
                 onChange={handleCustomRangeChange}
               />
             </div>
