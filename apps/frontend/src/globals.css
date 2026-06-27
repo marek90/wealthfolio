@@ -1075,3 +1075,15 @@ summary {
 .interval-pill-suppressed .bg-background.absolute {
   opacity: 0 !important;
 }
+
+/* Portfolio history chart brush — soften the default blocky brush to match the rounded UI.
+   Rounds both the selected-window slide and the outer background frame (direct rect children
+   of .recharts-brush; the pill travellers live in nested layers and are unaffected). */
+.history-brush .recharts-brush-slide {
+  rx: 6px;
+  ry: 6px;
+}
+.history-brush .recharts-brush > rect:not(.recharts-brush-slide) {
+  rx: 8px;
+  ry: 8px;
+}

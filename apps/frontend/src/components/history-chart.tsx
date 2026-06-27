@@ -293,7 +293,7 @@ export function HistoryChart({
   return (
     <ChartContainer
       config={chartConfig}
-      className="h-full w-full [&_.recharts-brush-slide]:[rx:6px]"
+      className="history-brush h-full w-full"
       data-no-swipe-drag
     >
       <AreaChart
@@ -308,8 +308,8 @@ export function HistoryChart({
         }}
         margin={{
           top: 0,
-          right: 0,
-          left: 0,
+          right: 8,
+          left: 8,
           bottom: 28,
         }}
         onDoubleClick={() => {
