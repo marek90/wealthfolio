@@ -94,6 +94,7 @@ Thumbs.db
 .codex/
 .kiro/
 .conductor/
+IMPLEMENTATION_PLAN.md
 db/
 apps/db/
 apps/tauri/db/
