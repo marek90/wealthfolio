@@ -6,6 +6,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePickerWithRange,
   GainAmount,
   GainPercent,
   AnimatedToggleGroup,
@@ -576,6 +577,12 @@ const AccountPage = () => {
     setDateRange(range);
   };
 
+  // Callback for the custom date range picker (sets the same dateRange the
+  // period buttons use, so the existing useValuationHistory hook refetches it).
+  const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
+    setDateRange({ from: range?.from, to: range?.to });
+  };
+
   const percentageToDisplay = useMemo(() => {
     // Holdings mode has no transaction cash-flow history, so show value return.
     if (isHoldingsMode) {
@@ -1038,6 +1045,13 @@ const AccountPage = () => {
                           isLoading={isValuationHistoryLoading}
                           defaultValue={INITIAL_INTERVAL_CODE}
                         />
+                        <div className="relative bottom-8 flex justify-center">
+                          <DatePickerWithRange
+                            className="z-10 w-auto"
+                            date={dateRange}
+                            onDateChange={handleCustomRangeChange}
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>

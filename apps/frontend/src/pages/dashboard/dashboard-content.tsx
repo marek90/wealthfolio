@@ -13,6 +13,7 @@ import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigg
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TimePeriod as UITimePeriod } from "@wealthfolio/ui";
 import {
+  DatePickerWithRange,
   GainAmount,
   GainPercent,
   getInitialIntervalData,
@@ -179,6 +180,18 @@ export function DashboardContent() {
     setIsAllTime(code === "ALL");
   };
 
+  // Callback for the custom date range picker (sets the same dateRange the
+  // period buttons use, so the existing useValuationHistory hook refetches it).
+  const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
+    setDateRange({ from: range?.from, to: range?.to });
+    setIsAllTime(false);
+    if (range?.from && range?.to) {
+      setSelectedIntervalDescription(
+        `${format(range.from, "MMM d, yyyy")} - ${format(range.to, "MMM d, yyyy")}`,
+      );
+    }
+  };
+
   return (
     <div className="flex min-h-full flex-col">
       <div className="px-4 pb-1 pt-2 md:px-6 lg:px-8">
@@ -257,7 +270,7 @@ export function DashboardContent() {
             netContributionMaxDomainSpanRatio={chartNetContributionMaxDomainSpanRatio}
           />
           {valuationHistory && chartData.length > 0 && (
-            <div className="flex w-full -translate-y-6 justify-center">
+            <div className="flex w-full -translate-y-6 flex-col items-center gap-2">
               <IntervalSelector
                 className="pointer-events-auto relative z-20 w-full max-w-screen-sm sm:max-w-screen-md md:max-w-2xl lg:max-w-3xl"
                 onIntervalSelect={handleIntervalSelect}
@@ -265,6 +278,11 @@ export function DashboardContent() {
                 isLoading={isValuationHistoryLoading}
                 storageKey={INTERVAL_STORAGE_KEY}
                 defaultValue={DEFAULT_INTERVAL}
+              />
+              <DatePickerWithRange
+                className="pointer-events-auto relative z-20 w-auto"
+                date={dateRange}
+                onDateChange={handleCustomRangeChange}
               />
             </div>
           )}
