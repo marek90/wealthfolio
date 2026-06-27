@@ -490,7 +490,8 @@ export function HistoryChart({
             height={24}
             travellerWidth={8}
             gap={1}
-            stroke="var(--foreground)"
+            stroke="#667F0A"
+            tickFormatter={(value) => formatDate(value as string)}
             fill="transparent"
             startIndex={startIndex}
             endIndex={endIndex}
