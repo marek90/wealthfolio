@@ -1067,3 +1067,11 @@ summary {
   --event-default: oklch(0.78 0.13 150);
   --event-today: oklch(0.85 0.16 90);
 }
+
+/* Portfolio history chart — when a custom calendar range is the active selection,
+   hide the period-pill "white bubble" indicator (the framer-motion element is the only
+   bg-background.absolute node inside the IntervalSelector). !important beats any inline
+   style and avoids relying on a Tailwind arbitrary variant being generated. */
+.interval-pill-suppressed .bg-background.absolute {
+  opacity: 0 !important;
+}

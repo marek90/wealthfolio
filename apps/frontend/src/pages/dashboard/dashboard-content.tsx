@@ -301,7 +301,7 @@ export function DashboardContent() {
             <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
               <IntervalSelector
                 className={`pointer-events-auto relative z-20 w-auto max-w-full ${
-                  isCustomRangeActive ? "[&_.bg-background.absolute]:opacity-0" : ""
+                  isCustomRangeActive ? "interval-pill-suppressed" : ""
                 }`}
                 onIntervalSelect={handleIntervalSelect}
                 onHaptic={triggerHaptic}

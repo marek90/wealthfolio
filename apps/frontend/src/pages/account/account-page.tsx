@@ -1073,7 +1073,7 @@ const AccountPage = () => {
                         <div className="relative bottom-10 flex items-center justify-center gap-2 px-4">
                           <IntervalSelector
                             className={`z-10 w-auto max-w-full ${
-                              isCustomRangeActive ? "[&_.bg-background.absolute]:opacity-0" : ""
+                              isCustomRangeActive ? "interval-pill-suppressed" : ""
                             }`}
                             onIntervalSelect={handleIntervalSelect}
                             isLoading={isValuationHistoryLoading}
