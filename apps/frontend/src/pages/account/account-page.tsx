@@ -1061,7 +1061,7 @@ const AccountPage = () => {
                         />
                         <div className="relative bottom-10 flex items-center justify-center gap-2 px-4">
                           <IntervalSelector
-                            className="z-10"
+                            className="z-10 w-auto max-w-full"
                             onIntervalSelect={handleIntervalSelect}
                             isLoading={isValuationHistoryLoading}
                             defaultValue={INITIAL_INTERVAL_CODE}

@@ -290,7 +290,7 @@ export function DashboardContent() {
           {valuationHistory && chartData.length > 0 && (
             <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
               <IntervalSelector
-                className="pointer-events-auto relative z-20 w-full max-w-screen-sm sm:max-w-screen-md md:max-w-2xl lg:max-w-3xl"
+                className="pointer-events-auto relative z-20 w-auto max-w-full"
                 onIntervalSelect={handleIntervalSelect}
                 onHaptic={triggerHaptic}
                 isLoading={isValuationHistoryLoading}
