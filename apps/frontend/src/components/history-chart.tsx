@@ -308,6 +308,12 @@ export function HistoryChart({
           left: 0,
           bottom: 28,
         }}
+        onDoubleClick={() => {
+          if (brushIndices) {
+            setBrushIndices(null);
+            onVisibleRangeChange?.(undefined);
+          }
+        }}
         onMouseEnter={() => setIsChartHovered(true)}
         onMouseLeave={() => {
           setIsChartHovered(false);
