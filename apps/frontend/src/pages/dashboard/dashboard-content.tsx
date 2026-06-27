@@ -85,6 +85,8 @@ export function DashboardContent() {
   const [selectedInterval, setSelectedInterval] = useState<UITimePeriod>(() => intervalCode);
   const [isAllTime, setIsAllTime] = useState<boolean>(() => intervalCode === "ALL");
   const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
+  // True when a custom calendar range (not a period preset) is the active selection.
+  const [isCustomRangeActive, setIsCustomRangeActive] = useState<boolean>(false);
 
   const { holdings: allHoldings, isLoading: isHoldingsLoading } = useHoldings({ type: "all" });
   const {
@@ -196,6 +198,7 @@ export function DashboardContent() {
     setDateRange(range);
     setIsAllTime(code === "ALL");
     setBrushDisplayRange(undefined);
+    setIsCustomRangeActive(false);
   };
 
   // Callback for the custom date range picker (sets the same dateRange the
@@ -204,6 +207,7 @@ export function DashboardContent() {
     setDateRange({ from: range?.from, to: range?.to });
     setIsAllTime(false);
     setBrushDisplayRange(undefined);
+    setIsCustomRangeActive(!!(range?.from && range?.to));
     if (range?.from && range?.to) {
       setSelectedIntervalDescription(
         `${format(range.from, "MMM d, yyyy")} - ${format(range.to, "MMM d, yyyy")}`,
@@ -296,7 +300,9 @@ export function DashboardContent() {
           {valuationHistory && chartData.length > 0 && (
             <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
               <IntervalSelector
-                className="pointer-events-auto relative z-20 w-auto max-w-full"
+                className={`pointer-events-auto relative z-20 w-auto max-w-full ${
+                  isCustomRangeActive ? "[&_.bg-background.absolute]:opacity-0" : ""
+                }`}
                 onIntervalSelect={handleIntervalSelect}
                 onHaptic={triggerHaptic}
                 isLoading={isValuationHistoryLoading}
@@ -307,6 +313,7 @@ export function DashboardContent() {
                 className="pointer-events-auto relative z-20 shrink-0"
                 value={brushDisplayRange ?? pickerValue}
                 onChange={handleCustomRangeChange}
+                isActive={isCustomRangeActive}
               />
             </div>
           )}

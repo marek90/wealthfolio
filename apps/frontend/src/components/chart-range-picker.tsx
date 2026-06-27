@@ -9,6 +9,9 @@ import type { DateRange as DayPickerDateRange } from "react-day-picker";
 interface ChartRangePickerProps {
   value: DateRange | undefined;
   onChange: (range: DateRange | undefined) => void;
+  /** When true, the trigger shows the same white "bubble" highlight the period pills use,
+   *  signalling that a custom calendar range is the active selection. */
+  isActive?: boolean;
   className?: string;
 }
 
@@ -19,7 +22,7 @@ interface ChartRangePickerProps {
  * the wide DatePickerWithRange button. Icon-only on purpose — the selected range shows
  * inside the calendar popover.
  */
-export function ChartRangePicker({ value, onChange, className }: ChartRangePickerProps) {
+export function ChartRangePicker({ value, onChange, isActive, className }: ChartRangePickerProps) {
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -27,7 +30,11 @@ export function ChartRangePicker({ value, onChange, className }: ChartRangePicke
           type="button"
           variant="ghost"
           size="sm"
-          className={cn("h-8 w-9 rounded-full p-0", className)}
+          className={cn(
+            "h-8 w-9 rounded-full p-0",
+            isActive && "bg-background text-foreground shadow-sm",
+            className,
+          )}
           aria-label="Choose custom date range"
         >
           <Icons.Calendar className="h-4 w-4" />

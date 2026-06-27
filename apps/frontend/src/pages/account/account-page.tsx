@@ -174,6 +174,8 @@ const AccountPage = () => {
   const [selectedIntervalCode, setSelectedIntervalCode] =
     useState<TimePeriod>(INITIAL_INTERVAL_CODE);
   const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
+  // True when a custom calendar range (not a period preset) is the active selection.
+  const [isCustomRangeActive, setIsCustomRangeActive] = useState<boolean>(false);
   const [desktopSelectorOpen, setDesktopSelectorOpen] = useState(false);
   const [mobileSelectorOpen, setMobileSelectorOpen] = useState(false);
   const [actionPaletteOpen, setActionPaletteOpen] = useState(false);
@@ -595,6 +597,7 @@ const AccountPage = () => {
     setSelectedIntervalCode(code);
     setDateRange(range);
     setBrushDisplayRange(undefined);
+    setIsCustomRangeActive(false);
   };
 
   // Callback for the custom date range picker (sets the same dateRange the
@@ -602,6 +605,7 @@ const AccountPage = () => {
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
     setDateRange({ from: range?.from, to: range?.to });
     setBrushDisplayRange(undefined);
+    setIsCustomRangeActive(!!(range?.from && range?.to));
   };
 
   const percentageToDisplay = useMemo(() => {
@@ -1068,7 +1072,9 @@ const AccountPage = () => {
                         />
                         <div className="relative bottom-10 flex items-center justify-center gap-2 px-4">
                           <IntervalSelector
-                            className="z-10 w-auto max-w-full"
+                            className={`z-10 w-auto max-w-full ${
+                              isCustomRangeActive ? "[&_.bg-background.absolute]:opacity-0" : ""
+                            }`}
                             onIntervalSelect={handleIntervalSelect}
                             isLoading={isValuationHistoryLoading}
                             defaultValue={INITIAL_INTERVAL_CODE}
@@ -1077,6 +1083,7 @@ const AccountPage = () => {
                             className="z-10 shrink-0"
                             value={brushDisplayRange ?? pickerValue}
                             onChange={handleCustomRangeChange}
+                            isActive={isCustomRangeActive}
                           />
                         </div>
                       </div>
