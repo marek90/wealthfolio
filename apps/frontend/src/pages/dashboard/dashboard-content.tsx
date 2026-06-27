@@ -261,7 +261,7 @@ export function DashboardContent() {
             : "from-success/30 via-success/15 to-transparent"
         }`}
       >
-        <div className="h-[280px]">
+        <div className="h-[320px]">
           <HistoryChart
             data={chartData}
             isLoading={isValuationHistoryLoading}

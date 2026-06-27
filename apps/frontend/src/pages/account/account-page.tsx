@@ -1021,7 +1021,7 @@ const AccountPage = () => {
                 <CardContent className="p-0">
                   <div className="w-full p-0">
                     <div className="flex w-full flex-col">
-                      <div className="h-120 w-full">
+                      <div className="h-130 w-full">
                         <HistoryChart
                           data={chartData}
                           isLoading={false}

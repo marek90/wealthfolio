@@ -5,7 +5,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay } from "@wealthfolio/ui";
 import { useId, useMemo, useRef, useState } from "react";
-import { Area, AreaChart, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Brush, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
 import {
   HistoryChartActiveDot,
@@ -143,16 +143,30 @@ export function HistoryChart({
   const id = useId();
   const fillGradientId = `historyFill-${id}`;
   const strokeGradientId = `historyStroke-${id}`;
+
+  const [brushIndices, setBrushIndices] = useState<{ startIndex: number; endIndex: number } | null>(null);
+  const [prevData, setPrevData] = useState(data);
+  if (data !== prevData) {
+    setPrevData(data);
+    setBrushIndices(null);
+  }
+  const startIndex = brushIndices?.startIndex ?? 0;
+  const endIndex = brushIndices?.endIndex ?? Math.max(0, data.length - 1);
+  const visibleData = useMemo(
+    () => (brushIndices ? data.slice(startIndex, endIndex + 1) : data),
+    [data, brushIndices, startIndex, endIndex],
+  );
+
   const scaleConfig = useMemo(
     () =>
-      getAutomaticHistoryChartScale(data, {
+      getAutomaticHistoryChartScale(visibleData, {
         ...(scaleMode ? { mode: scaleMode } : {}),
         ...(netContributionMaxDomainSpanRatio === undefined
           ? {}
           : { netContributionMaxDomainSpanRatio }),
         ...(minDomainSpanRatio === undefined ? {} : { minDomainSpanRatio }),
       }),
-    [data, scaleMode, netContributionMaxDomainSpanRatio, minDomainSpanRatio],
+    [visibleData, scaleMode, netContributionMaxDomainSpanRatio, minDomainSpanRatio],
   );
 
   const chartConfig = {
@@ -167,10 +181,10 @@ export function HistoryChart({
   // Compute where y=0 falls in the gradient (0=top, 1=bottom)
   // to split green (positive) / red (negative) fill & stroke
   const { zeroOffset, allPositive, allNegative } = useMemo(() => {
-    if (data.length === 0) return { zeroOffset: 0, allPositive: true, allNegative: false };
+    if (visibleData.length === 0) return { zeroOffset: 0, allPositive: true, allNegative: false };
     let min = Infinity;
     let max = -Infinity;
-    for (const d of data) {
+    for (const d of visibleData) {
       if (d.totalValue < min) min = d.totalValue;
       if (d.totalValue > max) max = d.totalValue;
     }
@@ -179,7 +193,7 @@ export function HistoryChart({
     const [domainMin, domainMax] = scaleConfig.domain;
     const offset = domainMax / (domainMax - domainMin);
     return { zeroOffset: offset, allPositive: false, allNegative: false };
-  }, [data, scaleConfig.domain]);
+  }, [visibleData, scaleConfig.domain]);
 
   // Build a map of date -> index for efficient lookup
   const dateToIndexMap = useMemo(() => {
@@ -272,7 +286,7 @@ export function HistoryChart({
           top: 0,
           right: 0,
           left: 0,
-          bottom: 0,
+          bottom: 28,
         }}
         onMouseEnter={() => setIsChartHovered(true)}
         onMouseLeave={() => {
@@ -407,6 +421,23 @@ export function HistoryChart({
             fill={singleDataPoint.totalValue >= 0 ? "var(--success)" : "var(--destructive)"}
             stroke="var(--background)"
             strokeWidth={2}
+          />
+        )}
+        {data.length > 1 && (
+          <Brush
+            dataKey="date"
+            height={24}
+            travellerWidth={8}
+            gap={1}
+            stroke="var(--border)"
+            fill="transparent"
+            startIndex={startIndex}
+            endIndex={endIndex}
+            onChange={(range) => {
+              if (range?.startIndex != null && range?.endIndex != null) {
+                setBrushIndices({ startIndex: range.startIndex, endIndex: range.endIndex });
+              }
+            }}
           />
         )}
       </AreaChart>
