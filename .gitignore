@@ -101,3 +101,5 @@ apps/tauri/db/
 tasks
 **/*.local.md
 wealthfolio.db
+/secrets/
+/data/
