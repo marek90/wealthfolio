@@ -1046,7 +1046,7 @@ const AccountPage = () => {
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="w-full p-0">
-                    <div className="flex w-full flex-col">
+                    <div className="flex w-full flex-col pb-8">
                       <div className="h-130 w-full">
                         <HistoryChart
                           data={chartData}
@@ -1070,7 +1070,7 @@ const AccountPage = () => {
                             }
                           }}
                         />
-                        <div className="relative bottom-10 flex items-center justify-center gap-2 px-4">
+                        <div className="relative bottom-6 flex items-center justify-center gap-2 px-4">
                           <IntervalSelector
                             className={`z-10 w-auto max-w-full ${
                               isCustomRangeActive ? "interval-pill-suppressed" : ""
