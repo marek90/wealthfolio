@@ -1,4 +1,5 @@
 import { calculatePerformanceSummary } from "@/adapters";
+import { ChartRangePicker } from "@/components/chart-range-picker";
 import { HistoryChart } from "@/components/history-chart";
 import { useHapticFeedback } from "@/hooks";
 import { useCurrentValuation } from "@/hooks/use-current-account-valuations";
@@ -13,7 +14,6 @@ import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigg
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TimePeriod as UITimePeriod } from "@wealthfolio/ui";
 import {
-  DatePickerWithRange,
   GainAmount,
   GainPercent,
   getInitialIntervalData,
@@ -157,6 +157,18 @@ export function DashboardContent() {
     );
   }, [valuationHistory, baseCurrency]);
 
+  // The "ALL" preset uses 1970-01-01 as a sentinel "from" date, which is confusing to see
+  // pre-filled in the calendar. Clamp the picker's *displayed* from up to the first date that
+  // actually has portfolio data. Display-only: this does not change what useValuationHistory fetches.
+  const firstDataDate = chartData[0]?.date;
+  const pickerValue = useMemo<DateRange | undefined>(() => {
+    if (!dateRange?.from || !firstDataDate) {
+      return dateRange;
+    }
+    const earliest = new Date(firstDataDate);
+    return dateRange.from < earliest ? { from: earliest, to: dateRange.to } : dateRange;
+  }, [dateRange, firstDataDate]);
+
   const chartMinDomainSpanRatio = useMemo(
     () => getDashboardChartMinDomainSpanRatio(selectedInterval),
     [selectedInterval],
@@ -270,7 +282,7 @@ export function DashboardContent() {
             netContributionMaxDomainSpanRatio={chartNetContributionMaxDomainSpanRatio}
           />
           {valuationHistory && chartData.length > 0 && (
-            <div className="flex w-full -translate-y-6 flex-col items-center gap-2">
+            <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
               <IntervalSelector
                 className="pointer-events-auto relative z-20 w-full max-w-screen-sm sm:max-w-screen-md md:max-w-2xl lg:max-w-3xl"
                 onIntervalSelect={handleIntervalSelect}
@@ -279,10 +291,10 @@ export function DashboardContent() {
                 storageKey={INTERVAL_STORAGE_KEY}
                 defaultValue={DEFAULT_INTERVAL}
               />
-              <DatePickerWithRange
-                className="pointer-events-auto relative z-20 w-auto"
-                date={dateRange}
-                onDateChange={handleCustomRangeChange}
+              <ChartRangePicker
+                className="pointer-events-auto relative z-20 shrink-0"
+                value={pickerValue}
+                onChange={handleCustomRangeChange}
               />
             </div>
           )}

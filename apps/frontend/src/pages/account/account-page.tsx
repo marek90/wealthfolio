@@ -1,4 +1,5 @@
 import { getContributionLimit, getSnapshots, searchActivities } from "@/adapters";
+import { ChartRangePicker } from "@/components/chart-range-picker";
 import { HistoryChart } from "@/components/history-chart";
 import type { ActivityDetails } from "@/lib/types";
 import {
@@ -6,7 +7,6 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-  DatePickerWithRange,
   GainAmount,
   GainPercent,
   AnimatedToggleGroup,
@@ -567,6 +567,18 @@ const AccountPage = () => {
 
   const isLoading = isAccountsLoading || isValuationHistoryLoading;
 
+  // The "ALL" preset uses 1970-01-01 as a sentinel "from" date, which is confusing to see
+  // pre-filled in the calendar. Clamp the picker's *displayed* from up to the first date that
+  // actually has data. Display-only: this does not change what useValuationHistory fetches.
+  const firstDataDate = chartData[0]?.date;
+  const pickerValue = useMemo<DateRange | undefined>(() => {
+    if (!dateRange?.from || !firstDataDate) {
+      return dateRange;
+    }
+    const earliest = new Date(firstDataDate);
+    return dateRange.from < earliest ? { from: earliest, to: dateRange.to } : dateRange;
+  }, [dateRange, firstDataDate]);
+
   // Callback for IntervalSelector
   const handleIntervalSelect = (
     code: TimePeriod,
@@ -1039,17 +1051,17 @@ const AccountPage = () => {
                             }
                           }}
                         />
-                        <IntervalSelector
-                          className="relative bottom-10 left-0 right-0 z-10"
-                          onIntervalSelect={handleIntervalSelect}
-                          isLoading={isValuationHistoryLoading}
-                          defaultValue={INITIAL_INTERVAL_CODE}
-                        />
-                        <div className="relative bottom-8 flex justify-center">
-                          <DatePickerWithRange
-                            className="z-10 w-auto"
-                            date={dateRange}
-                            onDateChange={handleCustomRangeChange}
+                        <div className="relative bottom-10 flex items-center justify-center gap-2 px-4">
+                          <IntervalSelector
+                            className="z-10"
+                            onIntervalSelect={handleIntervalSelect}
+                            isLoading={isValuationHistoryLoading}
+                            defaultValue={INITIAL_INTERVAL_CODE}
+                          />
+                          <ChartRangePicker
+                            className="z-10 shrink-0"
+                            value={pickerValue}
+                            onChange={handleCustomRangeChange}
                           />
                         </div>
                       </div>
