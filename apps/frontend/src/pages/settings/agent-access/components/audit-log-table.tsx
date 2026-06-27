@@ -21,7 +21,6 @@ import {
 } from "@wealthfolio/ui/components/ui/card";
 import { FacetedFilter } from "@wealthfolio/ui/components/ui/faceted-filter";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { Input } from "@wealthfolio/ui/components/ui/input";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import {
   Table,
@@ -131,12 +130,16 @@ export function AuditLogTable({ disabledNotice }: { disabledNotice?: string }) {
 
         {(logHasData || hasFilters) && (
           <div className="flex flex-wrap items-center gap-2">
-            <Input
-              value={search}
-              onChange={(event) => onFilter(setSearch, event.target.value)}
-              placeholder="Search tool…"
-              className="bg-muted/50 focus-visible:bg-background h-8 w-44 rounded-lg border-transparent text-xs"
-            />
+            <div className="relative w-[150px] lg:w-[250px]">
+              <Icons.Search className="text-muted-foreground pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(event) => onFilter(setSearch, event.target.value)}
+                placeholder="Search tool…"
+                className="shadow-inner-xs bg-muted/90 hover:bg-muted/80 placeholder:text-muted-foreground focus:ring-ring/50 h-8 w-full rounded-md pl-8 pr-3 text-sm outline-none transition-colors focus:ring-2"
+              />
+            </div>
             <FacetedFilter
               title="Tool"
               options={toolOptions}
