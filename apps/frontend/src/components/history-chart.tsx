@@ -291,7 +291,11 @@ export function HistoryChart({
   };
 
   return (
-    <ChartContainer config={chartConfig} className="h-full w-full" data-no-swipe-drag>
+    <ChartContainer
+      config={chartConfig}
+      className="h-full w-full [&_.recharts-brush-slide]:[rx:6px]"
+      data-no-swipe-drag
+    >
       <AreaChart
         data={data}
         stackOffset="sign"
@@ -493,12 +497,28 @@ export function HistoryChart({
         {data.length > 1 && (
           <Brush
             dataKey="date"
-            height={24}
-            travellerWidth={8}
+            height={20}
+            travellerWidth={10}
             gap={1}
             stroke="#667F0A"
             tickFormatter={(value) => formatDate(value as string)}
             fill="transparent"
+            traveller={(props) => {
+              // Rounded "pill" handles in place of the default square ones, to match the
+              // app's soft fully-rounded UI. Inset vertically for a lighter look.
+              const { x, y, width, height } = props;
+              return (
+                <rect
+                  x={x}
+                  y={y + 1}
+                  width={width}
+                  height={Math.max(0, height - 2)}
+                  rx={width / 2}
+                  ry={width / 2}
+                  fill="#667F0A"
+                />
+              );
+            }}
             startIndex={startIndex}
             endIndex={endIndex}
             onChange={(range) => {
