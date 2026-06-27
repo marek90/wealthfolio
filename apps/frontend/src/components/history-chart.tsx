@@ -161,11 +161,12 @@ export function HistoryChart({
     [data, brushIndices, startIndex, endIndex],
   );
 
-  // Drag-to-select state (FB1). Three refs track in-progress drag without re-renders.
+  // Drag-to-select state (FB1). Tracked by date label (activeLabel) rather than index, so it
+  // stays correct even when the chart is already brush-zoomed (indices become view-relative).
   const isDraggingRef = useRef(false);
   const didDragRef = useRef(false);
-  const dragRangeRef = useRef<{ start: number; end: number } | null>(null);
-  const [dragRange, setDragRange] = useState<{ start: number; end: number } | null>(null);
+  const dragRangeRef = useRef<{ start: string; end: string } | null>(null);
+  const [dragRange, setDragRange] = useState<{ start: string; end: string } | null>(null);
 
   const scaleConfig = useMemo(
     () =>
@@ -281,8 +282,8 @@ export function HistoryChart({
       setHoveredMarker(markerDateSet.has(String(chartState.activeLabel)));
     }
 
-    if (isDraggingRef.current && chartState.activeTooltipIndex != null) {
-      const newEnd = Number(chartState.activeTooltipIndex);
+    if (isDraggingRef.current && chartState.activeLabel != null) {
+      const newEnd = String(chartState.activeLabel);
       dragRangeRef.current = dragRangeRef.current ? { ...dragRangeRef.current, end: newEnd } : null;
       setDragRange((prev) => (prev ? { ...prev, end: newEnd } : null));
     }
@@ -331,12 +332,12 @@ export function HistoryChart({
         }}
         onMouseMove={handleChartMove}
         onMouseDown={(chartState) => {
-          const rawIdx = (chartState as unknown as MouseHandlerDataParam).activeTooltipIndex;
-          if (rawIdx == null) return;
-          const idx = Number(rawIdx);
+          const label = (chartState as unknown as MouseHandlerDataParam).activeLabel;
+          if (label == null) return;
+          const s = String(label);
           isDraggingRef.current = true;
-          dragRangeRef.current = { start: idx, end: idx };
-          setDragRange({ start: idx, end: idx });
+          dragRangeRef.current = { start: s, end: s };
+          setDragRange({ start: s, end: s });
         }}
         onMouseUp={() => {
           if (!isDraggingRef.current) return;
@@ -345,8 +346,11 @@ export function HistoryChart({
           dragRangeRef.current = null;
           setDragRange(null);
           if (drag && drag.start !== drag.end) {
-            const lo = Math.min(drag.start, drag.end);
-            const hi = Math.max(drag.start, drag.end);
+            const a = dateToIndexMap.get(drag.start);
+            const b = dateToIndexMap.get(drag.end);
+            if (a == null || b == null) return;
+            const lo = Math.min(a, b);
+            const hi = Math.max(a, b);
             setBrushIndices({ startIndex: lo, endIndex: hi });
             didDragRef.current = true;
             onVisibleRangeChange?.({ from: data[lo].date, to: data[hi].date });
@@ -484,16 +488,24 @@ export function HistoryChart({
             strokeWidth={2}
           />
         )}
-        {dragRange && data.length > 0 && (
-          <ReferenceArea
-            x1={data[Math.min(dragRange.start, dragRange.end)]?.date}
-            x2={data[Math.max(dragRange.start, dragRange.end)]?.date}
-            fill="var(--primary)"
-            fillOpacity={0.1}
-            stroke="var(--primary)"
-            strokeOpacity={0.4}
-          />
-        )}
+        {dragRange &&
+          data.length > 0 &&
+          (() => {
+            // Order the two drag labels by their position in the full series so x1 <= x2.
+            const a = dateToIndexMap.get(dragRange.start);
+            const b = dateToIndexMap.get(dragRange.end);
+            if (a == null || b == null) return null;
+            return (
+              <ReferenceArea
+                x1={data[Math.min(a, b)].date}
+                x2={data[Math.max(a, b)].date}
+                fill="var(--primary)"
+                fillOpacity={0.1}
+                stroke="var(--primary)"
+                strokeOpacity={0.4}
+              />
+            );
+          })()}
         {data.length > 1 && (
           <Brush
             dataKey="date"
