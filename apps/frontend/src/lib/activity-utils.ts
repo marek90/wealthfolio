@@ -85,6 +85,62 @@ export const needsImportAssetResolution = (
   return isAssetIdentityRequired(activityType, subtype);
 };
 
+const normalizeSubtypeToken = (subtype: string): string =>
+  subtype
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+
+export const canonicalizeActivitySubtype = (
+  activityType: string,
+  subtype?: string | null,
+): string | undefined => {
+  const trimmedSubtype = subtype?.trim() ?? "";
+  const normalizedSubtype = trimmedSubtype ? normalizeSubtypeToken(trimmedSubtype) : "";
+  if (!normalizedSubtype) return undefined;
+
+  const normalizedActivityType = activityType?.trim().toUpperCase();
+  if (normalizedActivityType === ActivityType.BUY) {
+    if (["BTO", "BUY_TO_OPEN", "BUY_OPEN", "OPEN_BUY"].includes(normalizedSubtype)) {
+      return ACTIVITY_SUBTYPES.POSITION_OPEN;
+    }
+    if (
+      [
+        "BTC",
+        "BUY_TO_CLOSE",
+        "BUY_CLOSE",
+        "CLOSE_BUY",
+        "BUY_TO_COVER",
+        "BUY_COVER",
+        "COVER_SHORT",
+      ].includes(normalizedSubtype)
+    ) {
+      return ACTIVITY_SUBTYPES.POSITION_CLOSE;
+    }
+  }
+
+  if (normalizedActivityType === ActivityType.SELL) {
+    if (
+      [
+        "STO",
+        "SELL_TO_OPEN",
+        "SELL_OPEN",
+        "OPEN_SELL",
+        "SELL_SHORT",
+        "SHORT_SELL",
+        "SELL_SHORT_TO_OPEN",
+      ].includes(normalizedSubtype)
+    ) {
+      return ACTIVITY_SUBTYPES.POSITION_OPEN;
+    }
+    if (["STC", "SELL_TO_CLOSE", "SELL_CLOSE", "CLOSE_SELL"].includes(normalizedSubtype)) {
+      return ACTIVITY_SUBTYPES.POSITION_CLOSE;
+    }
+  }
+
+  return trimmedSubtype;
+};
+
 /**
  * Determines if an activity is a cash transfer based on its type and identifiers.
  * A transfer is cash when:
