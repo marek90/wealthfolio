@@ -5148,6 +5148,977 @@ mod tests {
     }
 
     #[test]
+    fn option_sell_to_open_creates_signed_short_lot() {
+        let option_symbol = "NFLX260626C00079000";
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let sell_to_open = create_default_activity(
+            "sell_to_open_call",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(2),
+            dec!(1.50),
+            dec!(3),
+            "USD",
+            trade_date_str,
+        );
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_to_open], trade_date)
+            .unwrap();
+
+        let position = result
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("sell-to-open should create an option position");
+
+        assert_eq!(position.quantity, dec!(-2));
+        assert_eq!(position.total_cost_basis, dec!(-297));
+        assert_eq!(position.average_cost, dec!(148.5));
+        assert_eq!(position.lots.len(), 1);
+        assert_eq!(position.lots[0].quantity, dec!(-2));
+        assert_eq!(position.lots[0].cost_basis, dec!(-297));
+        assert_eq!(result.snapshot.cost_basis, dec!(-297));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(297)));
+    }
+
+    #[test]
+    fn option_buy_to_close_partially_reduces_short_lot() {
+        let option_symbol = "NFLX260626P00079000";
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let sell_to_open = create_default_activity(
+            "open_short_put",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(2),
+            dec!(1.50),
+            dec!(3),
+            "USD",
+            open_date_str,
+        );
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_to_open], open_date)
+            .unwrap()
+            .snapshot;
+
+        let buy_to_close = create_default_activity(
+            "close_one_short_put",
+            ActivityType::Buy,
+            option_symbol,
+            dec!(1),
+            dec!(1.00),
+            dec!(1),
+            "USD",
+            close_date_str,
+        );
+        let after_close = calculator
+            .calculate_next_holdings(&after_open, &[buy_to_close], close_date)
+            .unwrap()
+            .snapshot;
+
+        let position = after_close
+            .positions
+            .get(option_symbol)
+            .expect("one short contract should remain open");
+
+        assert_eq!(position.quantity, dec!(-1));
+        assert_eq!(position.total_cost_basis, dec!(-148.5));
+        assert_eq!(position.average_cost, dec!(148.5));
+        assert_eq!(position.lots.len(), 1);
+        assert_eq!(position.lots[0].quantity, dec!(-1));
+        assert_eq!(position.lots[0].cost_basis, dec!(-148.5));
+        assert_eq!(after_close.cash_balances.get("USD"), Some(&dec!(196)));
+        assert_eq!(after_close.cost_basis, dec!(-148.5));
+
+        let disposals = calculator.take_lot_disposals("acc_1", "FIFO");
+        assert_eq!(disposals.len(), 1);
+        let disposal = &disposals[0];
+        assert_eq!(disposal.disposal_activity_id, "close_one_short_put");
+        assert_eq!(Decimal::from_str(&disposal.quantity).unwrap(), dec!(-1));
+        assert_eq!(Decimal::from_str(&disposal.proceeds).unwrap(), dec!(-101));
+        assert_eq!(
+            Decimal::from_str(&disposal.cost_basis).unwrap(),
+            dec!(-148.5)
+        );
+        assert_eq!(
+            Decimal::from_str(&disposal.realized_pnl).unwrap(),
+            dec!(47.5)
+        );
+    }
+
+    #[test]
+    fn option_buy_to_close_excess_rejects_without_cash_only_effect() {
+        let option_symbol = "NFLX260626P00079000";
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let sell_to_open = create_default_activity(
+            "open_one_short_put",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(1),
+            dec!(1.50),
+            dec!(1),
+            "USD",
+            open_date_str,
+        );
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_to_open], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut buy_to_close = create_default_activity(
+            "close_too_many_short_puts",
+            ActivityType::Buy,
+            option_symbol,
+            dec!(2),
+            dec!(1.00),
+            Decimal::ZERO,
+            "USD",
+            close_date_str,
+        );
+        buy_to_close.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_CLOSE.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[buy_to_close], close_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("short option position should remain");
+
+        assert_eq!(position.quantity, dec!(-1));
+        assert_eq!(position.total_cost_basis, dec!(-149));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(149)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-149));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].message.contains("only 1 are short"));
+    }
+
+    #[test]
+    fn option_sell_to_close_excess_rejects_without_cash_only_effect() {
+        let option_symbol = "NFLX260626C00079000";
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let buy_to_open = create_default_activity(
+            "open_one_long_call",
+            ActivityType::Buy,
+            option_symbol,
+            dec!(1),
+            dec!(1.50),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[buy_to_open], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut sell_to_close = create_default_activity(
+            "close_too_many_long_calls",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(2),
+            dec!(1.00),
+            Decimal::ZERO,
+            "USD",
+            close_date_str,
+        );
+        sell_to_close.subtype =
+            Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_CLOSE.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[sell_to_close], close_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("long option position should remain");
+
+        assert_eq!(position.quantity, dec!(1));
+        assert_eq!(position.total_cost_basis, dec!(150));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(-150)));
+        assert_eq!(result.snapshot.cost_basis, dec!(150));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].message.contains("only 1 are long"));
+    }
+
+    #[test]
+    fn option_short_expiry_closes_signed_lot_with_zero_cash() {
+        let option_symbol = "AAPL260116C00200000";
+        let open_date_str = "2025-12-01";
+        let expiry_date_str = "2026-01-16";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let expiry_date = NaiveDate::from_str(expiry_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2025-11-30");
+        let sell_to_open = create_default_activity(
+            "open_expiring_short_call",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(1),
+            dec!(2),
+            dec!(1),
+            "USD",
+            open_date_str,
+        );
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_to_open], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut expiry = create_default_activity(
+            "expire_short_call",
+            ActivityType::Adjustment,
+            option_symbol,
+            dec!(1),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            expiry_date_str,
+        );
+        expiry.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_OPTION_EXPIRY.to_string());
+        let after_expiry = calculator
+            .calculate_next_holdings(&after_open, &[expiry], expiry_date)
+            .unwrap()
+            .snapshot;
+
+        let position = after_expiry
+            .positions
+            .get(option_symbol)
+            .expect("closed position shell should remain in the snapshot");
+        assert_eq!(position.quantity, Decimal::ZERO);
+        assert_eq!(position.total_cost_basis, Decimal::ZERO);
+        assert_eq!(after_expiry.cash_balances.get("USD"), Some(&dec!(199)));
+
+        let disposals = calculator.take_lot_disposals("acc_1", "FIFO");
+        assert_eq!(disposals.len(), 1);
+        let disposal = &disposals[0];
+        assert_eq!(disposal.disposal_activity_id, "expire_short_call");
+        assert_eq!(
+            Decimal::from_str(&disposal.proceeds).unwrap(),
+            Decimal::ZERO
+        );
+        assert_eq!(Decimal::from_str(&disposal.cost_basis).unwrap(), dec!(-199));
+        assert_eq!(
+            Decimal::from_str(&disposal.realized_pnl).unwrap(),
+            dec!(199)
+        );
+    }
+
+    #[test]
+    fn option_buy_to_close_without_short_does_not_open_long_lot() {
+        let option_symbol = "NFLX260626C00079000";
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let mut buy_to_close = create_default_activity(
+            "buy_to_close_without_short",
+            ActivityType::Buy,
+            option_symbol,
+            dec!(1),
+            dec!(1),
+            dec!(1),
+            "USD",
+            trade_date_str,
+        );
+        buy_to_close.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_CLOSE.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[buy_to_close], trade_date)
+            .unwrap();
+
+        let position = result.snapshot.positions.get(option_symbol);
+        assert!(position.is_none_or(|position| {
+            position.quantity == Decimal::ZERO && position.lots.is_empty()
+        }));
+        assert!(!result.snapshot.cash_balances.contains_key("USD"));
+        assert_eq!(result.snapshot.cost_basis, Decimal::ZERO);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("no short position exists"));
+    }
+
+    #[test]
+    fn option_sell_to_close_without_long_does_not_open_short_lot() {
+        let option_symbol = "NFLX260626P00079000";
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+        let mut sell_to_close = create_default_activity(
+            "sell_to_close_without_long",
+            ActivityType::Sell,
+            option_symbol,
+            dec!(1),
+            dec!(1),
+            dec!(1),
+            "USD",
+            trade_date_str,
+        );
+        sell_to_close.subtype =
+            Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_CLOSE.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_to_close], trade_date)
+            .unwrap();
+
+        let position = result.snapshot.positions.get(option_symbol);
+        assert!(position.is_none_or(|position| {
+            position.quantity == Decimal::ZERO && position.lots.is_empty()
+        }));
+        assert!(!result.snapshot.cash_balances.contains_key("USD"));
+        assert_eq!(result.snapshot.cost_basis, Decimal::ZERO);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("no long position exists"));
+    }
+
+    #[test]
+    fn stock_sell_without_position_does_not_create_signed_short_lot() {
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let sell = create_default_activity(
+            "sell_stock_without_inventory",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            trade_date_str,
+        );
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell], trade_date)
+            .unwrap();
+
+        assert!(!result.snapshot.positions.contains_key("AAPL"));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(1000)));
+        assert_eq!(result.snapshot.cost_basis, Decimal::ZERO);
+    }
+
+    #[test]
+    fn stock_sell_short_intent_creates_signed_short_lot() {
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "sell_stock_short",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            trade_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], trade_date)
+            .unwrap();
+
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("sell short should create a signed stock lot");
+
+        assert_eq!(position.quantity, dec!(-10));
+        assert_eq!(position.total_cost_basis, dec!(-1000));
+        assert_eq!(position.average_cost, dec!(100));
+        assert_eq!(position.lots.len(), 1);
+        assert_eq!(position.lots[0].quantity, dec!(-10));
+        assert_eq!(position.lots[0].cost_basis, dec!(-1000));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(1000)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-1000));
+    }
+
+    #[test]
+    fn stock_sell_short_again_increases_negative_position() {
+        let open_date_str = "2026-06-26";
+        let second_open_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let second_open_date = NaiveDate::from_str(second_open_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut first_short = create_default_activity(
+            "sell_stock_short_1",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        first_short.subtype = Some("SELL_SHORT".to_string());
+
+        let after_first = calculator
+            .calculate_next_holdings(&previous_snapshot, &[first_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut second_short = create_default_activity(
+            "sell_stock_short_2",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(5),
+            dec!(120),
+            Decimal::ZERO,
+            "USD",
+            second_open_date_str,
+        );
+        second_short.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_OPEN.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_first, &[second_short], second_open_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short position should remain");
+
+        assert_eq!(position.quantity, dec!(-15));
+        assert_eq!(position.total_cost_basis, dec!(-1600));
+        assert_eq!(position.lots.len(), 2);
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(1600)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-1600));
+    }
+
+    #[test]
+    fn stock_buy_to_cover_partially_reduces_short_lot_fifo() {
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut cover = create_default_activity(
+            "cover_stock_short",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(4),
+            dec!(80),
+            Decimal::ZERO,
+            "USD",
+            close_date_str,
+        );
+        cover.subtype = Some("BUY_TO_COVER".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[cover], close_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short position should remain");
+
+        assert_eq!(position.quantity, dec!(-6));
+        assert_eq!(position.total_cost_basis, dec!(-600));
+        assert_eq!(position.average_cost, dec!(100));
+        assert_eq!(position.lots.len(), 1);
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(680)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-600));
+
+        let disposals = calculator.take_lot_disposals("acc_1", "FIFO");
+        assert_eq!(disposals.len(), 1);
+        let disposal = &disposals[0];
+        assert_eq!(disposal.disposal_activity_id, "cover_stock_short");
+        assert_eq!(Decimal::from_str(&disposal.quantity).unwrap(), dec!(-4));
+        assert_eq!(Decimal::from_str(&disposal.proceeds).unwrap(), dec!(-320));
+        assert_eq!(Decimal::from_str(&disposal.cost_basis).unwrap(), dec!(-400));
+        assert_eq!(Decimal::from_str(&disposal.realized_pnl).unwrap(), dec!(80));
+    }
+
+    #[test]
+    fn stock_buy_to_cover_fully_closes_short_lot() {
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short_full",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut cover = create_default_activity(
+            "cover_stock_short_full",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(10),
+            dec!(110),
+            Decimal::ZERO,
+            "USD",
+            close_date_str,
+        );
+        cover.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_POSITION_CLOSE.to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[cover], close_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("closed position shell should remain");
+
+        assert_eq!(position.quantity, Decimal::ZERO);
+        assert_eq!(position.total_cost_basis, Decimal::ZERO);
+        assert!(position.lots.is_empty());
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(-100)));
+        assert_eq!(result.snapshot.cost_basis, Decimal::ZERO);
+    }
+
+    #[test]
+    fn stock_buy_to_cover_without_short_does_not_open_long_lot() {
+        let trade_date_str = "2026-06-26";
+        let trade_date = NaiveDate::from_str(trade_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut cover = create_default_activity(
+            "cover_stock_short_without_short",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(5),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            trade_date_str,
+        );
+        cover.subtype = Some("BUY_TO_COVER".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&previous_snapshot, &[cover], trade_date)
+            .unwrap();
+
+        assert!(!result.snapshot.positions.contains_key("AAPL"));
+        assert!(!result.snapshot.cash_balances.contains_key("USD"));
+        assert_eq!(result.snapshot.cost_basis, Decimal::ZERO);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("no short position exists"));
+    }
+
+    #[test]
+    fn stock_buy_while_short_without_cover_does_not_silently_reduce_short() {
+        let open_date_str = "2026-06-26";
+        let buy_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let buy_date = NaiveDate::from_str(buy_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short_before_plain_buy",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(5),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let buy = create_default_activity(
+            "plain_buy_while_short",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(2),
+            dec!(90),
+            Decimal::ZERO,
+            "USD",
+            buy_date_str,
+        );
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[buy], buy_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short position should remain");
+
+        assert_eq!(position.quantity, dec!(-5));
+        assert_eq!(position.total_cost_basis, dec!(-500));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(500)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-500));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("without Buy to Cover intent"));
+    }
+
+    #[test]
+    fn buy_with_sell_to_close_alias_does_not_cover_short_position() {
+        let open_date_str = "2026-06-26";
+        let buy_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let buy_date = NaiveDate::from_str(buy_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short_before_stc_buy",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(5),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut buy = create_default_activity(
+            "buy_with_sell_to_close_alias",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(2),
+            dec!(90),
+            Decimal::ZERO,
+            "USD",
+            buy_date_str,
+        );
+        buy.subtype = Some("STC".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[buy], buy_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short position should remain");
+
+        assert_eq!(position.quantity, dec!(-5));
+        assert_eq!(position.total_cost_basis, dec!(-500));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(500)));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("without Buy to Cover intent"));
+    }
+
+    #[test]
+    fn stock_buy_to_cover_excess_rejects_without_partial_cash_or_lot_effects() {
+        let open_date_str = "2026-06-26";
+        let close_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let close_date = NaiveDate::from_str(close_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short_excess_cover",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(3),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let mut cover = create_default_activity(
+            "cover_stock_short_excess",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(5),
+            dec!(90),
+            Decimal::ZERO,
+            "USD",
+            close_date_str,
+        );
+        cover.subtype = Some("BUY_TO_COVER".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[cover], close_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short position should remain");
+
+        assert_eq!(position.quantity, dec!(-3));
+        assert_eq!(position.total_cost_basis, dec!(-300));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(300)));
+        assert_eq!(result.snapshot.cost_basis, dec!(-300));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].message.contains("only 3 are short"));
+    }
+
+    #[test]
+    fn stock_sell_short_while_long_does_not_silently_net_position() {
+        let buy_date_str = "2026-06-25";
+        let short_date_str = "2026-06-26";
+        let buy_date = NaiveDate::from_str(buy_date_str).unwrap();
+        let short_date = NaiveDate::from_str(short_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-24");
+
+        let buy = create_default_activity(
+            "buy_stock_before_short",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(5),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            buy_date_str,
+        );
+        let after_buy = calculator
+            .calculate_next_holdings(&previous_snapshot, &[buy], buy_date)
+            .unwrap()
+            .snapshot;
+
+        let mut sell_short = create_default_activity(
+            "sell_short_while_long",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(2),
+            dec!(120),
+            Decimal::ZERO,
+            "USD",
+            short_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+
+        let result = calculator
+            .calculate_next_holdings(&after_buy, &[sell_short], short_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("existing long position should remain");
+
+        assert_eq!(position.quantity, dec!(5));
+        assert_eq!(position.total_cost_basis, dec!(500));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(-500)));
+        assert_eq!(result.snapshot.cost_basis, dec!(500));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0]
+            .message
+            .contains("while a long position exists"));
+    }
+
+    #[test]
+    fn stock_split_preserves_signed_short_lot_basis() {
+        let open_date_str = "2026-06-26";
+        let split_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let split_date = NaiveDate::from_str(split_date_str).unwrap();
+
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+        let previous_snapshot = create_initial_snapshot("acc_1", "USD", "2026-06-25");
+
+        let mut sell_short = create_default_activity(
+            "open_stock_short_before_split",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        sell_short.subtype = Some("SELL_SHORT".to_string());
+        let after_open = calculator
+            .calculate_next_holdings(&previous_snapshot, &[sell_short], open_date)
+            .unwrap()
+            .snapshot;
+
+        let split = create_default_activity(
+            "stock_short_split",
+            ActivityType::Split,
+            "AAPL",
+            dec!(2),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            split_date_str,
+        );
+
+        let result = calculator
+            .calculate_next_holdings(&after_open, &[split], split_date)
+            .unwrap();
+        let position = result
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("short stock position should remain after split");
+
+        assert_eq!(position.quantity, dec!(-20));
+        assert_eq!(position.total_cost_basis, dec!(-1000));
+        assert_eq!(position.average_cost, dec!(50));
+        assert_eq!(position.lots.len(), 1);
+        assert_eq!(position.lots[0].quantity, dec!(-10));
+        assert_eq!(position.lots[0].effective_split_ratio(), dec!(2));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(1000)));
+    }
+
+    #[test]
     fn test_buy_without_fx_rate_still_books_in_activity_currency() {
         // When no fx_rate is provided, cash should still be booked in
         // activity currency (multi-currency account behavior is preserved).
@@ -6138,5 +7109,186 @@ mod tests {
         assert_eq!(pos_b.average_cost, dec!(200));
         // Multiplier should be 100
         assert_eq!(pos_b.contract_multiplier, dec!(100));
+    }
+
+    #[test]
+    fn test_short_option_transfer_preserves_signed_lot() {
+        let option_symbol = "AAPL250321P00150000";
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+
+        let calculator =
+            HoldingsCalculator::new(Arc::new(mock_fx_service), base_currency, Arc::new(repo));
+
+        let open_date_str = "2025-01-02";
+        let transfer_date_str = "2025-06-01";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let transfer_date = NaiveDate::from_str(transfer_date_str).unwrap();
+
+        let prev_a = create_initial_snapshot("acc_a", "USD", "2024-12-31");
+        let open_short = {
+            let mut a = create_default_activity(
+                "sell_to_open_opt",
+                ActivityType::Sell,
+                option_symbol,
+                dec!(2),
+                dec!(2),
+                dec!(0),
+                "USD",
+                open_date_str,
+            );
+            a.account_id = "acc_a".to_string();
+            a
+        };
+
+        let result_a_open = calculator
+            .calculate_next_holdings(&prev_a, std::slice::from_ref(&open_short), open_date)
+            .unwrap();
+
+        let pos_a = result_a_open
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("Account A should have short option position");
+        assert_eq!(pos_a.quantity, dec!(-2));
+        assert_eq!(pos_a.total_cost_basis, dec!(-400));
+
+        let transfer_out = create_transfer_activity(
+            "xfer_out_short_opt",
+            ActivityType::TransferOut,
+            option_symbol,
+            dec!(2),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_a",
+            Some("grp_short_opt"),
+        );
+
+        let result_a_xfer = calculator
+            .calculate_next_holdings(&result_a_open.snapshot, &[transfer_out], transfer_date)
+            .unwrap();
+        let pos_a_after = result_a_xfer.snapshot.positions.get(option_symbol);
+        assert!(pos_a_after.is_none_or(|position| position.quantity == Decimal::ZERO));
+
+        let prev_b = create_initial_snapshot("acc_b", "USD", "2025-05-31");
+        let transfer_in = create_transfer_activity(
+            "xfer_in_short_opt",
+            ActivityType::TransferIn,
+            option_symbol,
+            dec!(2),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_b",
+            Some("grp_short_opt"),
+        );
+
+        let result_b = calculator
+            .calculate_next_holdings(&prev_b, &[transfer_in], transfer_date)
+            .unwrap();
+
+        let pos_b = result_b
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("Account B should have transferred short option position");
+
+        assert_eq!(pos_b.quantity, dec!(-2));
+        assert_eq!(pos_b.total_cost_basis, dec!(-400));
+        assert_eq!(pos_b.average_cost, dec!(200));
+        assert_eq!(pos_b.lots.len(), 1);
+        assert_eq!(pos_b.lots[0].quantity, dec!(-2));
+        assert_eq!(pos_b.lots[0].cost_basis, dec!(-400));
+    }
+
+    #[test]
+    fn test_short_stock_transfer_preserves_signed_lot() {
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+
+        let open_date_str = "2026-06-26";
+        let transfer_date_str = "2026-06-27";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let transfer_date = NaiveDate::from_str(transfer_date_str).unwrap();
+
+        let prev_a = create_initial_snapshot("acc_a", "USD", "2026-06-25");
+        let mut open_short = create_default_activity(
+            "sell_short_stock_before_transfer",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(4),
+            dec!(100),
+            Decimal::ZERO,
+            "USD",
+            open_date_str,
+        );
+        open_short.account_id = "acc_a".to_string();
+        open_short.subtype = Some("SELL_SHORT".to_string());
+
+        let result_a_open = calculator
+            .calculate_next_holdings(&prev_a, &[open_short], open_date)
+            .unwrap();
+        let pos_a = result_a_open
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("Account A should have short stock position");
+        assert_eq!(pos_a.quantity, dec!(-4));
+        assert_eq!(pos_a.total_cost_basis, dec!(-400));
+
+        let transfer_out = create_transfer_activity(
+            "xfer_out_short_stock",
+            ActivityType::TransferOut,
+            "AAPL",
+            dec!(4),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            transfer_date_str,
+            "acc_a",
+            Some("grp_short_stock"),
+        );
+        let result_a_xfer = calculator
+            .calculate_next_holdings(&result_a_open.snapshot, &[transfer_out], transfer_date)
+            .unwrap();
+        let pos_a_after = result_a_xfer.snapshot.positions.get("AAPL");
+        assert!(pos_a_after.is_none_or(|position| position.quantity == Decimal::ZERO));
+
+        let prev_b = create_initial_snapshot("acc_b", "USD", "2026-06-26");
+        let transfer_in = create_transfer_activity(
+            "xfer_in_short_stock",
+            ActivityType::TransferIn,
+            "AAPL",
+            dec!(4),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            transfer_date_str,
+            "acc_b",
+            Some("grp_short_stock"),
+        );
+        let result_b = calculator
+            .calculate_next_holdings(&prev_b, &[transfer_in], transfer_date)
+            .unwrap();
+
+        let pos_b = result_b
+            .snapshot
+            .positions
+            .get("AAPL")
+            .expect("Account B should have transferred short stock position");
+
+        assert_eq!(pos_b.quantity, dec!(-4));
+        assert_eq!(pos_b.total_cost_basis, dec!(-400));
+        assert_eq!(pos_b.average_cost, dec!(100));
+        assert_eq!(pos_b.lots.len(), 1);
+        assert_eq!(pos_b.lots[0].quantity, dec!(-4));
+        assert_eq!(pos_b.lots[0].cost_basis, dec!(-400));
     }
 }

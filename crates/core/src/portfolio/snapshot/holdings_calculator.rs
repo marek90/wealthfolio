@@ -1,5 +1,7 @@
 use crate::accounts::account_types;
-use crate::activities::{Activity, ActivityType};
+use crate::activities::{
+    Activity, ActivityType, ACTIVITY_SUBTYPE_POSITION_CLOSE, ACTIVITY_SUBTYPE_POSITION_OPEN,
+};
 use crate::assets::AssetRepositoryTrait;
 use crate::constants::DECIMAL_PRECISION;
 use crate::errors::{CalculatorError, Error, Result};
@@ -11,6 +13,7 @@ use crate::portfolio::snapshot::HoldingsCalculationResult;
 use crate::portfolio::snapshot::HoldingsCalculationWarning;
 use crate::portfolio::snapshot::LotBookBasis;
 use crate::portfolio::snapshot::Position;
+use crate::portfolio::snapshot::ShortabilityPolicy;
 use crate::utils::time_utils::{activity_date_in_tz, parse_user_timezone_or_default};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -36,6 +39,8 @@ struct AssetPositionInfo {
     is_alternative: bool,
     contract_multiplier: Decimal,
     is_bond: bool,
+    allows_negative_lots: bool,
+    requires_explicit_short_intent: bool,
 }
 
 type AssetCache = HashMap<String, AssetPositionInfo>;
@@ -47,6 +52,8 @@ impl AssetPositionInfo {
             is_alternative: false,
             contract_multiplier: Decimal::ONE,
             is_bond: false,
+            allows_negative_lots: false,
+            requires_explicit_short_intent: false,
         }
     }
 }
@@ -84,6 +91,74 @@ fn gross_trade_amount(activity: &Activity, asset_info: &AssetPositionInfo) -> De
     }
 }
 
+fn normalized_subtype_token(activity: &Activity) -> Option<String> {
+    activity
+        .subtype
+        .as_deref()
+        .map(str::trim)
+        .and_then(|subtype| {
+            if subtype.is_empty() {
+                None
+            } else {
+                Some(
+                    subtype
+                        .chars()
+                        .map(|c| match c {
+                            ' ' | '-' => '_',
+                            _ => c.to_ascii_uppercase(),
+                        })
+                        .collect(),
+                )
+            }
+        })
+}
+
+fn has_position_close_intent(activity: &Activity) -> bool {
+    let Some(subtype) = normalized_subtype_token(activity) else {
+        return false;
+    };
+
+    if subtype == ACTIVITY_SUBTYPE_POSITION_CLOSE {
+        return true;
+    }
+
+    match ActivityType::from_str(activity.effective_type()) {
+        Ok(ActivityType::Buy) => matches!(
+            subtype.as_str(),
+            "BTC"
+                | "BUY_TO_CLOSE"
+                | "BUY_CLOSE"
+                | "CLOSE_BUY"
+                | "BUY_TO_COVER"
+                | "BUY_COVER"
+                | "COVER_SHORT"
+        ),
+        Ok(ActivityType::Sell) => matches!(
+            subtype.as_str(),
+            "STC" | "SELL_TO_CLOSE" | "SELL_CLOSE" | "CLOSE_SELL"
+        ),
+        _ => false,
+    }
+}
+
+fn has_sell_short_open_intent(activity: &Activity) -> bool {
+    let Some(subtype) = normalized_subtype_token(activity) else {
+        return false;
+    };
+
+    subtype == ACTIVITY_SUBTYPE_POSITION_OPEN
+        || matches!(
+            subtype.as_str(),
+            "SELL_SHORT"
+                | "SHORT_SELL"
+                | "SELL_SHORT_TO_OPEN"
+                | "STO"
+                | "SELL_TO_OPEN"
+                | "SELL_OPEN"
+                | "OPEN_SELL"
+        )
+}
+
 fn parse_decimal_lossy(value: &str) -> Decimal {
     value.parse::<Decimal>().unwrap_or(Decimal::ZERO)
 }
@@ -104,6 +179,44 @@ fn effective_unit_price(activity: &Activity, asset_info: &AssetPositionInfo) -> 
     } else {
         activity.price() * asset_info.contract_multiplier
     }
+}
+
+fn min_decimal(left: Decimal, right: Decimal) -> Decimal {
+    if left <= right {
+        left
+    } else {
+        right
+    }
+}
+
+fn proportional_amount(
+    amount: Decimal,
+    part_quantity: Decimal,
+    total_quantity: Decimal,
+) -> Decimal {
+    if amount.is_zero() || part_quantity.is_zero() || total_quantity.is_zero() {
+        Decimal::ZERO
+    } else {
+        amount * part_quantity / total_quantity
+    }
+}
+
+fn positive_lot_effective_quantity(position: &Position) -> Decimal {
+    position
+        .lots
+        .iter()
+        .filter(|lot| lot.quantity > Decimal::ZERO)
+        .map(|lot| lot.quantity * lot.effective_split_ratio())
+        .sum()
+}
+
+fn negative_lot_effective_quantity_abs(position: &Position) -> Decimal {
+    position
+        .lots
+        .iter()
+        .filter(|lot| lot.quantity < Decimal::ZERO)
+        .map(|lot| (lot.quantity * lot.effective_split_ratio()).abs())
+        .sum()
 }
 
 /// Calculates the holding state (positions, cash, cost basis, net deposits) based on activities.
@@ -646,7 +759,7 @@ impl HoldingsCalculator {
         position
             .lots
             .iter()
-            .filter(|lot| lot.quantity > Decimal::ZERO && !lot.cost_basis.is_zero())
+            .filter(|lot| !lot.quantity.is_zero() && !lot.cost_basis.is_zero())
             .map(|lot| {
                 if let Some(rate) = lot.stored_fx_rate_to(account_currency) {
                     return lot.cost_basis * rate;
@@ -672,7 +785,7 @@ impl HoldingsCalculator {
         context_id: &str,
     ) -> Decimal {
         lots.iter()
-            .filter(|lot| lot.quantity > Decimal::ZERO && !lot.cost_basis.is_zero())
+            .filter(|lot| !lot.quantity.is_zero() && !lot.cost_basis.is_zero())
             .map(|lot| {
                 self.lot_cost_basis_in_currency(
                     lot,
@@ -845,6 +958,63 @@ impl HoldingsCalculator {
     ) -> Result<()> {
         let activity_currency = &activity.currency;
         let asset_id = activity.asset_id.as_deref().unwrap_or("");
+        let account_id = state.account_id.clone();
+
+        self.ensure_asset_cached(asset_id, activity_currency, asset_cache);
+        let asset_info = asset_cache
+            .get(asset_id)
+            .cloned()
+            .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
+        let quantity = activity.qty();
+        let close_only = has_position_close_intent(activity);
+
+        if asset_info.allows_negative_lots && close_only {
+            let existing_short_quantity = state
+                .positions
+                .get(asset_id)
+                .map(negative_lot_effective_quantity_abs)
+                .unwrap_or(Decimal::ZERO);
+
+            if existing_short_quantity.is_zero() {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "BUY activity {} is marked POSITION_CLOSE for asset {} but no short position exists. Split the trade into valid open/close activities.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+
+            if quantity > existing_short_quantity {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "BUY activity {} is marked POSITION_CLOSE for {} units of asset {} but only {} are short. Split the excess into a separate Buy activity.",
+                    activity.id, quantity, asset_id, existing_short_quantity
+                ))
+                .into());
+            }
+        }
+
+        if asset_info.requires_explicit_short_intent {
+            let existing_short_quantity = state
+                .positions
+                .get(asset_id)
+                .map(negative_lot_effective_quantity_abs)
+                .unwrap_or(Decimal::ZERO);
+
+            if close_only && existing_short_quantity.is_zero() {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "BUY activity {} is marked POSITION_CLOSE for stock/ETF asset {} but no short position exists. Skipping cash and lot effects.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+
+            if !close_only && existing_short_quantity > Decimal::ZERO {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "BUY activity {} would reduce short stock/ETF asset {} without Buy to Cover intent. Skipping cash and lot effects.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+        }
 
         let position = self.get_or_create_position_mut_cached(
             state,
@@ -858,11 +1028,6 @@ impl HoldingsCalculator {
         let position_currency = position.currency.clone();
         let needs_conversion =
             !position_currency.is_empty() && position_currency != activity.currency;
-
-        let asset_info = asset_cache
-            .get(asset_id)
-            .cloned()
-            .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
 
         // Get values for lot, converting if needed.
         let lot_unit_price = effective_unit_price(activity, &asset_info);
@@ -882,18 +1047,99 @@ impl HoldingsCalculator {
         // Use add_lot_values to avoid cloning Activity
         let book_basis =
             self.lot_book_basis_for_activity(activity, &position_currency, account_currency);
-        let _cost_basis_asset_curr = position.add_lot_values(
-            activity.id.clone(),
-            activity.qty(),
-            unit_price_for_lot,
-            fee_for_lot,
-            activity.activity_date,
-            fx_rate_used,
-            Some(activity.id.clone()),
-            book_basis,
-        )?;
+        let mut cash_quantity = quantity;
 
-        let total_cost = gross_trade_amount(activity, &asset_info) + activity.fee_amt();
+        if asset_info.allows_negative_lots
+            && (!asset_info.requires_explicit_short_intent || has_position_close_intent(activity))
+        {
+            let close_only = has_position_close_intent(activity);
+            let short_quantity = negative_lot_effective_quantity_abs(position);
+            let close_quantity = min_decimal(quantity, short_quantity);
+            let open_quantity = quantity - close_quantity;
+
+            if asset_info.requires_explicit_short_intent {
+                cash_quantity = close_quantity;
+            }
+
+            if close_quantity > Decimal::ZERO {
+                let close_fee = proportional_amount(fee_for_lot, close_quantity, quantity);
+                let close_cost = close_quantity * unit_price_for_lot + close_fee;
+                let reduction = position.reduce_negative_lots_fifo(close_quantity)?;
+                self.record_lot_disposals(
+                    &account_id,
+                    asset_id,
+                    activity,
+                    &reduction.removed_lots,
+                    close_cost,
+                    reduction.quantity_reduced,
+                    &position_currency,
+                );
+                let close_date = self.activity_local_date(activity).to_string();
+                for lot in &reduction.fully_consumed_lots {
+                    self.record_lot_closure(
+                        &account_id,
+                        asset_id,
+                        lot,
+                        &close_date,
+                        &activity.id,
+                        &position_currency,
+                    );
+                }
+            }
+
+            if open_quantity > Decimal::ZERO {
+                if close_only {
+                    if asset_info.requires_explicit_short_intent {
+                        warn!(
+                            "BUY activity {} covers {} of {} requested stock/ETF shares. Enter the excess as a separate Buy activity.",
+                            activity.id, close_quantity, quantity
+                        );
+                    } else {
+                        warn!(
+                            "Option BUY activity {} is marked POSITION_CLOSE but only {} of {} contracts were short. Leaving unmatched quantity cash-only.",
+                            activity.id, close_quantity, quantity
+                        );
+                    }
+                } else {
+                    let open_fee = proportional_amount(fee_for_lot, open_quantity, quantity);
+                    let lot_id = if close_quantity > Decimal::ZERO {
+                        format!("{}:open", activity.id)
+                    } else {
+                        activity.id.clone()
+                    };
+                    position.open_lot_signed(
+                        lot_id,
+                        open_quantity,
+                        unit_price_for_lot,
+                        open_fee,
+                        activity.activity_date,
+                        fx_rate_used,
+                        Some(activity.id.clone()),
+                        book_basis,
+                        true,
+                    )?;
+                }
+            }
+        } else {
+            let _cost_basis_asset_curr = position.add_lot_values(
+                activity.id.clone(),
+                quantity,
+                unit_price_for_lot,
+                fee_for_lot,
+                activity.activity_date,
+                fx_rate_used,
+                Some(activity.id.clone()),
+                book_basis,
+            )?;
+        }
+
+        let gross_cost = proportional_amount(
+            gross_trade_amount(activity, &asset_info),
+            cash_quantity,
+            quantity,
+        );
+        let cash_fee = proportional_amount(activity.fee_amt(), cash_quantity, quantity);
+        let total_cost = gross_cost + cash_fee;
         if activity_currency != account_currency {
             if let Some(fx_rate) = activity.fx_rate.filter(|r| *r != Decimal::ZERO) {
                 // Broker converted at transaction time — book in account currency
@@ -921,6 +1167,7 @@ impl HoldingsCalculator {
     ) -> Result<()> {
         let activity_currency = &activity.currency;
         let asset_id = activity.asset_id.as_deref().unwrap_or("");
+        let account_id = state.account_id.clone();
 
         // Ensure cache is populated for multiplier lookup
         self.ensure_asset_cached(asset_id, activity_currency, asset_cache);
@@ -929,6 +1176,58 @@ impl HoldingsCalculator {
             .get(asset_id)
             .cloned()
             .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
+
+        let quantity = activity.qty();
+        let close_only = has_position_close_intent(activity);
+        if asset_info.allows_negative_lots && close_only {
+            let existing_long_quantity = state
+                .positions
+                .get(asset_id)
+                .map(positive_lot_effective_quantity)
+                .unwrap_or(Decimal::ZERO);
+
+            if existing_long_quantity.is_zero() {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "SELL activity {} is marked POSITION_CLOSE for asset {} but no long position exists. Split the trade into valid open/close activities.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+
+            if quantity > existing_long_quantity {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "SELL activity {} is marked POSITION_CLOSE for {} units of asset {} but only {} are long. Split the excess into a separate Sell activity.",
+                    activity.id, quantity, asset_id, existing_long_quantity
+                ))
+                .into());
+            }
+        }
+
+        let open_short_intent = has_sell_short_open_intent(activity);
+        if asset_info.requires_explicit_short_intent {
+            let existing_quantity = state
+                .positions
+                .get(asset_id)
+                .map(|position| position.quantity)
+                .unwrap_or(Decimal::ZERO);
+
+            if open_short_intent && existing_quantity > Decimal::ZERO {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "SELL activity {} is marked POSITION_OPEN for stock/ETF asset {} while a long position exists. Split into a normal Sell and a Sell Short activity.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+
+            if !open_short_intent && existing_quantity < Decimal::ZERO {
+                return Err(CalculatorError::InvalidActivity(format!(
+                    "SELL activity {} would increase short stock/ETF asset {} without Sell Short intent. Skipping cash and lot effects.",
+                    activity.id, asset_id
+                ))
+                .into());
+            }
+        }
+
         let total_proceeds = gross_trade_amount(activity, &asset_info) - activity.fee_amt();
         if activity_currency != account_currency {
             if let Some(fx_rate) = activity.fx_rate.filter(|r| *r != Decimal::ZERO) {
@@ -940,6 +1239,98 @@ impl HoldingsCalculator {
             }
         } else {
             add_cash(state, activity_currency, total_proceeds);
+        }
+
+        if asset_info.allows_negative_lots
+            && (!asset_info.requires_explicit_short_intent || open_short_intent)
+        {
+            let position = self.get_or_create_position_mut_cached(
+                state,
+                asset_id,
+                activity_currency,
+                activity.activity_date,
+                asset_cache,
+            )?;
+            let position_currency = position.currency.clone();
+            let needs_conversion =
+                !position_currency.is_empty() && position_currency != activity.currency;
+            let lot_unit_price = effective_unit_price(activity, &asset_info);
+            let (unit_price_for_lot, fee_for_lot, fx_rate_used) = if needs_conversion {
+                let (converted_price, converted_fee, fx_rate) = self.convert_to_position_currency(
+                    lot_unit_price,
+                    activity.fee_amt(),
+                    activity,
+                    &position_currency,
+                    account_currency,
+                )?;
+                (converted_price, converted_fee, fx_rate)
+            } else {
+                (lot_unit_price, activity.fee_amt(), None)
+            };
+
+            let long_quantity = positive_lot_effective_quantity(position);
+            let close_quantity = min_decimal(quantity, long_quantity);
+            let open_quantity = quantity - close_quantity;
+
+            if close_quantity > Decimal::ZERO {
+                let close_fee = proportional_amount(fee_for_lot, close_quantity, quantity);
+                let close_proceeds = close_quantity * unit_price_for_lot - close_fee;
+                let reduction = position.reduce_positive_lots_fifo(close_quantity)?;
+                self.record_lot_disposals(
+                    &account_id,
+                    asset_id,
+                    activity,
+                    &reduction.removed_lots,
+                    close_proceeds,
+                    reduction.quantity_reduced,
+                    &position_currency,
+                );
+                let close_date = self.activity_local_date(activity).to_string();
+                for lot in &reduction.fully_consumed_lots {
+                    self.record_lot_closure(
+                        &account_id,
+                        asset_id,
+                        lot,
+                        &close_date,
+                        &activity.id,
+                        &position_currency,
+                    );
+                }
+            }
+
+            if open_quantity > Decimal::ZERO {
+                if close_only {
+                    warn!(
+                        "Option SELL activity {} is marked POSITION_CLOSE but only {} of {} contracts were long. Leaving unmatched quantity cash-only.",
+                        activity.id, close_quantity, quantity
+                    );
+                } else {
+                    let open_fee = proportional_amount(fee_for_lot, open_quantity, quantity);
+                    let lot_id = if close_quantity > Decimal::ZERO {
+                        format!("{}:open", activity.id)
+                    } else {
+                        activity.id.clone()
+                    };
+                    let book_basis = self.lot_book_basis_for_activity(
+                        activity,
+                        &position_currency,
+                        account_currency,
+                    );
+                    position.open_lot_signed(
+                        lot_id,
+                        -open_quantity,
+                        unit_price_for_lot,
+                        open_fee,
+                        activity.activity_date,
+                        fx_rate_used,
+                        Some(activity.id.clone()),
+                        book_basis,
+                        true,
+                    )?;
+                }
+            }
+
+            return Ok(());
         }
 
         if let Some(position) = state.positions.get_mut(asset_id) {
@@ -1241,6 +1632,10 @@ impl HoldingsCalculator {
             let position_currency = position.currency.clone();
             let needs_conversion =
                 !position_currency.is_empty() && position_currency != activity.currency;
+            let asset_info = asset_cache
+                .get(asset_id)
+                .cloned()
+                .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
 
             // Try lot-level transfer: look up cached lots from paired TRANSFER_OUT
             let cached_lots = activity.source_group_id.as_ref().and_then(|group_id| {
@@ -1253,7 +1648,12 @@ impl HoldingsCalculator {
             let (cost_basis_asset_curr, added_lots) = if let Some(lots) = cached_lots {
                 // Lot-level transfer: lots are already in the asset's position currency
                 // (same asset = same listing currency), so no FX conversion needed.
-                let cost_basis = position.add_transferred_lots(&activity.id, &lots, None)?;
+                let cost_basis = position.add_transferred_lots(
+                    &activity.id,
+                    &lots,
+                    None,
+                    asset_info.allows_negative_lots,
+                )?;
                 let added_lots: Vec<super::Lot> = position
                     .lots
                     .iter()
@@ -1271,10 +1671,6 @@ impl HoldingsCalculator {
                         activity.id
                     );
                 }
-                let asset_info = asset_cache
-                    .get(asset_id)
-                    .cloned()
-                    .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
                 let compiled_economics =
                     ActivityEconomicsResolver::compile_activity_with_unit_multiplier(
                         activity,
@@ -1546,7 +1942,11 @@ impl HoldingsCalculator {
                     );
                 }
 
-                let reduction = position.reduce_lots_fifo(activity.qty())?;
+                let reduction = if position.quantity.is_sign_negative() {
+                    position.reduce_negative_lots_fifo(activity.qty())?
+                } else {
+                    position.reduce_lots_fifo(activity.qty())?
+                };
                 let cost_basis_removed = reduction.cost_basis_removed;
                 self.record_lot_disposals(
                     &state.account_id,
@@ -1694,7 +2094,11 @@ impl HoldingsCalculator {
                 if let Some(position) = state.positions.get_mut(asset_id) {
                     let position_currency = position.currency.clone();
                     let qty = activity.qty();
-                    let reduction = position.reduce_lots_fifo(qty)?;
+                    let reduction = if position.quantity < Decimal::ZERO {
+                        position.reduce_negative_lots_fifo(qty)?
+                    } else {
+                        position.reduce_positive_lots_fifo(qty)?
+                    };
                     self.record_lot_disposals(
                         &state.account_id,
                         asset_id,
@@ -1815,12 +2219,17 @@ impl HoldingsCalculator {
                 let is_alternative = asset.is_alternative();
                 let contract_multiplier = asset.contract_multiplier();
                 let is_bond = asset.is_bond();
+                let allows_negative_lots = ShortabilityPolicy::allows_negative_lots(&asset, None);
+                let requires_explicit_short_intent =
+                    ShortabilityPolicy::requires_explicit_short_intent(&asset, None);
 
                 Ok(AssetPositionInfo {
                     currency: asset.quote_ccy,
                     is_alternative,
                     contract_multiplier,
                     is_bond,
+                    allows_negative_lots,
+                    requires_explicit_short_intent,
                 })
             }
             Err(e) => {
