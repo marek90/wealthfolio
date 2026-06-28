@@ -584,7 +584,11 @@ const getColumns = (
       return (
         <div className="flex min-h-[40px] flex-col items-end justify-center px-4">
           <AmountDisplay value={value} currency={currency} colorFormat={true} isHidden={isHidden} />
-          <GainPercent className="text-xs" value={holding.realizedGainPct || 0} />
+          {holding.realizedGainPct == null ? (
+            <span className="text-muted-foreground text-xs">-</span>
+          ) : (
+            <GainPercent className="text-xs" value={holding.realizedGainPct} />
+          )}
         </div>
       );
     },
