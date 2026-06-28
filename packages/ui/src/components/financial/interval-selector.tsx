@@ -3,7 +3,7 @@ import { useIsMobile } from "../../hooks/use-mobile";
 import { usePersistentState } from "../../hooks/use-persistent-state";
 import { cn } from "../../lib/utils";
 import { startOfYear, subDays, subMonths, subWeeks, subYears } from "date-fns";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 export type TimePeriod = "1D" | "1W" | "1M" | "3M" | "6M" | "YTD" | "1Y" | "5Y" | "ALL";
 export interface DateRange {
@@ -135,12 +135,58 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
     title: interval.description,
   }));
 
+  // Native horizontal touch-scroll is impossible when this lives inside the dashboard's
+  // Embla carousel: the carousel viewport sets `touch-action: pan-y`, which intersects with
+  // any descendant value to block horizontal panning (pan-x ∩ pan-y = ∅). So we drive the
+  // scroll ourselves: stop the touch from reaching Embla (no tab swipe) and set scrollLeft
+  // directly on each move. Requires `touch-pan-y` + no `scroll-smooth` on the element above.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let startX = 0, startY = 0, startScrollLeft = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      // Stop the touch from reaching the parent Embla carousel's viewport listener,
+      // so dragging the pills never triggers a tab swipe (data-no-swipe-drag is
+      // unreliable here because the scroll div opts in/out of pointer-events).
+      e.stopPropagation();
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      startScrollLeft = el.scrollLeft;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (Math.abs(dx) < 4 || Math.abs(dy) > Math.abs(dx)) return;
+      e.preventDefault();
+      el.scrollLeft = startScrollLeft - dx;
+    };
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+  }, []);
+
   return (
     <div className={cn("pointer-events-none relative w-full min-w-0", className)}>
       <div
+        ref={scrollRef}
+        // Prevents Embla Carousel (SwipableView) from intercepting horizontal drags
+        // so the pill scroll works inside swipable dashboard tabs.
+        data-no-swipe-drag
         className={cn(
-          "pointer-events-none relative z-30 flex w-full justify-center overflow-x-auto overflow-y-hidden",
-          "touch-pan-x snap-x snap-mandatory overscroll-x-contain scroll-smooth",
+          // `overflow-x-auto!` (important) overrides the unlayered global
+          // `@media (max-width:1024px) .flex { overflow-x: hidden }` rule in globals.css,
+          // which otherwise clips the scrollable pills (5Y/ALL) on mobile portrait.
+          // `justify-center-safe` keeps centering when they fit but left-aligns + scrolls when they overflow.
+          // `pointer-events-auto`: the strip must own the touch so it scrolls and blocks the tab-swipe carousel.
+          "pointer-events-auto relative z-30 flex w-full justify-center-safe overflow-x-auto! overflow-y-hidden",
+          // touch-pan-y (NOT pan-x): horizontal touchmoves stay cancelable and are delivered to the
+          // JS handler below, while vertical still scrolls the page natively. NO scroll-smooth / snap:
+          // they make programmatic scrollLeft animate, so per-touchmove assignments never track the finger.
+          "touch-pan-y overscroll-x-contain",
           "px-2 md:px-0",
           "[&::-webkit-scrollbar]:hidden",
           "[scrollbar-width:none]",
@@ -153,7 +199,10 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
           onValueChange={handleValueChange}
           size={isMobile ? "compact" : "sm"}
           variant="default"
-          className="pointer-events-auto bg-transparent"
+          // flex-none: keep the group at content width so the OUTER scroll div (above) is the
+          // element that overflows and scrolls. Without it the group (it has its own overflow-x-auto)
+          // shrinks to fit and scrolls internally, so scrollRef.scrollLeft would be a no-op.
+          className="pointer-events-auto bg-transparent flex-none"
         />
       </div>
     </div>
