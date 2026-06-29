@@ -8,12 +8,53 @@ use super::economics::storage_money;
 use super::{HoldingsCalculator, ProjectionRun, SideEffectBuffer};
 use crate::activities::Activity;
 use crate::lots::{LotClosure, LotDisposal};
-use crate::portfolio::snapshot::Position;
+use crate::portfolio::snapshot::{FifoReductionResult, Position};
 use chrono::{NaiveDate, Utc};
 use log::{error, warn};
 use rust_decimal::Decimal;
 
 impl HoldingsCalculator {
+    /// Records a FIFO reduction's tax-lot facts: stages disposals for the
+    /// removed lots and closures for the fully consumed ones. The closure date
+    /// is the activity's user-local date.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_reduction(
+        &self,
+        account_id: &str,
+        asset_id: &str,
+        activity: &Activity,
+        reduction: &FifoReductionResult,
+        proceeds: Decimal,
+        position_currency: &str,
+        run: &ProjectionRun,
+        buffer: &mut SideEffectBuffer,
+    ) {
+        self.record_lot_disposals(
+            account_id,
+            asset_id,
+            activity,
+            &reduction.removed_lots,
+            proceeds,
+            reduction.quantity_reduced,
+            position_currency,
+            run,
+            buffer,
+        );
+        let close_date = self.activity_local_date(activity).to_string();
+        for lot in &reduction.fully_consumed_lots {
+            self.record_lot_closure(
+                account_id,
+                asset_id,
+                lot,
+                &close_date,
+                &activity.id,
+                position_currency,
+                run,
+                buffer,
+            );
+        }
+    }
+
     /// Records a lot closure in the disposed lots log, carrying the full lot
     /// data so the persistence layer can INSERT the closed lot if it was never
     /// written to the database (e.g. during a full recalc/replay).

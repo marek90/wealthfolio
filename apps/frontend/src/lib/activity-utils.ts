@@ -5,6 +5,8 @@ import {
   INCOME_ACTIVITY_TYPES,
   InstrumentType,
   METADATA_CONTRACT_MULTIPLIER,
+  normalizePositionIntentAlias,
+  POSITION_INTENT_ALIASES,
   SYMBOL_REQUIRED_TYPES,
 } from "./constants";
 import { ActivityDetails } from "./types";
@@ -85,55 +87,34 @@ export const needsImportAssetResolution = (
   return isAssetIdentityRequired(activityType, subtype);
 };
 
-const normalizeSubtypeToken = (subtype: string): string =>
-  subtype
-    .trim()
-    .toUpperCase()
-    .replace(/[\s-]+/g, "_");
-
 export const canonicalizeActivitySubtype = (
   activityType: string,
   subtype?: string | null,
 ): string | undefined => {
   const trimmedSubtype = subtype?.trim() ?? "";
-  const normalizedSubtype = trimmedSubtype ? normalizeSubtypeToken(trimmedSubtype) : "";
-  if (!normalizedSubtype) return undefined;
+  if (!trimmedSubtype) return undefined;
+  const normalizedSubtype = normalizePositionIntentAlias(trimmedSubtype);
 
   const normalizedActivityType = activityType?.trim().toUpperCase();
-  if (normalizedActivityType === ActivityType.BUY) {
-    if (["BTO", "BUY_TO_OPEN", "BUY_OPEN", "OPEN_BUY"].includes(normalizedSubtype)) {
-      return ACTIVITY_SUBTYPES.POSITION_OPEN;
-    }
+  const sideAliases =
+    normalizedActivityType === ActivityType.BUY
+      ? POSITION_INTENT_ALIASES[ActivityType.BUY]
+      : normalizedActivityType === ActivityType.SELL
+        ? POSITION_INTENT_ALIASES[ActivityType.SELL]
+        : undefined;
+  if (sideAliases) {
     if (
-      [
-        "BTC",
-        "BUY_TO_CLOSE",
-        "BUY_CLOSE",
-        "CLOSE_BUY",
-        "BUY_TO_COVER",
-        "BUY_COVER",
-        "COVER_SHORT",
-      ].includes(normalizedSubtype)
-    ) {
-      return ACTIVITY_SUBTYPES.POSITION_CLOSE;
-    }
-  }
-
-  if (normalizedActivityType === ActivityType.SELL) {
-    if (
-      [
-        "STO",
-        "SELL_TO_OPEN",
-        "SELL_OPEN",
-        "OPEN_SELL",
-        "SELL_SHORT",
-        "SHORT_SELL",
-        "SELL_SHORT_TO_OPEN",
-      ].includes(normalizedSubtype)
+      (sideAliases[ACTIVITY_SUBTYPES.POSITION_OPEN] as readonly string[]).includes(
+        normalizedSubtype,
+      )
     ) {
       return ACTIVITY_SUBTYPES.POSITION_OPEN;
     }
-    if (["STC", "SELL_TO_CLOSE", "SELL_CLOSE", "CLOSE_SELL"].includes(normalizedSubtype)) {
+    if (
+      (sideAliases[ACTIVITY_SUBTYPES.POSITION_CLOSE] as readonly string[]).includes(
+        normalizedSubtype,
+      )
+    ) {
       return ACTIVITY_SUBTYPES.POSITION_CLOSE;
     }
   }

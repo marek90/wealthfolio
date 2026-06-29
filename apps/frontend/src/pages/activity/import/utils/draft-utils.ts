@@ -1,4 +1,10 @@
-import { ACTIVITY_SUBTYPES, AccountType, ActivityType, ImportFormat } from "@/lib/constants";
+import {
+  ACTIVITY_SUBTYPES,
+  AccountType,
+  ActivityType,
+  ImportFormat,
+  POSITION_INTENT_ALIASES,
+} from "@/lib/constants";
 import { canonicalizeActivitySubtype } from "@/lib/activity-utils";
 import type { ActivityImport } from "@/lib/types";
 import { tryParseDate } from "@/lib/utils";
@@ -174,34 +180,23 @@ function signedDirection(value: string | undefined): "positive" | "negative" | u
   return amount < 0 ? "negative" : "positive";
 }
 
+const BUY_POSITION_INTENT_ALIASES = [
+  ...POSITION_INTENT_ALIASES[ActivityType.BUY][ACTIVITY_SUBTYPES.POSITION_OPEN],
+  ...POSITION_INTENT_ALIASES[ActivityType.BUY][ACTIVITY_SUBTYPES.POSITION_CLOSE],
+] as readonly string[];
+const SELL_POSITION_INTENT_ALIASES = [
+  ...POSITION_INTENT_ALIASES[ActivityType.SELL][ACTIVITY_SUBTYPES.POSITION_OPEN],
+  ...POSITION_INTENT_ALIASES[ActivityType.SELL][ACTIVITY_SUBTYPES.POSITION_CLOSE],
+] as readonly string[];
+
 function inferTradeTypeFromPositionIntentSubtype(
   subtypeValue: string | undefined,
 ): typeof ActivityType.BUY | typeof ActivityType.SELL | undefined {
   const subtype = normalizeSignAwareActivityLabel(subtypeValue);
-  if (["BTO", "BUYTOOPEN", "BUYOPEN", "OPENBUY"].includes(subtype)) {
+  if (BUY_POSITION_INTENT_ALIASES.includes(subtype)) {
     return ActivityType.BUY;
   }
-  if (
-    ["BTC", "BUYTOCLOSE", "BUYCLOSE", "CLOSEBUY", "BUYTOCOVER", "BUYCOVER", "COVERSHORT"].includes(
-      subtype,
-    )
-  ) {
-    return ActivityType.BUY;
-  }
-  if (
-    [
-      "STO",
-      "SELLTOOPEN",
-      "SELLOPEN",
-      "OPENSELL",
-      "SELLSHORT",
-      "SHORTSELL",
-      "SELLSHORTTOOPEN",
-    ].includes(subtype)
-  ) {
-    return ActivityType.SELL;
-  }
-  if (["STC", "SELLTOCLOSE", "SELLCLOSE", "CLOSESELL"].includes(subtype)) {
+  if (SELL_POSITION_INTENT_ALIASES.includes(subtype)) {
     return ActivityType.SELL;
   }
   return undefined;

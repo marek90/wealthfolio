@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BuyForm } from "../buy-form";
 import { ACTIVITY_SUBTYPES } from "@/lib/constants";
@@ -32,50 +32,104 @@ vi.mock("@/hooks/use-holdings", () => ({
 }));
 
 // Mock the fields components
-vi.mock("../fields", () => ({
-  AccountSelect: ({ name, accounts }: { name: string; accounts: AccountSelectOption[] }) => (
-    <select data-testid={`select-${name}`} name={name}>
-      <option value="">Select account...</option>
-      {accounts.map((acc) => (
-        <option key={acc.value} value={acc.value}>
-          {acc.label}
-        </option>
-      ))}
-    </select>
-  ),
-  SymbolSearch: ({ name }: { name: string }) => (
-    <input data-testid={`symbol-search-${name}`} name={name} />
-  ),
-  DatePicker: ({ name, label }: { name: string; label: string }) => (
-    <div data-testid={`date-picker-${name}`}>{label}</div>
-  ),
-  AmountInput: ({ name, label }: { name: string; label: string }) => (
-    <div>
-      <label htmlFor={name}>{label}</label>
-      <input data-testid={`input-${name}`} name={name} type="number" id={name} />
-    </div>
-  ),
-  QuantityInput: ({ name, label }: { name: string; label: string }) => (
-    <div>
-      <label htmlFor={name}>{label}</label>
-      <input data-testid={`input-${name}`} name={name} type="number" id={name} />
-    </div>
-  ),
-  NotesInput: ({ name, label }: { name: string; label: string }) => (
-    <div>
-      <label htmlFor={name}>{label}</label>
-      <textarea data-testid={`textarea-${name}`} name={name} id={name} />
-    </div>
-  ),
-  AdvancedOptionsSection: () => <div data-testid="advanced-options-section" />,
-  AssetTypeSelector: ({ name }: { name: string }) => (
-    <div data-testid={`asset-type-selector-${name}`} />
-  ),
-  OptionContractFields: () => <div data-testid="option-contract-fields" />,
-  PositionIntentSelector: () => <div data-testid="position-intent-selector" />,
-  StockTradeIntentSelector: () => <div data-testid="stock-trade-intent-selector" />,
-  createValidatedSubmit: vi.fn((_form, handler) => handler),
-}));
+vi.mock("../fields", async () => {
+  const { useFormContext } =
+    await vi.importActual<typeof import("react-hook-form")>("react-hook-form");
+
+  return {
+    AccountSelect: ({ name, accounts }: { name: string; accounts: AccountSelectOption[] }) => {
+      const { register } = useFormContext();
+      return (
+        <select data-testid={`select-${name}`} {...register(name)}>
+          <option value="">Select account...</option>
+          {accounts.map((acc) => (
+            <option key={acc.value} value={acc.value}>
+              {acc.label}
+            </option>
+          ))}
+        </select>
+      );
+    },
+    SymbolSearch: ({ name }: { name: string }) => {
+      const { register } = useFormContext();
+      return <input data-testid={`symbol-search-${name}`} {...register(name)} />;
+    },
+    DatePicker: ({ name, label }: { name: string; label: string }) => (
+      <div data-testid={`date-picker-${name}`}>{label}</div>
+    ),
+    AmountInput: ({ name, label }: { name: string; label: string }) => {
+      const { register } = useFormContext();
+      return (
+        <div>
+          <label htmlFor={name}>{label}</label>
+          <input
+            data-testid={`input-${name}`}
+            type="number"
+            id={name}
+            {...register(name, { valueAsNumber: true })}
+          />
+        </div>
+      );
+    },
+    QuantityInput: ({ name, label }: { name: string; label: string }) => {
+      const { register } = useFormContext();
+      return (
+        <div>
+          <label htmlFor={name}>{label}</label>
+          <input
+            data-testid={`input-${name}`}
+            type="number"
+            id={name}
+            {...register(name, { valueAsNumber: true })}
+          />
+        </div>
+      );
+    },
+    NotesInput: ({ name, label }: { name: string; label: string }) => {
+      const { register } = useFormContext();
+      return (
+        <div>
+          <label htmlFor={name}>{label}</label>
+          <textarea data-testid={`textarea-${name}`} id={name} {...register(name)} />
+        </div>
+      );
+    },
+    AdvancedOptionsSection: () => <div data-testid="advanced-options-section" />,
+    AssetTypeSelector: ({ name }: { name: string }) => (
+      <div data-testid={`asset-type-selector-${name}`} />
+    ),
+    OptionContractFields: () => {
+      const { register } = useFormContext();
+      return (
+        <div data-testid="option-contract-fields">
+          <input data-testid="input-underlyingSymbol" {...register("underlyingSymbol")} />
+          <input
+            data-testid="input-strikePrice"
+            type="number"
+            {...register("strikePrice", { valueAsNumber: true })}
+          />
+          <input data-testid="input-expirationDate" {...register("expirationDate")} />
+        </div>
+      );
+    },
+    PositionIntentSelector: ({ name = "subtype" }: { name?: string }) => {
+      const { setValue, watch } = useFormContext();
+      const value = watch(name);
+      return (
+        <div data-testid="position-intent-selector" data-value={value ?? ""}>
+          <button type="button" onClick={() => setValue(name, "POSITION_OPEN")}>
+            Open
+          </button>
+          <button type="button" onClick={() => setValue(name, "POSITION_CLOSE")}>
+            Close
+          </button>
+        </div>
+      );
+    },
+    StockTradeIntentSelector: () => <div data-testid="stock-trade-intent-selector" />,
+    createValidatedSubmit: vi.fn((form, handler) => form.handleSubmit(handler)),
+  };
+});
 
 // Mock UI components
 vi.mock("@wealthfolio/ui/components/ui/button", () => ({
@@ -325,6 +379,91 @@ describe("BuyForm", () => {
 
       expect(screen.getByText(/requires an existing short position/i)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /buy to cover/i })).toBeEnabled();
+    });
+
+    it("resets the Buy to Cover intent when the selected symbol changes", async () => {
+      const user = userEvent.setup();
+      holdingsHook.useHoldings.mockReturnValue({
+        holdings: [
+          {
+            id: "SEC-acc-1-AAPL",
+            instrument: { id: "AAPL", symbol: "AAPL" },
+            quantity: -5,
+          } as Holding,
+        ],
+        isLoading: false,
+      });
+
+      render(
+        <BuyForm
+          accounts={mockAccounts}
+          defaultValues={{
+            accountId: "acc-1",
+            assetId: "AAPL",
+            assetType: "stock",
+            subtype: ACTIVITY_SUBTYPES.POSITION_CLOSE,
+          }}
+          onSubmit={mockOnSubmit}
+        />,
+      );
+
+      // Starts as Buy to Cover.
+      expect(screen.getByRole("button", { name: /buy to cover/i })).toBeInTheDocument();
+
+      const symbolInput = screen.getByTestId("symbol-search-assetId");
+      await user.clear(symbolInput);
+      await user.type(symbolInput, "MSFT");
+
+      // Intent reset back to normal Buy.
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /add buy/i })).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("Option Position Intent", () => {
+    const optionDefaults = {
+      accountId: "acc-1",
+      assetType: "option" as const,
+      underlyingSymbol: "AAPL",
+      strikePrice: 200,
+      expirationDate: "2026-12-19",
+      optionType: "CALL" as const,
+      quantity: 1,
+      unitPrice: 5,
+      currency: "USD",
+    };
+
+    it("blocks submit for an option with no Open/Close intent chosen", async () => {
+      const user = userEvent.setup();
+
+      render(
+        <BuyForm accounts={mockAccounts} defaultValues={optionDefaults} onSubmit={mockOnSubmit} />,
+      );
+
+      expect(screen.getByTestId("position-intent-selector")).toHaveAttribute("data-value", "");
+
+      await user.click(screen.getByRole("button", { name: /add buy/i }));
+
+      await waitFor(() => {
+        expect(mockOnSubmit).not.toHaveBeenCalled();
+      });
+    });
+
+    it("submits an option once an intent is chosen", async () => {
+      const user = userEvent.setup();
+
+      render(
+        <BuyForm accounts={mockAccounts} defaultValues={optionDefaults} onSubmit={mockOnSubmit} />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open" }));
+      await user.click(screen.getByRole("button", { name: /buy to open/i }));
+
+      await waitFor(() => {
+        expect(mockOnSubmit).toHaveBeenCalledTimes(1);
+      });
+      expect(mockOnSubmit.mock.calls[0][0].subtype).toBe(ACTIVITY_SUBTYPES.POSITION_OPEN);
     });
   });
 });

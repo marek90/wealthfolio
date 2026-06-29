@@ -8,7 +8,7 @@ import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Card, CardContent } from "@wealthfolio/ui/components/ui/card";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { z } from "zod";
 import {
@@ -101,6 +101,17 @@ export const sellFormSchema = z
     }
     // Option contracts require all 4 structured fields
     if (data.assetType === "option") {
+      // Require an explicit Open/Close choice — never silently default the intent.
+      if (
+        data.subtype !== ACTIVITY_SUBTYPES.POSITION_OPEN &&
+        data.subtype !== ACTIVITY_SUBTYPES.POSITION_CLOSE
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Select whether this opens or closes a position.",
+          path: ["subtype"],
+        });
+      }
       if (!data.underlyingSymbol?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -217,8 +228,26 @@ export function SellForm({
   const isOption = assetType === "option";
   const isStock = assetType === "stock";
   const subtype = watch("subtype");
+
+  // Reset the stock "Sell Short" intent when the selected symbol changes — a
+  // short intent for one symbol must not silently carry over to another.
+  // SymbolSearch owns the assetId field and exposes no onChange, so we track the
+  // previous value to fire only on an actual symbol switch (not on mount/edit).
+  const prevAssetIdRef = useRef(assetId);
+  useEffect(() => {
+    if (prevAssetIdRef.current !== assetId) {
+      if (isStock && subtype === ACTIVITY_SUBTYPES.POSITION_OPEN) {
+        setValue("subtype", null);
+      }
+      prevAssetIdRef.current = assetId;
+    }
+  }, [assetId, isStock, subtype, setValue]);
   const optionSubmitLabel =
-    subtype === ACTIVITY_SUBTYPES.POSITION_OPEN ? "Sell to Open" : "Sell to Close";
+    subtype === ACTIVITY_SUBTYPES.POSITION_OPEN
+      ? "Sell to Open"
+      : subtype === ACTIVITY_SUBTYPES.POSITION_CLOSE
+        ? "Sell to Close"
+        : "Add Sell";
   const isStockSellShort = isStock && subtype === ACTIVITY_SUBTYPES.POSITION_OPEN;
   const stockSubmitLabel = isStockSellShort ? "Sell Short" : "Add Sell";
 
@@ -241,7 +270,8 @@ export function SellForm({
     if (value === "option") {
       setValue("quoteMode", QuoteMode.MARKET);
       setValue("assetKind", "OPTION");
-      setValue("subtype", ACTIVITY_SUBTYPES.POSITION_CLOSE);
+      // No default position intent — the user must explicitly pick Open or Close.
+      setValue("subtype", null);
     } else if (value === "bond") {
       setValue("quoteMode", QuoteMode.MARKET);
       setValue("assetKind", "BOND");
@@ -390,7 +420,7 @@ export function SellForm({
       data.assetId = occSymbol;
       data.existingAssetId = undefined;
       data.symbolInstrumentType = "OPTION";
-      data.subtype = data.subtype ?? ACTIVITY_SUBTYPES.POSITION_CLOSE;
+      // subtype is required for options by the schema — no silent default here.
       data.assetMetadata = {
         ...data.assetMetadata,
         name: `${data.underlyingSymbol.toUpperCase()} ${data.expirationDate} ${data.optionType} ${data.strikePrice}`,
@@ -463,11 +493,7 @@ export function SellForm({
             {isOption ? (
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h4 className="text-muted-foreground text-sm font-medium">Trade Details</h4>
-                <PositionIntentSelector
-                  control={form.control}
-                  name="subtype"
-                  defaultValue={ACTIVITY_SUBTYPES.POSITION_CLOSE}
-                />
+                <PositionIntentSelector control={form.control} name="subtype" />
               </div>
             ) : isStock ? (
               <div className="space-y-3">

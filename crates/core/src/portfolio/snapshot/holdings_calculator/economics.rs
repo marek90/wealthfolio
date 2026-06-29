@@ -120,14 +120,6 @@ pub(crate) fn effective_unit_price(activity: &Activity, asset_info: &AssetPositi
     }
 }
 
-pub(crate) fn min_decimal(left: Decimal, right: Decimal) -> Decimal {
-    if left <= right {
-        left
-    } else {
-        right
-    }
-}
-
 pub(crate) fn proportional_amount(
     amount: Decimal,
     part_quantity: Decimal,

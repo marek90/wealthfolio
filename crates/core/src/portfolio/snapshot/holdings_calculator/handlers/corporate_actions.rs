@@ -94,35 +94,24 @@ impl HoldingsCalculator {
                 if let Some(position) = state.positions.get_mut(asset_id) {
                     let position_currency = position.currency.clone();
                     let qty = activity.qty();
+                    // Positions are single-signed (transfer-in nets opposite-sign
+                    // lots), so dispatching on the net position sign relieves the
+                    // correct leg.
                     let reduction = if position.quantity < Decimal::ZERO {
                         position.reduce_negative_lots_fifo(qty)?
                     } else {
                         position.reduce_positive_lots_fifo(qty)?
                     };
-                    self.record_lot_disposals(
+                    self.record_reduction(
                         &state.account_id,
                         asset_id,
                         activity,
-                        &reduction.removed_lots,
+                        &reduction,
                         Decimal::ZERO,
-                        reduction.quantity_reduced,
                         &position_currency,
                         run,
                         buffer,
                     );
-                    let close_date = self.activity_local_date(activity).to_string();
-                    for lot in &reduction.fully_consumed_lots {
-                        self.record_lot_closure(
-                            &state.account_id,
-                            asset_id,
-                            lot,
-                            &close_date,
-                            &activity.id,
-                            &position_currency,
-                            run,
-                            buffer,
-                        );
-                    }
                     debug!(
                         "OPTION_EXPIRY: removed qty={} cost_basis={} from {} (activity {})",
                         reduction.quantity_reduced,

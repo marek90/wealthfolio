@@ -7338,6 +7338,375 @@ mod tests {
     }
 
     #[test]
+    fn test_transfer_in_long_covers_resident_short_option_no_mixed_position() {
+        // Account A holds a short option (-2). A TRANSFER_IN brings a long (+1)
+        // of the same option via cached lots. The incoming long must COVER one
+        // contract of the resident short FIFO (realizing P/L) rather than
+        // creating a mixed-sign position. The residual short (-1) must then be
+        // reducible by a later OPTION_EXPIRY.
+        let option_symbol = "AAPL250321P00150000";
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+
+        let mut calculator = CalcHarness::new(HoldingsCalculator::new(
+            Arc::new(mock_fx_service),
+            base_currency,
+            Arc::new(repo),
+        ));
+
+        let open_date_str = "2025-01-02";
+        let transfer_date_str = "2025-06-01";
+        let expiry_date_str = "2025-06-02";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let transfer_date = NaiveDate::from_str(transfer_date_str).unwrap();
+        let expiry_date = NaiveDate::from_str(expiry_date_str).unwrap();
+
+        // --- Source account: open a long (+1) and transfer it out to seed the
+        // shared transfer-lots cache under group "grp_cover". ---
+        let prev_src = create_initial_snapshot("acc_src", "USD", "2024-12-31");
+        let buy_long = {
+            let mut a = create_default_activity(
+                "buy_to_open_long_opt",
+                ActivityType::Buy,
+                option_symbol,
+                dec!(1),
+                dec!(1), // unit price 1.00 * multiplier 100 = 100 basis
+                dec!(0),
+                "USD",
+                open_date_str,
+            );
+            a.account_id = "acc_src".to_string();
+            a
+        };
+        let result_src_open = calculator
+            .calculate_next_holdings(&prev_src, std::slice::from_ref(&buy_long), open_date)
+            .unwrap();
+        let pos_src = result_src_open
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("source account should hold long option");
+        assert_eq!(pos_src.quantity, dec!(1));
+        assert_eq!(pos_src.total_cost_basis, dec!(100));
+
+        let transfer_out = create_transfer_activity(
+            "xfer_out_long_opt",
+            ActivityType::TransferOut,
+            option_symbol,
+            dec!(1),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_src",
+            Some("grp_cover"),
+        );
+        calculator
+            .calculate_next_holdings(&result_src_open.snapshot, &[transfer_out], transfer_date)
+            .unwrap();
+
+        // --- Account A: open a short (-2), then receive the long transfer-in. ---
+        let prev_a = create_initial_snapshot("acc_a", "USD", "2024-12-31");
+        let sell_short = {
+            let mut a = create_default_activity(
+                "sell_to_open_short_opt",
+                ActivityType::Sell,
+                option_symbol,
+                dec!(2),
+                dec!(2.5), // 2.50 * 100 = 250 premium per contract → basis -500
+                dec!(0),
+                "USD",
+                open_date_str,
+            );
+            a.account_id = "acc_a".to_string();
+            a
+        };
+        let result_a_open = calculator
+            .calculate_next_holdings(&prev_a, std::slice::from_ref(&sell_short), open_date)
+            .unwrap();
+        let pos_a = result_a_open
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("account A should hold short option");
+        assert_eq!(pos_a.quantity, dec!(-2));
+        assert_eq!(pos_a.total_cost_basis, dec!(-500));
+
+        let transfer_in = create_transfer_activity(
+            "xfer_in_long_opt",
+            ActivityType::TransferIn,
+            option_symbol,
+            dec!(1),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_a",
+            Some("grp_cover"),
+        );
+        let result_a_xfer = calculator
+            .calculate_next_holdings(&result_a_open.snapshot, &[transfer_in], transfer_date)
+            .unwrap();
+
+        let pos_a_after = result_a_xfer
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("account A should still hold the residual short");
+        // Single-signed: the incoming +1 covered one short contract, leaving -1.
+        assert_eq!(pos_a_after.quantity, dec!(-1));
+        assert_eq!(pos_a_after.total_cost_basis, dec!(-250));
+        assert!(
+            pos_a_after
+                .lots
+                .iter()
+                .all(|lot| lot.quantity < Decimal::ZERO),
+            "position must be single-signed (no long lot left)"
+        );
+
+        // The cover realized P/L on one contract: premium received (250) minus
+        // buyback cost (100 carried by the incoming long) = 150.
+        let disposals = calculator.take_lot_disposals("acc_a", "FIFO");
+        assert_eq!(disposals.len(), 1);
+        let disposal = &disposals[0];
+        assert_eq!(disposal.disposal_activity_id, "xfer_in_long_opt");
+        assert_eq!(Decimal::from_str(&disposal.quantity).unwrap(), dec!(-1));
+        assert_eq!(Decimal::from_str(&disposal.proceeds).unwrap(), dec!(-100));
+        assert_eq!(Decimal::from_str(&disposal.cost_basis).unwrap(), dec!(-250));
+        assert_eq!(
+            Decimal::from_str(&disposal.realized_pnl).unwrap(),
+            dec!(150)
+        );
+
+        // --- A later OPTION_EXPIRY reduces the residual short leg to zero. ---
+        let mut expiry = create_default_activity(
+            "expire_residual_short",
+            ActivityType::Adjustment,
+            option_symbol,
+            dec!(1),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            expiry_date_str,
+        );
+        expiry.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_OPTION_EXPIRY.to_string());
+        let result_a_expiry = calculator
+            .calculate_next_holdings(&result_a_xfer.snapshot, &[expiry], expiry_date)
+            .unwrap();
+        let pos_a_expired = result_a_expiry
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("closed position shell should remain");
+        assert_eq!(pos_a_expired.quantity, Decimal::ZERO);
+        assert_eq!(pos_a_expired.total_cost_basis, Decimal::ZERO);
+
+        let expiry_disposals = calculator.take_lot_disposals("acc_a", "FIFO");
+        assert_eq!(expiry_disposals.len(), 1);
+        let expiry_disposal = &expiry_disposals[0];
+        assert_eq!(
+            expiry_disposal.disposal_activity_id,
+            "expire_residual_short"
+        );
+        assert_eq!(
+            Decimal::from_str(&expiry_disposal.cost_basis).unwrap(),
+            dec!(-250)
+        );
+        assert_eq!(
+            Decimal::from_str(&expiry_disposal.realized_pnl).unwrap(),
+            dec!(250)
+        );
+    }
+
+    #[test]
+    fn test_transfer_in_short_covers_resident_long_option_no_mixed_position() {
+        // Mirror of the long-covers-short case: Account A holds a LONG option
+        // (+2). A TRANSFER_IN brings a SHORT (-1) of the same option via cached
+        // lots. The incoming short must COVER one contract of the resident long
+        // FIFO (realizing P/L) rather than creating a mixed-sign position. This
+        // direction exercises the `cover_proceeds.abs()` sign handling: the
+        // covering lots are short (negative cost basis), and the removed resident
+        // lot's effective quantity is positive.
+        let option_symbol = "AAPL250321C00150000";
+        let mock_fx_service = MockFxService::new();
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+
+        let mut repo = MockAssetRepository::new();
+        repo.add_option_asset(option_symbol, "USD");
+
+        let mut calculator = CalcHarness::new(HoldingsCalculator::new(
+            Arc::new(mock_fx_service),
+            base_currency,
+            Arc::new(repo),
+        ));
+
+        let open_date_str = "2025-01-02";
+        let transfer_date_str = "2025-06-01";
+        let expiry_date_str = "2025-06-02";
+        let open_date = NaiveDate::from_str(open_date_str).unwrap();
+        let transfer_date = NaiveDate::from_str(transfer_date_str).unwrap();
+        let expiry_date = NaiveDate::from_str(expiry_date_str).unwrap();
+
+        // --- Source account: open a short (-1) and transfer it out to seed the
+        // shared transfer-lots cache under group "grp_cover_long". ---
+        let prev_src = create_initial_snapshot("acc_src", "USD", "2024-12-31");
+        let sell_short_src = {
+            let mut a = create_default_activity(
+                "sell_to_open_short_opt_src",
+                ActivityType::Sell,
+                option_symbol,
+                dec!(1),
+                dec!(1), // 1.00 * 100 = 100 premium → basis -100
+                dec!(0),
+                "USD",
+                open_date_str,
+            );
+            a.account_id = "acc_src".to_string();
+            a
+        };
+        let result_src_open = calculator
+            .calculate_next_holdings(&prev_src, std::slice::from_ref(&sell_short_src), open_date)
+            .unwrap();
+        let pos_src = result_src_open
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("source account should hold short option");
+        assert_eq!(pos_src.quantity, dec!(-1));
+        assert_eq!(pos_src.total_cost_basis, dec!(-100));
+
+        let transfer_out = create_transfer_activity(
+            "xfer_out_short_opt",
+            ActivityType::TransferOut,
+            option_symbol,
+            dec!(1),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_src",
+            Some("grp_cover_long"),
+        );
+        calculator
+            .calculate_next_holdings(&result_src_open.snapshot, &[transfer_out], transfer_date)
+            .unwrap();
+
+        // --- Account A: open a long (+2), then receive the short transfer-in. ---
+        let prev_a = create_initial_snapshot("acc_a", "USD", "2024-12-31");
+        let buy_long = {
+            let mut a = create_default_activity(
+                "buy_to_open_long_opt",
+                ActivityType::Buy,
+                option_symbol,
+                dec!(2),
+                dec!(2.5), // 2.50 * 100 = 250 per contract → basis +500
+                dec!(0),
+                "USD",
+                open_date_str,
+            );
+            a.account_id = "acc_a".to_string();
+            a
+        };
+        let result_a_open = calculator
+            .calculate_next_holdings(&prev_a, std::slice::from_ref(&buy_long), open_date)
+            .unwrap();
+        let pos_a = result_a_open
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("account A should hold long option");
+        assert_eq!(pos_a.quantity, dec!(2));
+        assert_eq!(pos_a.total_cost_basis, dec!(500));
+
+        let transfer_in = create_transfer_activity(
+            "xfer_in_short_opt",
+            ActivityType::TransferIn,
+            option_symbol,
+            dec!(1),
+            dec!(0),
+            dec!(0),
+            "USD",
+            transfer_date_str,
+            "acc_a",
+            Some("grp_cover_long"),
+        );
+        let result_a_xfer = calculator
+            .calculate_next_holdings(&result_a_open.snapshot, &[transfer_in], transfer_date)
+            .unwrap();
+
+        let pos_a_after = result_a_xfer
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("account A should still hold the residual long");
+        // Single-signed: the incoming -1 covered one long contract, leaving +1.
+        assert_eq!(pos_a_after.quantity, dec!(1));
+        assert_eq!(pos_a_after.total_cost_basis, dec!(250));
+        assert!(
+            pos_a_after
+                .lots
+                .iter()
+                .all(|lot| lot.quantity > Decimal::ZERO),
+            "position must be single-signed (no short lot left)"
+        );
+
+        // The cover realized P/L on one contract: the long cost 250, "sold" via
+        // the incoming short's 100 basis → realized loss -150. This is the case
+        // the pre-fix `cover_proceeds` got wrong (it produced -350).
+        let disposals = calculator.take_lot_disposals("acc_a", "FIFO");
+        assert_eq!(disposals.len(), 1);
+        let disposal = &disposals[0];
+        assert_eq!(disposal.disposal_activity_id, "xfer_in_short_opt");
+        assert_eq!(Decimal::from_str(&disposal.quantity).unwrap(), dec!(1));
+        assert_eq!(Decimal::from_str(&disposal.proceeds).unwrap(), dec!(100));
+        assert_eq!(Decimal::from_str(&disposal.cost_basis).unwrap(), dec!(250));
+        assert_eq!(
+            Decimal::from_str(&disposal.realized_pnl).unwrap(),
+            dec!(-150)
+        );
+
+        // --- A later OPTION_EXPIRY reduces the residual long leg to zero. ---
+        let mut expiry = create_default_activity(
+            "expire_residual_long",
+            ActivityType::Adjustment,
+            option_symbol,
+            dec!(1),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            "USD",
+            expiry_date_str,
+        );
+        expiry.subtype = Some(crate::activities::ACTIVITY_SUBTYPE_OPTION_EXPIRY.to_string());
+        let result_a_expiry = calculator
+            .calculate_next_holdings(&result_a_xfer.snapshot, &[expiry], expiry_date)
+            .unwrap();
+        let pos_a_expired = result_a_expiry
+            .snapshot
+            .positions
+            .get(option_symbol)
+            .expect("closed position shell should remain");
+        assert_eq!(pos_a_expired.quantity, Decimal::ZERO);
+        assert_eq!(pos_a_expired.total_cost_basis, Decimal::ZERO);
+
+        let expiry_disposals = calculator.take_lot_disposals("acc_a", "FIFO");
+        assert_eq!(expiry_disposals.len(), 1);
+        let expiry_disposal = &expiry_disposals[0];
+        assert_eq!(expiry_disposal.disposal_activity_id, "expire_residual_long");
+        assert_eq!(
+            Decimal::from_str(&expiry_disposal.cost_basis).unwrap(),
+            dec!(250)
+        );
+        // Long option expires worthless: lose the full +250 cost basis.
+        assert_eq!(
+            Decimal::from_str(&expiry_disposal.realized_pnl).unwrap(),
+            dec!(-250)
+        );
+    }
+
+    #[test]
     fn test_short_stock_transfer_preserves_signed_lot() {
         let mock_fx_service = MockFxService::new();
         let base_currency = Arc::new(RwLock::new("USD".to_string()));

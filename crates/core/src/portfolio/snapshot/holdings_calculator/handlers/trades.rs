@@ -117,7 +117,7 @@ impl HoldingsCalculator {
         {
             let close_only = has_position_close_intent(activity);
             let short_quantity = negative_lot_effective_quantity_abs(position);
-            let close_quantity = min_decimal(quantity, short_quantity);
+            let close_quantity = quantity.min(short_quantity);
             let open_quantity = quantity - close_quantity;
 
             if asset_info.requires_explicit_short_intent {
@@ -128,30 +128,16 @@ impl HoldingsCalculator {
                 let close_fee = proportional_amount(fee_for_lot, close_quantity, quantity);
                 let close_cost = close_quantity * unit_price_for_lot + close_fee;
                 let reduction = position.reduce_negative_lots_fifo(close_quantity)?;
-                self.record_lot_disposals(
+                self.record_reduction(
                     &account_id,
                     asset_id,
                     activity,
-                    &reduction.removed_lots,
+                    &reduction,
                     close_cost,
-                    reduction.quantity_reduced,
                     &position_currency,
                     run,
                     buffer,
                 );
-                let close_date = self.activity_local_date(activity).to_string();
-                for lot in &reduction.fully_consumed_lots {
-                    self.record_lot_closure(
-                        &account_id,
-                        asset_id,
-                        lot,
-                        &close_date,
-                        &activity.id,
-                        &position_currency,
-                        run,
-                        buffer,
-                    );
-                }
             }
 
             if open_quantity > Decimal::ZERO {
@@ -338,37 +324,23 @@ impl HoldingsCalculator {
             };
 
             let long_quantity = positive_lot_effective_quantity(position);
-            let close_quantity = min_decimal(quantity, long_quantity);
+            let close_quantity = quantity.min(long_quantity);
             let open_quantity = quantity - close_quantity;
 
             if close_quantity > Decimal::ZERO {
                 let close_fee = proportional_amount(fee_for_lot, close_quantity, quantity);
                 let close_proceeds = close_quantity * unit_price_for_lot - close_fee;
                 let reduction = position.reduce_positive_lots_fifo(close_quantity)?;
-                self.record_lot_disposals(
+                self.record_reduction(
                     &account_id,
                     asset_id,
                     activity,
-                    &reduction.removed_lots,
+                    &reduction,
                     close_proceeds,
-                    reduction.quantity_reduced,
                     &position_currency,
                     run,
                     buffer,
                 );
-                let close_date = self.activity_local_date(activity).to_string();
-                for lot in &reduction.fully_consumed_lots {
-                    self.record_lot_closure(
-                        &account_id,
-                        asset_id,
-                        lot,
-                        &close_date,
-                        &activity.id,
-                        &position_currency,
-                        run,
-                        buffer,
-                    );
-                }
             }
 
             if open_quantity > Decimal::ZERO {
@@ -417,30 +389,16 @@ impl HoldingsCalculator {
                     "sell proceeds",
                 )?;
             let reduction = position.reduce_lots_fifo(activity.qty())?;
-            self.record_lot_disposals(
+            self.record_reduction(
                 &state.account_id,
                 asset_id,
                 activity,
-                &reduction.removed_lots,
+                &reduction,
                 total_proceeds_position_currency,
-                reduction.quantity_reduced,
                 &position_currency,
                 run,
                 buffer,
             );
-            let close_date = self.activity_local_date(activity).to_string();
-            for lot in &reduction.fully_consumed_lots {
-                self.record_lot_closure(
-                    &state.account_id,
-                    asset_id,
-                    lot,
-                    &close_date,
-                    &activity.id,
-                    &position_currency,
-                    run,
-                    buffer,
-                );
-            }
         } else {
             warn!(
                 "Attempted to Sell non-existent/zero position {} via activity {}. Applying cash effect only.",

@@ -100,8 +100,34 @@ vi.mock("../fields", async () => {
         </div>
       );
     },
-    OptionContractFields: () => <div data-testid="option-contract-fields" />,
-    PositionIntentSelector: () => <div data-testid="position-intent-selector" />,
+    OptionContractFields: () => {
+      const { register } = useFormContext();
+      return (
+        <div data-testid="option-contract-fields">
+          <input data-testid="input-underlyingSymbol" {...register("underlyingSymbol")} />
+          <input
+            data-testid="input-strikePrice"
+            type="number"
+            {...register("strikePrice", { valueAsNumber: true })}
+          />
+          <input data-testid="input-expirationDate" {...register("expirationDate")} />
+        </div>
+      );
+    },
+    PositionIntentSelector: ({ name = "subtype" }: { name?: string }) => {
+      const { setValue, watch } = useFormContext();
+      const value = watch(name);
+      return (
+        <div data-testid="position-intent-selector" data-value={value ?? ""}>
+          <button type="button" onClick={() => setValue(name, "POSITION_OPEN")}>
+            Open
+          </button>
+          <button type="button" onClick={() => setValue(name, "POSITION_CLOSE")}>
+            Close
+          </button>
+        </div>
+      );
+    },
     StockTradeIntentSelector: () => <div data-testid="stock-trade-intent-selector" />,
     AssetTypeSelector: ({ name }: { name: string }) => (
       <div data-testid={`asset-type-selector-${name}`} />
@@ -448,6 +474,38 @@ describe("SellForm", () => {
       });
     });
 
+    it("resets the Sell Short intent when the selected symbol changes", async () => {
+      const user = userEvent.setup();
+
+      render(
+        <SellForm
+          accounts={mockAccounts}
+          defaultValues={{
+            accountId: "acc-1",
+            assetId: "AAPL",
+            assetType: "stock",
+            subtype: ACTIVITY_SUBTYPES.POSITION_OPEN,
+            quantity: 1,
+            unitPrice: 10,
+            currency: "USD",
+          }}
+          onSubmit={mockOnSubmit}
+        />,
+      );
+
+      // Starts as Sell Short.
+      expect(screen.getByRole("button", { name: /sell short/i })).toBeInTheDocument();
+
+      const symbolInput = screen.getByTestId("symbol-search-assetId");
+      await user.clear(symbolInput);
+      await user.type(symbolInput, "MSFT");
+
+      // Intent reset back to normal Sell.
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /add sell/i })).toBeInTheDocument();
+      });
+    });
+
     it("matches current holdings by instrument id as well as display symbol", () => {
       holdingsHook.useHoldings.mockReturnValue({
         holdings: [createHolding("CJR28A", 10, "SEC:CJR28A:XTSE")],
@@ -469,6 +527,53 @@ describe("SellForm", () => {
 
       expect(screen.queryByTestId("alert")).not.toBeInTheDocument();
       expect(screen.getByText("Available: 10")).toBeInTheDocument();
+    });
+  });
+
+  describe("Option Position Intent", () => {
+    const optionDefaults = {
+      accountId: "acc-1",
+      assetType: "option" as const,
+      underlyingSymbol: "AAPL",
+      strikePrice: 200,
+      expirationDate: "2026-12-19",
+      optionType: "CALL" as const,
+      quantity: 1,
+      unitPrice: 5,
+      currency: "USD",
+    };
+
+    it("blocks submit for an option with no Open/Close intent chosen", async () => {
+      const user = userEvent.setup();
+
+      render(
+        <SellForm accounts={mockAccounts} defaultValues={optionDefaults} onSubmit={mockOnSubmit} />,
+      );
+
+      // No intent pre-selected.
+      expect(screen.getByTestId("position-intent-selector")).toHaveAttribute("data-value", "");
+
+      await user.click(screen.getByRole("button", { name: /add sell/i }));
+
+      await waitFor(() => {
+        expect(mockOnSubmit).not.toHaveBeenCalled();
+      });
+    });
+
+    it("submits an option once an intent is chosen", async () => {
+      const user = userEvent.setup();
+
+      render(
+        <SellForm accounts={mockAccounts} defaultValues={optionDefaults} onSubmit={mockOnSubmit} />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open" }));
+      await user.click(screen.getByRole("button", { name: /sell to open/i }));
+
+      await waitFor(() => {
+        expect(mockOnSubmit).toHaveBeenCalledTimes(1);
+      });
+      expect(mockOnSubmit.mock.calls[0][0].subtype).toBe(ACTIVITY_SUBTYPES.POSITION_OPEN);
     });
   });
 });

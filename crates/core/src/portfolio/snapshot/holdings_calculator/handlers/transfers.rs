@@ -4,9 +4,70 @@ use super::super::{HoldingsCalculator, ProjectionRun, SideEffectBuffer};
 use crate::activities::Activity;
 use crate::errors::Result;
 use crate::portfolio::economic_events::{ActivityEconomicsResolver, TransferBoundary};
-use crate::portfolio::snapshot::AccountStateSnapshot;
+use crate::portfolio::snapshot::{AccountStateSnapshot, Lot};
 use log::warn;
 use rust_decimal::Decimal;
+
+/// Splits single-signed FIFO `lots` into a (cover, residual) pair so the first
+/// `cover_qty_abs` effective units land in `cover` and the rest in `residual`.
+/// A lot straddling the boundary is prorated by quantity (cost basis and fees
+/// split proportionally). `cover_qty_abs` is in effective (post-split) units.
+fn split_lots_by_cover_quantity(lots: &[Lot], cover_qty_abs: Decimal) -> (Vec<Lot>, Vec<Lot>) {
+    let mut cover = Vec::new();
+    let mut residual = Vec::new();
+    let mut remaining = cover_qty_abs;
+
+    for lot in lots {
+        let lot_effective_abs = lot.effective_quantity().abs();
+        if remaining <= Decimal::ZERO || lot_effective_abs.is_zero() {
+            residual.push(lot.clone());
+            continue;
+        }
+        if lot_effective_abs <= remaining {
+            remaining -= lot_effective_abs;
+            cover.push(lot.clone());
+            continue;
+        }
+
+        // Partial: split this lot proportionally by effective units consumed.
+        let split_ratio = lot.effective_split_ratio();
+        let consumed_acquired = if split_ratio.is_zero() {
+            remaining
+        } else {
+            remaining / split_ratio
+        };
+        let consumed_signed = if lot.quantity.is_sign_negative() {
+            -consumed_acquired
+        } else {
+            consumed_acquired
+        };
+        let cover_fraction = consumed_signed / lot.quantity;
+
+        let cover_cost_basis = lot.cost_basis * cover_fraction;
+        let cover_fees = lot.acquisition_fees * cover_fraction;
+        let residual_quantity = lot.quantity - consumed_signed;
+
+        let mut cover_lot = lot.clone();
+        cover_lot.quantity = consumed_signed;
+        cover_lot.original_quantity = consumed_signed;
+        cover_lot.cost_basis = cover_cost_basis;
+        cover_lot.acquisition_fees = cover_fees;
+        cover_lot.original_acquisition_fees = cover_fees;
+        cover.push(cover_lot);
+
+        let mut residual_lot = lot.clone();
+        residual_lot.quantity = residual_quantity;
+        residual_lot.original_quantity = residual_quantity;
+        residual_lot.cost_basis = lot.cost_basis - cover_cost_basis;
+        residual_lot.acquisition_fees = lot.acquisition_fees - cover_fees;
+        residual_lot.original_acquisition_fees = lot.acquisition_fees - cover_fees;
+        residual.push(residual_lot);
+
+        remaining = Decimal::ZERO;
+    }
+
+    (cover, residual)
+}
 
 impl HoldingsCalculator {
     /// Handle TRANSFER_IN activity.
@@ -78,32 +139,140 @@ impl HoldingsCalculator {
                 .unwrap_or_else(|| AssetPositionInfo::fallback(activity_currency));
 
             // Try lot-level transfer: peek cached lots from the paired
-            // TRANSFER_OUT. Stage the cache removal in the buffer so it is only
-            // committed if this TRANSFER_IN succeeds — a failed TRANSFER_IN must
-            // not consume the cached lots.
-            let cached_lots = activity.source_group_id.as_ref().and_then(|group_id| {
-                let lots = run.transfer_lots_cache.get(group_id).cloned();
-                if lots.is_some() {
-                    buffer.transfer_cache_removals.push(group_id.clone());
-                }
-                lots
-            });
+            // TRANSFER_OUT. The cache removal is staged below only after the lots
+            // are actually booked, so a failed/no-op TRANSFER_IN must not consume
+            // the cached lots (their cost basis would otherwise be lost).
+            let cached_lots = activity
+                .source_group_id
+                .as_ref()
+                .and_then(|group_id| run.transfer_lots_cache.get(group_id).cloned());
 
             let (cost_basis_asset_curr, added_lots) = if let Some(lots) = cached_lots {
                 // Lot-level transfer: lots are already in the asset's position currency
                 // (same asset = same listing currency), so no FX conversion needed.
+                //
+                // Net against opposite-sign resident lots first so a position can
+                // never simultaneously hold long and short lots of the same asset
+                // (mirrors the buy-to-cover / sell-to-close netting in trades.rs).
+                let incoming_negative = lots
+                    .iter()
+                    .find(|lot| !lot.quantity.is_zero())
+                    .map(|lot| lot.quantity.is_sign_negative())
+                    .unwrap_or(false);
+                let incoming_qty_abs: Decimal =
+                    lots.iter().map(|lot| lot.effective_quantity().abs()).sum();
+
+                // Resident quantity on the side the incoming lots oppose.
+                let resident_opposite_abs = if incoming_negative {
+                    positive_lot_effective_quantity(position)
+                } else {
+                    negative_lot_effective_quantity_abs(position)
+                };
+
+                let cover_qty_abs = if asset_info.allows_negative_lots {
+                    incoming_qty_abs.min(resident_opposite_abs)
+                } else {
+                    Decimal::ZERO
+                };
+
+                // Reduce the opposing resident leg FIFO (if any) and add only the
+                // residual incoming lots. The reduction's disposal/closure
+                // recording and net_contribution relief run after the `position`
+                // borrow ends (below) to satisfy the borrow checker.
+                let (lots_to_add, cover_outcome) = if cover_qty_abs > Decimal::ZERO {
+                    let (cover_lots, residual_lots) =
+                        split_lots_by_cover_quantity(&lots, cover_qty_abs);
+                    // Proceeds = magnitude of the cost basis brought in by the
+                    // covering incoming lots. Always positive (like the
+                    // close_cost/close_proceeds convention in trades.rs);
+                    // record_lot_disposals derives the realized-P/L sign from the
+                    // removed lots' signed effective quantity. Taking the absolute
+                    // value keeps both cover directions correct (incoming long
+                    // covering a resident short, and incoming short covering a
+                    // resident long — the cover lots' cost basis is negative for
+                    // the latter).
+                    let cover_proceeds: Decimal = cover_lots
+                        .iter()
+                        .map(|lot| lot.cost_basis)
+                        .sum::<Decimal>()
+                        .abs();
+                    let reduction = if incoming_negative {
+                        position.reduce_positive_lots_fifo(cover_qty_abs)?
+                    } else {
+                        position.reduce_negative_lots_fifo(cover_qty_abs)?
+                    };
+                    (residual_lots, Some((reduction, cover_proceeds)))
+                } else {
+                    (lots.clone(), None)
+                };
+
                 let cost_basis = position.add_transferred_lots(
                     &activity.id,
-                    &lots,
+                    &lots_to_add,
                     None,
                     asset_info.allows_negative_lots,
                 )?;
-                let added_lots: Vec<crate::portfolio::snapshot::Lot> = position
+                let added_lots: Vec<Lot> = position
                     .lots
                     .iter()
                     .filter(|lot| lot.source_activity_id.as_deref() == Some(activity.id.as_str()))
                     .cloned()
                     .collect();
+                // `position` borrow ends here; `state` is free again.
+
+                if let Some((reduction, cover_proceeds)) = cover_outcome {
+                    self.record_reduction(
+                        &state.account_id,
+                        asset_id,
+                        activity,
+                        &reduction,
+                        cover_proceeds,
+                        &position_currency,
+                        run,
+                        buffer,
+                    );
+
+                    // Relieve the covered resident lots' cost basis from
+                    // net_contribution (same convention as TRANSFER_OUT).
+                    if !position_currency.is_empty()
+                        && reduction.cost_basis_removed != Decimal::ZERO
+                    {
+                        let removed_acct = self.lots_cost_basis_in_currency(
+                            &reduction.removed_lots,
+                            &position_currency,
+                            account_currency,
+                            activity_date,
+                            &activity.id,
+                        );
+                        let base_ccy = self.base_currency.read().unwrap().clone();
+                        let removed_base = self.lots_cost_basis_in_currency(
+                            &reduction.removed_lots,
+                            &position_currency,
+                            &base_ccy,
+                            activity_date,
+                            &activity.id,
+                        );
+                        state.net_contribution -= removed_acct;
+                        state.net_contribution_base -= removed_base;
+                    }
+                }
+
+                // Stage the cache removal only if the lots were actually booked
+                // (covered and/or added). If every incoming lot was skipped
+                // (e.g. negative lots on a non-shortable asset), keep the cache
+                // intact so the cost basis is not silently lost.
+                if let Some(group_id) = activity.source_group_id.as_ref() {
+                    if cover_qty_abs > Decimal::ZERO || !added_lots.is_empty() {
+                        buffer.transfer_cache_removals.push(group_id.clone());
+                    } else {
+                        warn!(
+                            "TransferIn {} booked none of the cached lots for asset {} \
+                             (negative lots not allowed). Keeping cache entry.",
+                            activity.id, asset_id
+                        );
+                    }
+                }
+
                 (cost_basis, added_lots)
             } else {
                 // Fallback: no cached lots (external transfer or no source_group_id).
@@ -283,38 +452,25 @@ impl HoldingsCalculator {
                     );
                 }
 
+                // Positions are single-signed (transfer-in nets opposite-sign
+                // lots), so dispatching on the net position sign relieves the
+                // correct leg.
                 let reduction = if position.quantity.is_sign_negative() {
                     position.reduce_negative_lots_fifo(activity.qty())?
                 } else {
                     position.reduce_lots_fifo(activity.qty())?
                 };
                 let cost_basis_removed = reduction.cost_basis_removed;
-                self.record_lot_disposals(
+                self.record_reduction(
                     &state.account_id,
                     asset_id,
                     activity,
-                    &reduction.removed_lots,
+                    &reduction,
                     cost_basis_removed,
-                    reduction.quantity_reduced,
                     &position_currency,
                     run,
                     buffer,
                 );
-
-                // Record fully consumed lots as closed
-                let close_date = activity_date.to_string();
-                for lot in &reduction.fully_consumed_lots {
-                    self.record_lot_closure(
-                        &state.account_id,
-                        asset_id,
-                        lot,
-                        &close_date,
-                        &activity.id,
-                        &position_currency,
-                        run,
-                        buffer,
-                    );
-                }
 
                 if !position_currency.is_empty() && cost_basis_removed != Decimal::ZERO {
                     let cost_basis_removed_acct = self.lots_cost_basis_in_currency(
