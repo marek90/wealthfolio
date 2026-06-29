@@ -12,7 +12,7 @@ import {
   PrivacyAmount,
 } from "@wealthfolio/ui";
 import type { Account } from "@/lib/types";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { QuickEventPopover } from "./quick-event-popover";
@@ -33,6 +33,7 @@ interface TransactionCardProps {
   account: Account | undefined;
   event: { id: string; name: string; eventTypeId: string } | null;
   eventTypeColor: string | null;
+  appTimezone?: string;
   isSelected: boolean;
   onToggleSelect: (id: string) => void;
   onAssignCategory: (activityId: string, taxonomyId: string, categoryId: string) => void;
@@ -55,6 +56,7 @@ function TransactionCardImpl({
   account,
   event,
   eventTypeColor,
+  appTimezone,
   isSelected,
   onToggleSelect,
   onAssignCategory,
@@ -79,6 +81,7 @@ function TransactionCardImpl({
   const transferLinkStatus = getTransferLinkStatus(a);
   const canMarkReimbursement =
     isIncome && !isCreditCardAccountType(account?.accountType) && activityType !== "CREDIT";
+  const formattedDate = formatDateTime(a.activityDate, appTimezone);
 
   return (
     <div
@@ -110,7 +113,7 @@ function TransactionCardImpl({
             )}
           </div>
           <div className="text-muted-foreground mt-0.5 truncate text-[11px]">
-            {formatDate(a.activityDate)} · {accountName} ·{" "}
+            {formattedDate.date} {formattedDate.time} · {accountName} ·{" "}
             {getCashActivityLabel(activityType, account?.accountType, a.subtype)}
           </div>
         </div>

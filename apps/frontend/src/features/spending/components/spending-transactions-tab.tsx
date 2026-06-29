@@ -21,6 +21,7 @@ import { useTaxonomy } from "@/hooks/use-taxonomies";
 import { QueryKeys } from "@/lib/query-keys";
 import { formatDateISO } from "@/lib/utils";
 import type { Account, ActivityDetails, TaxonomyCategory } from "@/lib/types";
+import { useSettingsContext } from "@/lib/settings-provider";
 
 import {
   Button,
@@ -200,6 +201,8 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
     const urlAmountMax = searchParams.get("amountMax");
 
     const qc = useQueryClient();
+    const { settings } = useSettingsContext();
+    const appTimezone = settings?.timezone?.trim() || undefined;
     const applyingUrlParamsRef = useRef(false);
 
     const [editingActivity, setEditingActivity] = useState<TransactionRowVM | undefined>();
@@ -540,7 +543,7 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
       setSelectedRowIds(new Set());
     }
 
-    const duplicateMutation = useMutation({
+    const { mutate: duplicateTransaction } = useMutation({
       mutationFn: async (row: TransactionRowVM) => {
         const a = row.activity;
         return createActivity({
@@ -564,8 +567,8 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
     });
 
     const handleDuplicate = useCallback(
-      (row: TransactionRowVM) => duplicateMutation.mutate(row),
-      [duplicateMutation],
+      (row: TransactionRowVM) => duplicateTransaction(row),
+      [duplicateTransaction],
     );
 
     const markReimbursementMutation = useMutation({
@@ -843,6 +846,7 @@ export const SpendingTransactionsTab = forwardRef<SpendingTransactionsTabHandle>
             account={accountById.get(r.activity.accountId)}
             event={ev ?? null}
             eventTypeColor={eventTypeColor}
+            appTimezone={appTimezone}
             isSelected={selectedRowIds.has(r.activity.id)}
             onToggleSelect={handleToggleRow}
             onAssignCategory={handleAssignCategory}

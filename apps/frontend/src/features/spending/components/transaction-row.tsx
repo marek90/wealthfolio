@@ -14,7 +14,7 @@ import {
   TableRow,
 } from "@wealthfolio/ui";
 import type { Account } from "@/lib/types";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { QuickEventPopover } from "./quick-event-popover";
@@ -35,6 +35,7 @@ interface TransactionRowProps {
   account: Account | undefined;
   event: { id: string; name: string; eventTypeId: string } | null;
   eventTypeColor: string | null;
+  appTimezone?: string;
   isSelected: boolean;
   onToggleSelect: (id: string) => void;
   onAssignCategory: (activityId: string, taxonomyId: string, categoryId: string) => void;
@@ -54,6 +55,7 @@ function TransactionRowImpl({
   account,
   event,
   eventTypeColor,
+  appTimezone,
   isSelected,
   onToggleSelect,
   onAssignCategory,
@@ -68,10 +70,8 @@ function TransactionRowImpl({
   onUnlinkTransfer,
 }: TransactionRowProps) {
   const a = row.activity;
-  const { isOutflow, isIncome, isSaving, isNeutral, sign, safeAmount } = getTransactionDisplay(
-    a,
-    account?.accountType,
-  );
+  const { isOutflow, isIncome, isSaving, isRefund, isNeutral, sign, safeAmount } =
+    getTransactionDisplay(a, account?.accountType);
   const accountName = account?.name ?? a.accountId;
   const rowAriaLabel = isSelected ? "Deselect transaction" : "Select transaction";
   const activityType = getEffectiveCashActivityType(a);
@@ -79,6 +79,9 @@ function TransactionRowImpl({
   const transferLinkStatus = getTransferLinkStatus(a);
   const canMarkReimbursement =
     isIncome && !isCreditCardAccountType(account?.accountType) && activityType !== "CREDIT";
+  const formattedDate = formatDateTime(a.activityDate, appTimezone);
+  const typeBadgeVariant =
+    isIncome || isSaving || isRefund ? "success" : isOutflow ? "destructive" : "secondary";
 
   return (
     <TableRow
@@ -93,10 +96,13 @@ function TransactionRowImpl({
         />
       </TableCell>
       <TableCell className="hidden whitespace-nowrap text-sm sm:table-cell">
-        {formatDate(a.activityDate)}
+        <div className="ml-2 flex flex-col">
+          <span>{formattedDate.date}</span>
+          <span className="text-muted-foreground text-xs font-light">{formattedDate.time}</span>
+        </div>
       </TableCell>
       <TableCell className="hidden md:table-cell">
-        <Badge variant="outline" className="text-xs">
+        <Badge variant={typeBadgeVariant} className="rounded-sm text-xs font-normal">
           {getCashActivityLabel(activityType, account?.accountType, a.subtype)}
         </Badge>
       </TableCell>
@@ -116,7 +122,7 @@ function TransactionRowImpl({
           )}
         </div>
         <div className="text-muted-foreground mt-0.5 truncate text-[11px] sm:hidden">
-          {formatDate(a.activityDate)} · {accountName}
+          {formattedDate.date} {formattedDate.time} · {accountName}
         </div>
       </TableCell>
       <TableCell className="hidden md:table-cell">
