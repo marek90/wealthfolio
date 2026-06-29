@@ -58,6 +58,7 @@ import { useSpendingSettings } from "../hooks/use-spending-settings";
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { QuickEventPopover } from "./quick-event-popover";
 import type { CashFlowBucket } from "../types/cash-activity";
+import { resolveCashActivitySubtype } from "../lib/cash-activity-form-utils";
 
 const SPENDING_TAXONOMY = "spending_categories";
 const INCOME_TAXONOMY = "income_sources";
@@ -284,10 +285,12 @@ export function CashActivityForm({
       const dateStr = values.activityDate.toISOString();
       const account = spendingAccounts.find((a) => a.id === values.accountId);
       const currency = account?.currency ?? "USD";
-      const subtype =
-        values.activityType === "CREDIT" && !isCreditCardAccountType(account?.accountType)
-          ? "REIMBURSEMENT"
-          : null;
+      const subtype = resolveCashActivitySubtype({
+        activityType: values.activityType,
+        accountType: account?.accountType,
+        existingActivityType: activity?.activityType,
+        existingSubtype: activity?.subtype,
+      });
 
       let saved: Activity;
       if (isEditing && activity?.id) {

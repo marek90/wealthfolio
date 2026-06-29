@@ -557,7 +557,7 @@ fn add_report_breakdown_allocations(
             .or_insert((Decimal::ZERO, 0));
         entry.0 += amount;
         entry.1 += 1;
-        if uncategorized_day_bucket {
+        if taxonomy_id == SPENDING_TAXONOMY && uncategorized_day_bucket {
             let dc = by_day_cat_acc
                 .entry((
                     day.to_string(),
@@ -588,15 +588,17 @@ fn add_report_breakdown_allocations(
             .or_insert((Decimal::ZERO, 0));
         entry.0 += amount;
         entry.1 += 1;
-        let dc = by_day_cat_acc
-            .entry((
-                day.to_string(),
-                taxonomy_id.to_string(),
-                allocation.category_id,
-            ))
-            .or_insert((Decimal::ZERO, 0));
-        dc.0 += amount;
-        dc.1 += 1;
+        if taxonomy_id == SPENDING_TAXONOMY {
+            let dc = by_day_cat_acc
+                .entry((
+                    day.to_string(),
+                    taxonomy_id.to_string(),
+                    allocation.category_id,
+                ))
+                .or_insert((Decimal::ZERO, 0));
+            dc.0 += amount;
+            dc.1 += 1;
+        }
     }
 }
 
@@ -1777,6 +1779,37 @@ mod tests {
             created_at: Utc::now().naive_utc(),
             updated_at: Utc::now().naive_utc(),
         }
+    }
+
+    #[test]
+    fn report_breakdown_keeps_income_out_of_daily_category_buckets() {
+        let assignments = group_assignments(vec![assignment("income", INCOME_TAXONOMY, "salary")]);
+        let splits = SplitsByActivity::new();
+        let mut income_acc: HashMap<(String, String), (Decimal, usize)> = HashMap::new();
+        let mut by_day_cat_acc: HashMap<(String, String, String), (Decimal, usize)> =
+            HashMap::new();
+
+        add_report_breakdown_allocations(
+            &mut income_acc,
+            &mut by_day_cat_acc,
+            "income",
+            INCOME_TAXONOMY,
+            Decimal::new(100, 0),
+            &assignments,
+            &splits,
+            &PassthroughFx,
+            "USD",
+            "USD",
+            NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+            "2024-01-10",
+            false,
+        );
+
+        assert_eq!(
+            income_acc.get(&(INCOME_TAXONOMY.to_string(), "salary".to_string())),
+            Some(&(Decimal::new(100, 0), 1)),
+        );
+        assert!(by_day_cat_acc.is_empty());
     }
 
     fn build_credit_card_summary(activities: &[Activity]) -> SpendingSummary {
