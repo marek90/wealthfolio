@@ -447,6 +447,7 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
                 unit_price: act.unit_price,
                 currency: act.currency,
                 fee: act.fee,
+                tax: act.tax,
                 amount: act.amount,
                 status: act.status,
                 notes: act.notes,

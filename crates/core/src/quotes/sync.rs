@@ -781,6 +781,7 @@ where
                     quantity: None,
                     unit_price: None,
                     fee: None,
+                    tax: None,
                     notes: Some(format!("Auto-imported split ({})", split.ratio)),
                     subtype: None,
                     status: None,

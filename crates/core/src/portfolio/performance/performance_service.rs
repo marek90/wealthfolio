@@ -1563,15 +1563,15 @@ impl PerformanceService {
             Self::collect_realized_attribution_event_effects(period_disposals.as_deref());
         effects.extend(realized_effects.effects);
         warnings.extend(realized_effects.warnings);
-        let fee_effects = self
-            .collect_trade_fee_pnl_gross_up_event_effects(
+        let charge_effects = self
+            .collect_trade_charge_pnl_gross_up_event_effects(
                 result,
                 account_ids,
                 period_disposals.as_deref(),
             )
             .await;
-        effects.extend(fee_effects.effects);
-        warnings.extend(fee_effects.warnings);
+        effects.extend(charge_effects.effects);
+        warnings.extend(charge_effects.warnings);
 
         for effect in &effects {
             warnings.extend(effect.diagnostics.clone());
@@ -2162,7 +2162,7 @@ impl PerformanceService {
     ) -> (Decimal, Decimal, Decimal) {
         match activity_type {
             ActivityType::Dividend | ActivityType::Interest => {
-                (activity.amt(), activity.fee_amt(), Decimal::ZERO)
+                (activity.amt(), activity.fee_amt(), activity.tax_amt())
             }
             ActivityType::Fee => (
                 Decimal::ZERO,
@@ -2170,7 +2170,7 @@ impl PerformanceService {
                 Decimal::ZERO,
             ),
             ActivityType::Buy | ActivityType::Sell => {
-                (Decimal::ZERO, activity.fee_amt(), Decimal::ZERO)
+                (Decimal::ZERO, activity.fee_amt(), activity.tax_amt())
             }
             ActivityType::Tax => (
                 Decimal::ZERO,
@@ -2334,7 +2334,7 @@ impl PerformanceService {
         }
     }
 
-    async fn collect_trade_fee_pnl_gross_up_event_effects(
+    async fn collect_trade_charge_pnl_gross_up_event_effects(
         &self,
         result: &PerformanceResult,
         account_ids: &[String],
@@ -2343,15 +2343,7 @@ impl PerformanceService {
         let Some(activity_repository) = &self.activity_repository else {
             return AttributionEffectSet::default();
         };
-        let Some(lot_repository) = &self.lot_repository else {
-            return AttributionEffectSet::default();
-        };
-        let Some(disposals) = period_disposals else {
-            return AttributionEffectSet::default();
-        };
-        if disposals.is_empty() {
-            return AttributionEffectSet::default();
-        }
+        let disposals = period_disposals.unwrap_or(&[]);
         let Some(start_date) = result.period.start_date else {
             return AttributionEffectSet::default();
         };
@@ -2379,17 +2371,18 @@ impl PerformanceService {
             Ok(activities) => activities,
             Err(e) => {
                 warn!(
-                    "Failed to load activities for trade-fee performance attribution scope {}: {}",
+                    "Failed to load activities for trade-charge performance attribution scope {}: {}",
                     result.scope.id, e
                 );
                 return AttributionEffectSet::default();
             }
         };
 
-        let mut buy_fee_by_activity = HashMap::<String, Decimal>::new();
-        let mut sell_fee_by_activity = HashMap::<String, Decimal>::new();
+        let mut buy_charge_by_activity = HashMap::<String, Decimal>::new();
+        let mut sell_charge_by_activity = HashMap::<String, Decimal>::new();
         for activity in activities {
-            if !activity.is_posted() || activity.fee_amt().is_zero() {
+            let raw_charge = activity.fee_amt() + activity.tax_amt();
+            if !activity.is_posted() || raw_charge.is_zero() {
                 continue;
             }
 
@@ -2405,9 +2398,9 @@ impl PerformanceService {
                 continue;
             }
 
-            let Some(fee) = self.convert_activity_amount_for_attribution(
+            let Some(charge) = self.convert_activity_amount_for_attribution(
                 &activity,
-                activity.fee_amt(),
+                raw_charge,
                 &result.scope.currency,
                 activity_date,
             ) else {
@@ -2416,35 +2409,95 @@ impl PerformanceService {
 
             match activity_type {
                 ActivityType::Buy => {
-                    buy_fee_by_activity.insert(activity.id, fee);
+                    buy_charge_by_activity.insert(activity.id, charge);
                 }
                 ActivityType::Sell => {
-                    sell_fee_by_activity.insert(activity.id, fee);
+                    sell_charge_by_activity.insert(activity.id, charge);
                 }
                 _ => {}
             }
         }
 
-        if buy_fee_by_activity.is_empty() && sell_fee_by_activity.is_empty() {
+        if buy_charge_by_activity.is_empty() && sell_charge_by_activity.is_empty() {
             return AttributionEffectSet::default();
         }
 
         let mut lot_by_account_and_id = HashMap::<(String, String), LotRecord>::new();
-        for account_id in account_ids {
-            match lot_repository.get_all_lots_for_account(account_id).await {
-                Ok(lots) => {
-                    for lot in lots {
-                        lot_by_account_and_id.insert((account_id.clone(), lot.id.clone()), lot);
+        let mut loaded_lots = false;
+        if !disposals.is_empty() || !buy_charge_by_activity.is_empty() {
+            if let Some(lot_repository) = &self.lot_repository {
+                for account_id in account_ids {
+                    match lot_repository.get_all_lots_for_account(account_id).await {
+                        Ok(lots) => {
+                            loaded_lots = true;
+                            for lot in lots {
+                                lot_by_account_and_id
+                                    .insert((account_id.clone(), lot.id.clone()), lot);
+                            }
+                        }
+                        Err(e) => warn!(
+                            "Failed to load lots for trade-charge performance attribution account {}: {}",
+                            account_id, e
+                        ),
                     }
                 }
-                Err(e) => warn!(
-                    "Failed to load lots for trade-fee performance attribution account {}: {}",
-                    account_id, e
-                ),
+            } else {
+                warn!(
+                    "Lot repository unavailable while grossing up disposed acquisition trade charges for performance attribution scope {}",
+                    result.scope.id
+                );
             }
         }
 
-        let mut acquisition_fees_disposed = Decimal::ZERO;
+        let mut saw_period_buy_lot_records = false;
+        let mut remaining_buy_charges_from_lots = Decimal::ZERO;
+        if loaded_lots {
+            for lot in lot_by_account_and_id.values() {
+                let Some(open_activity_id) = lot.open_activity_id.as_ref() else {
+                    continue;
+                };
+                if !buy_charge_by_activity.contains_key(open_activity_id) {
+                    continue;
+                }
+                let Ok(open_date) = NaiveDate::parse_from_str(&lot.open_date, "%Y-%m-%d") else {
+                    continue;
+                };
+                if open_date <= start_date || open_date > end_date {
+                    continue;
+                }
+
+                saw_period_buy_lot_records = true;
+                let remaining_quantity = parse_decimal_lossy(&lot.remaining_quantity);
+                if remaining_quantity.is_zero() {
+                    continue;
+                }
+
+                let full_charge = parse_decimal_lossy(&lot.fee_allocated_base)
+                    + parse_decimal_lossy(&lot.tax_allocated_base);
+                if full_charge.is_zero() {
+                    continue;
+                }
+
+                let original_quantity = parse_decimal_lossy(&lot.original_quantity).abs();
+                let remaining_charge = if original_quantity > Decimal::ZERO {
+                    full_charge * remaining_quantity.abs() / original_quantity
+                } else {
+                    let original_cost_basis_base =
+                        parse_decimal_lossy(&lot.original_cost_basis_base);
+                    let remaining_cost_basis_base =
+                        parse_decimal_lossy(&lot.remaining_cost_basis_base);
+                    if original_cost_basis_base > Decimal::ZERO {
+                        full_charge * remaining_cost_basis_base / original_cost_basis_base
+                    } else {
+                        full_charge
+                    }
+                };
+
+                remaining_buy_charges_from_lots += remaining_charge;
+            }
+        }
+
+        let mut acquisition_charges_disposed = Decimal::ZERO;
         let mut disposal_activity_ids = HashSet::<String>::new();
         for disposal in disposals {
             disposal_activity_ids.insert(disposal.disposal_activity_id.clone());
@@ -2463,59 +2516,66 @@ impl PerformanceService {
 
             let original_cost_basis_base = parse_decimal_lossy(&lot.original_cost_basis_base);
             let fee_allocated_base = parse_decimal_lossy(&lot.fee_allocated_base);
+            let tax_allocated_base = parse_decimal_lossy(&lot.tax_allocated_base);
+            let charge_allocated_base = fee_allocated_base + tax_allocated_base;
             let disposal_cost_basis_base = parse_decimal_lossy(&disposal.cost_basis_base);
-            if original_cost_basis_base <= Decimal::ZERO || fee_allocated_base.is_zero() {
+            if original_cost_basis_base <= Decimal::ZERO || charge_allocated_base.is_zero() {
                 continue;
             }
 
-            acquisition_fees_disposed +=
-                disposal_cost_basis_base * fee_allocated_base / original_cost_basis_base;
+            acquisition_charges_disposed +=
+                disposal_cost_basis_base * charge_allocated_base / original_cost_basis_base;
         }
 
-        let period_buy_fees = buy_fee_by_activity
+        let period_buy_charges = buy_charge_by_activity
             .values()
             .copied()
             .sum::<Decimal>()
             .round_dp(DECIMAL_PRECISION);
-        let period_sell_fees = disposal_activity_ids
+        let period_sell_charges = disposal_activity_ids
             .iter()
-            .filter_map(|activity_id| sell_fee_by_activity.get(activity_id))
+            .filter_map(|activity_id| sell_charge_by_activity.get(activity_id))
             .copied()
             .sum::<Decimal>()
             .round_dp(DECIMAL_PRECISION);
-        let acquisition_fees_disposed = acquisition_fees_disposed
-            .min(period_buy_fees)
+        let acquisition_charges_disposed = acquisition_charges_disposed
+            .min(period_buy_charges)
             .round_dp(DECIMAL_PRECISION);
-        let remaining_period_buy_fees =
-            (period_buy_fees - acquisition_fees_disposed).round_dp(DECIMAL_PRECISION);
+        let remaining_period_buy_charges = if saw_period_buy_lot_records {
+            remaining_buy_charges_from_lots
+                .min(period_buy_charges)
+                .round_dp(DECIMAL_PRECISION)
+        } else {
+            (period_buy_charges - acquisition_charges_disposed).round_dp(DECIMAL_PRECISION)
+        };
 
-        if period_sell_fees.is_zero()
-            && acquisition_fees_disposed.is_zero()
-            && remaining_period_buy_fees.is_zero()
+        if period_sell_charges.is_zero()
+            && acquisition_charges_disposed.is_zero()
+            && remaining_period_buy_charges.is_zero()
         {
             return AttributionEffectSet::default();
         }
 
         let mut effects = Vec::new();
-        if !period_sell_fees.is_zero() || !acquisition_fees_disposed.is_zero() {
+        if !period_sell_charges.is_zero() || !acquisition_charges_disposed.is_zero() {
             let mut effect = Self::synthetic_attribution_effect(
-                "__trade_fee_realized_gross_up__",
+                "__trade_charge_realized_gross_up__",
                 result,
                 end_date,
                 EconomicEventKind::Trade,
             );
             effect.realized_pnl =
-                (period_sell_fees + acquisition_fees_disposed).round_dp(DECIMAL_PRECISION);
+                (period_sell_charges + acquisition_charges_disposed).round_dp(DECIMAL_PRECISION);
             effects.push(effect);
         }
-        if !remaining_period_buy_fees.is_zero() {
+        if !remaining_period_buy_charges.is_zero() {
             let mut effect = Self::synthetic_attribution_effect(
-                "__trade_fee_unrealized_gross_up__",
+                "__trade_charge_unrealized_gross_up__",
                 result,
                 end_date,
                 EconomicEventKind::Trade,
             );
-            effect.unrealized_movement = remaining_period_buy_fees.round_dp(DECIMAL_PRECISION);
+            effect.unrealized_movement = remaining_period_buy_charges.round_dp(DECIMAL_PRECISION);
             effects.push(effect);
         }
 
@@ -6201,6 +6261,7 @@ mod tests {
             unit_price: None,
             amount: None,
             fee: Some(Decimal::ZERO),
+            tax: None,
             currency: "USD".to_string(),
             fx_rate: None,
             notes: None,
@@ -6301,6 +6362,8 @@ mod tests {
             remaining_cost_basis_base: "0".to_string(),
             fee_allocated: "10".to_string(),
             fee_allocated_base: "10".to_string(),
+            tax_allocated: "0".to_string(),
+            tax_allocated_base: "0".to_string(),
             currency: "USD".to_string(),
             base_currency: "USD".to_string(),
             fx_rate_to_base: "1".to_string(),
@@ -6340,6 +6403,8 @@ mod tests {
             acquisition_price: dec!(100),
             acquisition_fees: Decimal::ZERO,
             original_acquisition_fees: Decimal::ZERO,
+            acquisition_taxes: Decimal::ZERO,
+            original_acquisition_taxes: Decimal::ZERO,
             fx_rate_to_position: None,
             fx_rate_to_account: None,
             account_currency: None,
@@ -6417,6 +6482,8 @@ mod tests {
             acquisition_price: dec!(100),
             acquisition_fees: Decimal::ZERO,
             original_acquisition_fees: Decimal::ZERO,
+            acquisition_taxes: Decimal::ZERO,
+            original_acquisition_taxes: Decimal::ZERO,
             fx_rate_to_position: None,
             fx_rate_to_account: None,
             account_currency: None,
@@ -6864,6 +6931,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_buy_trade_charges_are_grossed_up_as_unrealized_without_disposals() {
+        let mut buy = buy_activity_on("buy-open-charge", "acct", "2026-05-02", dec!(1), dec!(100));
+        buy.fee = Some(dec!(5));
+        buy.tax = Some(dec!(2));
+
+        let performance_service = PerformanceService::new(
+            Arc::new(TestValuationService::new(Vec::new())),
+            Arc::new(TestQuoteService),
+        )
+        .with_activity_repository(
+            Arc::new(TestActivityRepository::new(vec![buy.clone()])),
+            Arc::new(TestFxService),
+        );
+        let result = PerformanceService::build_result(
+            "scope:acct".to_string(),
+            "USD".to_string(),
+            Some(date("2026-05-01")),
+            Some(date("2026-05-02")),
+            ReturnMethod::ValueReturn,
+            PerformanceReturns {
+                twr: None,
+                annualized_twr: None,
+                irr: None,
+                annualized_irr: None,
+                value_return: None,
+                annualized_value_return: None,
+            },
+            PerformanceAttribution::default(),
+            PerformanceService::empty_risk(),
+            PerformanceDataQuality {
+                status: DataQualityStatus::Ok,
+                warnings: Vec::new(),
+                not_applicable_reasons: Vec::new(),
+            },
+            Vec::new(),
+            false,
+            false,
+        );
+
+        let empty_disposals: Vec<LotDisposal> = Vec::new();
+        for period_disposals in [None, Some(empty_disposals.as_slice())] {
+            let effects = performance_service
+                .collect_trade_charge_pnl_gross_up_event_effects(
+                    &result,
+                    &["acct".to_string()],
+                    period_disposals,
+                )
+                .await;
+
+            assert!(effects.complete);
+            assert_eq!(effects.effects.len(), 1);
+            assert_eq!(effects.effects[0].realized_pnl, Decimal::ZERO);
+            assert_eq!(effects.effects[0].unrealized_movement, dec!(7));
+        }
+
+        let mut open_lot =
+            lot_record_for_fee_gross_up("lot-open-charge", "acct", "buy-open-charge");
+        open_lot.remaining_quantity = "1".to_string();
+        open_lot.original_cost_basis = "107".to_string();
+        open_lot.remaining_cost_basis = "107".to_string();
+        open_lot.original_cost_basis_base = "107".to_string();
+        open_lot.remaining_cost_basis_base = "107".to_string();
+        open_lot.fee_allocated = "5".to_string();
+        open_lot.fee_allocated_base = "5".to_string();
+        open_lot.tax_allocated = "2".to_string();
+        open_lot.tax_allocated_base = "2".to_string();
+        open_lot.is_closed = false;
+        open_lot.close_date = None;
+        open_lot.close_activity_id = None;
+
+        let performance_service_with_lot = PerformanceService::new(
+            Arc::new(TestValuationService::new(Vec::new())),
+            Arc::new(TestQuoteService),
+        )
+        .with_lot_repository(Arc::new(TestLotRepository {
+            lots: vec![open_lot],
+            ..Default::default()
+        }))
+        .with_activity_repository(
+            Arc::new(TestActivityRepository::new(vec![buy])),
+            Arc::new(TestFxService),
+        );
+
+        let effects = performance_service_with_lot
+            .collect_trade_charge_pnl_gross_up_event_effects(
+                &result,
+                &["acct".to_string()],
+                Some(empty_disposals.as_slice()),
+            )
+            .await;
+
+        assert!(effects.complete);
+        assert_eq!(effects.effects.len(), 1);
+        assert_eq!(effects.effects[0].realized_pnl, Decimal::ZERO);
+        assert_eq!(effects.effects[0].unrealized_movement, dec!(7));
+    }
+
+    #[tokio::test]
+    async fn partial_same_period_buy_sell_prorates_trade_charge_gross_up() {
+        let mut buy = buy_activity_on(
+            "buy-partial-charge",
+            "acct",
+            "2026-05-02",
+            dec!(10),
+            dec!(100),
+        );
+        buy.fee = Some(dec!(5));
+        buy.tax = Some(dec!(2));
+        let sell = sell_activity_on(
+            "sell-partial-charge",
+            "acct",
+            "2026-05-03",
+            dec!(4),
+            dec!(110),
+        );
+
+        let mut open_lot =
+            lot_record_for_fee_gross_up("lot-partial-charge", "acct", "buy-partial-charge");
+        open_lot.original_quantity = "10".to_string();
+        open_lot.remaining_quantity = "6".to_string();
+        open_lot.original_cost_basis = "1007".to_string();
+        open_lot.remaining_cost_basis = "604.2".to_string();
+        open_lot.original_cost_basis_base = "1007".to_string();
+        open_lot.remaining_cost_basis_base = "604.2".to_string();
+        open_lot.fee_allocated = "5".to_string();
+        open_lot.fee_allocated_base = "5".to_string();
+        open_lot.tax_allocated = "2".to_string();
+        open_lot.tax_allocated_base = "2".to_string();
+        open_lot.is_closed = false;
+        open_lot.close_date = None;
+        open_lot.close_activity_id = None;
+
+        let mut disposal = lot_disposal("USD", "USD", "1", "402.8", "402.8", "37.2");
+        disposal.id = "partial-charge-disposal".to_string();
+        disposal.lot_id = open_lot.id.clone();
+        disposal.asset_id = "AAPL".to_string();
+        disposal.disposal_activity_id = sell.id.clone();
+        disposal.disposal_date = "2026-05-03".to_string();
+        disposal.quantity = "4".to_string();
+        let period_disposals = vec![disposal.clone()];
+
+        let performance_service = PerformanceService::new(
+            Arc::new(TestValuationService::new(Vec::new())),
+            Arc::new(TestQuoteService),
+        )
+        .with_lot_repository(Arc::new(TestLotRepository {
+            disposals: vec![disposal],
+            lots: vec![open_lot],
+        }))
+        .with_activity_repository(
+            Arc::new(TestActivityRepository::new(vec![buy, sell])),
+            Arc::new(TestFxService),
+        );
+        let result = PerformanceService::build_result(
+            "scope:acct".to_string(),
+            "USD".to_string(),
+            Some(date("2026-05-01")),
+            Some(date("2026-05-03")),
+            ReturnMethod::ValueReturn,
+            PerformanceReturns {
+                twr: None,
+                annualized_twr: None,
+                irr: None,
+                annualized_irr: None,
+                value_return: None,
+                annualized_value_return: None,
+            },
+            PerformanceAttribution::default(),
+            PerformanceService::empty_risk(),
+            PerformanceDataQuality {
+                status: DataQualityStatus::Ok,
+                warnings: Vec::new(),
+                not_applicable_reasons: Vec::new(),
+            },
+            Vec::new(),
+            false,
+            false,
+        );
+
+        let effects = performance_service
+            .collect_trade_charge_pnl_gross_up_event_effects(
+                &result,
+                &["acct".to_string()],
+                Some(period_disposals.as_slice()),
+            )
+            .await;
+
+        assert!(effects.complete);
+        assert_eq!(effects.effects.len(), 2);
+        let realized = effects
+            .effects
+            .iter()
+            .map(|effect| effect.realized_pnl)
+            .sum::<Decimal>();
+        let unrealized = effects
+            .effects
+            .iter()
+            .map(|effect| effect.unrealized_movement)
+            .sum::<Decimal>();
+        assert_eq!(realized.round_dp(2), dec!(2.80));
+        assert_eq!(unrealized.round_dp(2), dec!(4.20));
+        assert_eq!((realized + unrealized).round_dp(2), dec!(7.00));
+    }
+
+    #[tokio::test]
     async fn transfer_pair_fx_attribution_uses_compiled_security_economics() {
         let mut start = valuation("2026-05-01", dec!(1000), dec!(1000), dec!(1000), dec!(1000));
         start.account_currency = "USD".to_string();
@@ -7105,19 +7377,21 @@ mod tests {
         start.base_currency = "USD".to_string();
         start.external_flow_source = ExternalFlowSource::ActivityDerived;
 
-        let mut end = valuation("2026-05-02", dec!(1020), dec!(1000), dec!(1000), dec!(1000));
+        let mut end = valuation("2026-05-02", dec!(1015), dec!(1000), dec!(1000), dec!(1000));
         end.account_id = "acct".to_string();
         end.account_currency = "USD".to_string();
         end.base_currency = "USD".to_string();
         end.external_flow_source = ExternalFlowSource::ActivityDerived;
 
-        let activity_repo = Arc::new(TestActivityRepository::new(vec![income_activity_on(
+        let mut dividend = income_activity_on(
             "dividend-summary",
             "acct",
             "2026-05-02",
             ActivityType::Dividend,
             dec!(20),
-        )]));
+        );
+        dividend.tax = Some(dec!(5));
+        let activity_repo = Arc::new(TestActivityRepository::new(vec![dividend]));
         let valuation_service = Arc::new(TestValuationService::new(vec![start, end]));
         let performance_service =
             PerformanceService::new(valuation_service, Arc::new(TestQuoteService))
@@ -7135,8 +7409,9 @@ mod tests {
             .expect("performance should finalize attribution before building summary");
 
         assert_eq!(performance.attribution.income, dec!(20));
+        assert_eq!(performance.attribution.taxes, dec!(5));
         assert_eq!(performance.attribution.residual, Decimal::ZERO);
-        assert_eq!(performance.summary.amount, Some(dec!(20)));
+        assert_eq!(performance.summary.amount, Some(dec!(15)));
         assert!(!performance
             .summary
             .reasons
@@ -7161,6 +7436,7 @@ mod tests {
             unit_price: None,
             amount: Some(amount),
             fee: Some(fee),
+            tax: None,
             currency: "CAD".to_string(),
             fx_rate: None,
             notes: None,
@@ -7179,10 +7455,11 @@ mod tests {
 
     #[test]
     fn activity_attribution_components_separate_income_fees_and_taxes() {
-        let dividend = activity_fixture(ActivityType::Dividend, dec!(50), dec!(2));
+        let mut dividend = activity_fixture(ActivityType::Dividend, dec!(50), dec!(2));
+        dividend.tax = Some(dec!(3));
         assert_eq!(
             PerformanceService::activity_attribution_components(&dividend, &ActivityType::Dividend),
-            (dec!(50), dec!(2), Decimal::ZERO)
+            (dec!(50), dec!(2), dec!(3))
         );
 
         let explicit_fee = activity_fixture(ActivityType::Fee, dec!(4), Decimal::ZERO);
@@ -7201,6 +7478,13 @@ mod tests {
         assert_eq!(
             PerformanceService::activity_attribution_components(&buy, &ActivityType::Buy),
             (Decimal::ZERO, dec!(1), Decimal::ZERO)
+        );
+
+        let mut taxable_buy = activity_fixture(ActivityType::Buy, dec!(100), dec!(1));
+        taxable_buy.tax = Some(dec!(3));
+        assert_eq!(
+            PerformanceService::activity_attribution_components(&taxable_buy, &ActivityType::Buy),
+            (Decimal::ZERO, dec!(1), dec!(3))
         );
     }
 

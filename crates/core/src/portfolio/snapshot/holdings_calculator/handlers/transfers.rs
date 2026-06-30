@@ -297,10 +297,11 @@ impl HoldingsCalculator {
                     compiled_economics.lot_cost_basis_value / activity.qty()
                 };
                 let (unit_price_for_lot, fee_for_lot, fx_rate_used) = if needs_conversion {
-                    let (converted_price, converted_fee, fx_rate) = self
+                    let (converted_price, converted_fee, _converted_tax, fx_rate) = self
                         .convert_to_position_currency(
                             lot_unit_price,
                             activity.fee_amt(),
+                            Decimal::ZERO,
                             activity,
                             &position_currency,
                             account_currency,
@@ -320,6 +321,7 @@ impl HoldingsCalculator {
                     activity.qty(),
                     unit_price_for_lot,
                     fee_for_lot,
+                    Decimal::ZERO,
                     activity.activity_date,
                     fx_rate_used,
                     Some(activity.id.clone()),

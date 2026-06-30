@@ -225,6 +225,7 @@ impl HoldingsCalculator {
             let original_cost_basis = parse_decimal_lossy(&record.original_cost_basis);
             let remaining_cost_basis = parse_decimal_lossy(&record.remaining_cost_basis);
             let fee_allocated = parse_decimal_lossy(&record.fee_allocated);
+            let tax_allocated = parse_decimal_lossy(&record.tax_allocated);
 
             record.currency = lot_currency.to_string();
             record.base_currency = base_currency.clone();
@@ -232,6 +233,7 @@ impl HoldingsCalculator {
             record.original_cost_basis_base = (original_cost_basis * fx_rate_to_base).to_string();
             record.remaining_cost_basis_base = (remaining_cost_basis * fx_rate_to_base).to_string();
             record.fee_allocated_base = (fee_allocated * fx_rate_to_base).to_string();
+            record.tax_allocated_base = (tax_allocated * fx_rate_to_base).to_string();
         }
 
         records
