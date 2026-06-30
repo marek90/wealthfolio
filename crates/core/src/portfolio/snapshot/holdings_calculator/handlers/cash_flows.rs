@@ -188,18 +188,18 @@ impl HoldingsCalculator {
     ) -> Result<()> {
         let activity_currency = &activity.currency;
 
-        // Determine charge amount: prefer fee field, fall back to amount
-        let charge = if activity.fee_amt() != Decimal::ZERO {
-            activity.fee_amt()
-        } else {
-            activity.amt()
-        };
+        let charge = Self::activity_charge_amount(activity, activity_type);
 
         if charge == Decimal::ZERO {
+            let expected_fields = match activity_type {
+                ActivityType::Tax => "'tax', 'fee', and 'amount'",
+                _ => "'fee' and 'amount'",
+            };
             warn!(
-                "Activity {} ({}): 'fee' and 'amount' are both zero. No cash change.",
+                "Activity {} ({}): {} are zero. No cash change.",
                 activity.id,
-                activity_type.as_str()
+                activity_type.as_str(),
+                expected_fields
             );
             return Ok(());
         }
@@ -209,5 +209,17 @@ impl HoldingsCalculator {
 
         // Charges do not affect net_contribution
         Ok(())
+    }
+
+    fn activity_charge_amount(activity: &Activity, activity_type: &ActivityType) -> Decimal {
+        if matches!(activity_type, ActivityType::Tax) && !activity.tax_amt().is_zero() {
+            return activity.tax_amt();
+        }
+
+        if !activity.fee_amt().is_zero() {
+            return activity.fee_amt();
+        }
+
+        activity.amt()
     }
 }

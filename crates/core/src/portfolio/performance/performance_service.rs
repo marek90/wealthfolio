@@ -2166,7 +2166,7 @@ impl PerformanceService {
             }
             ActivityType::Fee => (
                 Decimal::ZERO,
-                Self::activity_charge_amount(activity),
+                Self::activity_charge_amount(activity, activity_type),
                 Decimal::ZERO,
             ),
             ActivityType::Buy | ActivityType::Sell => {
@@ -2175,18 +2175,22 @@ impl PerformanceService {
             ActivityType::Tax => (
                 Decimal::ZERO,
                 Decimal::ZERO,
-                Self::activity_charge_amount(activity),
+                Self::activity_charge_amount(activity, activity_type),
             ),
             _ => (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
         }
     }
 
-    fn activity_charge_amount(activity: &Activity) -> Decimal {
-        if activity.fee_amt().is_zero() {
-            activity.amt()
-        } else {
-            activity.fee_amt()
+    fn activity_charge_amount(activity: &Activity, activity_type: &ActivityType) -> Decimal {
+        if matches!(activity_type, ActivityType::Tax) && !activity.tax_amt().is_zero() {
+            return activity.tax_amt();
         }
+
+        if !activity.fee_amt().is_zero() {
+            return activity.fee_amt();
+        }
+
+        activity.amt()
     }
 
     fn attribution_unit_multiplier(activity: &Activity) -> Decimal {
@@ -7835,6 +7839,13 @@ mod tests {
         assert_eq!(
             PerformanceService::activity_attribution_components(&tax, &ActivityType::Tax),
             (Decimal::ZERO, Decimal::ZERO, dec!(7))
+        );
+
+        let mut explicit_tax = activity_fixture(ActivityType::Tax, Decimal::ZERO, Decimal::ZERO);
+        explicit_tax.tax = Some(dec!(9));
+        assert_eq!(
+            PerformanceService::activity_attribution_components(&explicit_tax, &ActivityType::Tax),
+            (Decimal::ZERO, Decimal::ZERO, dec!(9))
         );
 
         let buy = activity_fixture(ActivityType::Buy, dec!(100), dec!(1));

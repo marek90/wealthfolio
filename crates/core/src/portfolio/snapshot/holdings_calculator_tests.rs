@@ -2146,6 +2146,55 @@ mod tests {
     }
 
     #[test]
+    fn test_tax_activity_uses_tax_field_for_charge() {
+        let mock_fx_service = MockFxService::new();
+        let target_date_str = "2023-01-07";
+        let target_date = NaiveDate::from_str(target_date_str).unwrap();
+        let account_currency = "CAD";
+
+        let base_currency = Arc::new(RwLock::new(account_currency.to_string()));
+        let mut calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+
+        let mut previous_snapshot =
+            create_initial_snapshot("acc_tax_field", account_currency, "2023-01-06");
+        previous_snapshot
+            .cash_balances
+            .insert(account_currency.to_string(), dec!(1000));
+        previous_snapshot.net_contribution = dec!(500);
+        previous_snapshot.net_contribution_base = dec!(500);
+
+        let mut tax_activity = create_cash_activity(
+            "act_tax_field_1",
+            ActivityType::Tax,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            account_currency,
+            target_date_str,
+        );
+        tax_activity.amount = None;
+        tax_activity.tax = Some(dec!(42));
+
+        let result = calculator.calculate_next_holdings(
+            &previous_snapshot,
+            std::slice::from_ref(&tax_activity),
+            target_date,
+        );
+        assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
+        let next_state = result.unwrap().snapshot;
+
+        assert_eq!(
+            next_state.cash_balances.get(account_currency),
+            Some(&dec!(958))
+        );
+        assert_eq!(next_state.cash_total_account_currency, dec!(958));
+        assert_eq!(
+            next_state.net_contribution,
+            previous_snapshot.net_contribution
+        );
+        assert!(next_state.positions.is_empty());
+    }
+
+    #[test]
     fn test_add_and_remove_holding_activities() {
         let mut mock_fx_service = MockFxService::new();
         let target_date_add_str = "2023-01-08";
