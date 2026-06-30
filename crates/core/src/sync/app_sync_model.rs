@@ -72,6 +72,8 @@ pub const APP_SYNC_TABLES: &[&str] = &[
     "allocation_targets",
     // Depends on: allocation_targets, taxonomy_categories.
     "allocation_target_weights",
+    // Depends on: allocation_targets.
+    "allocation_target_constraints",
 ];
 
 /// Entity names used by incremental sync events.
