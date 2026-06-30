@@ -6,9 +6,9 @@ use rust_decimal::Decimal;
 use wealthfolio_core::{
     accounts::AccountPurpose,
     portfolio::allocation_targets::{
-        AllocationTarget, AllocationTargetWeight, CalculateRebalancePlanInput, DriftReport,
-        NewAllocationTarget, NewAllocationTargetWeight, RebalancePlan, AllocationTargetConstraint,
-        SaveAllocationTargetResult, ScenarioMode, ScopeType,
+        AllocationTarget, AllocationTargetConstraint, AllocationTargetWeight,
+        CalculateRebalancePlanInput, DriftReport, NewAllocationTarget, NewAllocationTargetWeight,
+        RebalancePlan, SaveAllocationTargetResult, ScenarioMode, ScopeType,
     },
     portfolios::AccountScope,
 };

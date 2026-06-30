@@ -503,11 +503,7 @@ mod tests {
     fn outbox_rows(repo: &AllocationTargetRepository) -> Vec<(String, String, String)> {
         let conn = &mut get_connection(&repo.pool).expect("conn");
         sync_outbox::table
-            .select((
-                sync_outbox::entity,
-                sync_outbox::subject_id,
-                sync_outbox::op,
-            ))
+            .select((sync_outbox::entity, sync_outbox::entity_id, sync_outbox::op))
             .order(sync_outbox::created_at.asc())
             .load::<(String, String, String)>(conn)
             .expect("load outbox")

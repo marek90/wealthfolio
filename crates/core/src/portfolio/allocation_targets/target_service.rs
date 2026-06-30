@@ -8,8 +8,8 @@ use crate::errors::{Error as CoreError, Result as CoreResult, ValidationError};
 use crate::taxonomies::{Category, TaxonomyServiceTrait};
 
 use super::model::{
-    AllocationTarget, AllocationTargetWeight, BandType, NewAllocationTarget,
-    NewAllocationTargetWeight, RebalanceGoal, AllocationTargetConstraint, SaveAllocationTargetResult,
+    AllocationTarget, AllocationTargetConstraint, AllocationTargetWeight, BandType,
+    NewAllocationTarget, NewAllocationTargetWeight, RebalanceGoal, SaveAllocationTargetResult,
 };
 use super::validation::{validate_new_target, validate_weights_sum};
 
@@ -35,7 +35,10 @@ pub trait AllocationTargetRepositoryTrait: Send + Sync {
         weights: Vec<AllocationTargetWeight>,
     ) -> CoreResult<SaveAllocationTargetResult>;
 
-    fn list_target_constraints(&self, target_id: &str) -> CoreResult<Vec<AllocationTargetConstraint>>;
+    fn list_target_constraints(
+        &self,
+        target_id: &str,
+    ) -> CoreResult<Vec<AllocationTargetConstraint>>;
     async fn save_target_constraints(
         &self,
         target_id: &str,
@@ -71,7 +74,10 @@ pub trait AllocationTargetServiceTrait: Send + Sync {
         weights: Vec<NewAllocationTargetWeight>,
     ) -> CoreResult<SaveAllocationTargetResult>;
 
-    fn list_target_constraints(&self, target_id: &str) -> CoreResult<Vec<AllocationTargetConstraint>>;
+    fn list_target_constraints(
+        &self,
+        target_id: &str,
+    ) -> CoreResult<Vec<AllocationTargetConstraint>>;
     async fn save_target_constraints(
         &self,
         target_id: &str,
@@ -444,7 +450,10 @@ impl AllocationTargetServiceTrait for AllocationTargetService {
             .await
     }
 
-    fn list_target_constraints(&self, target_id: &str) -> CoreResult<Vec<AllocationTargetConstraint>> {
+    fn list_target_constraints(
+        &self,
+        target_id: &str,
+    ) -> CoreResult<Vec<AllocationTargetConstraint>> {
         self.repository.list_target_constraints(target_id)
     }
 

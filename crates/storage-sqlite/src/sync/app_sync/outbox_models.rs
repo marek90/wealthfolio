@@ -9,7 +9,7 @@ use crate::goals::{GoalDB, GoalPlanDB, GoalsAllocationDB};
 use crate::limits::ContributionLimitDB;
 use crate::market_data::QuoteDB;
 use crate::portfolio::allocation_targets::{
-    AllocationTargetDB, AllocationTargetWeightDB, AllocationTargetConstraintDB,
+    AllocationTargetConstraintDB, AllocationTargetDB, AllocationTargetWeightDB,
 };
 use crate::portfolio::snapshot::AccountStateSnapshotDB;
 use crate::portfolios::{PortfolioAccountDB, PortfolioDB};

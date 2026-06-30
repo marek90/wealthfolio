@@ -2999,7 +2999,7 @@ mod tests {
         let rows = sync_outbox::table
             .select((
                 sync_outbox::entity,
-                sync_outbox::subject_id,
+                sync_outbox::entity_id,
                 sync_outbox::op,
                 sync_outbox::payload,
             ))
