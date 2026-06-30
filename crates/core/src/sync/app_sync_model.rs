@@ -388,6 +388,7 @@ mod tests {
             "\"portfolio_account\"",
             "\"allocation_target\"",
             "\"allocation_target_weight\"",
+            "\"allocation_target_constraint\"",
             "\"spending_setting\"",
             "\"activity_taxonomy_assignment\"",
             "\"spending_activity_split\"",
