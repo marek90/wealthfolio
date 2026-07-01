@@ -351,7 +351,7 @@ impl HoldingsCalculator {
                 warnings.push(warning);
                 continue;
             }
-            let activity_type = ActivityType::from_str(&activity.activity_type).ok();
+            let activity_type = ActivityType::from_str(activity.effective_type()).ok();
             let requires_atomic_scratch = activity_type
                 .as_ref()
                 .is_some_and(Self::activity_requires_atomic_scratch);
@@ -456,8 +456,8 @@ impl HoldingsCalculator {
         run: &ProjectionRun,
         buffer: &mut SideEffectBuffer,
     ) -> Result<()> {
-        let activity_type = ActivityType::from_str(&activity.activity_type).map_err(|_| {
-            CalculatorError::UnsupportedActivityType(activity.activity_type.clone())
+        let activity_type = ActivityType::from_str(activity.effective_type()).map_err(|_| {
+            CalculatorError::UnsupportedActivityType(activity.effective_type().to_string())
         })?;
 
         // Dispatch to Specific Handlers
