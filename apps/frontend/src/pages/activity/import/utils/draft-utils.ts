@@ -762,7 +762,7 @@ export function draftToActivityImport(draft: DraftActivity): ActivityImport {
     id: undefined,
     accountId: draft.accountId,
     assetId: draft.assetId,
-    currency: draft.currency ?? "",
+    currency: draft.currencySource === "default" ? "" : (draft.currency ?? ""),
     activityType: draft.activityType as ActivityImport["activityType"],
     date: draft.activityDate,
     symbol: draft.symbol ?? "",
