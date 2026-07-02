@@ -106,12 +106,58 @@ describe("asset profile calculations", () => {
     expect(poundRow.currency).toBe("GBP");
   });
 
+  it("normalizes quote-unit rows when the latest quote is already major currency", () => {
+    const factor = resolveQuoteDisplayFactor({
+      quote: quote({ close: 5.65, currency: "GBP" }),
+      displayCurrency: "GBP",
+      marketPrice: 5.65,
+    });
+
+    expect(factor).toBeCloseTo(1);
+
+    const [penceRow, poundRow] = normalizeQuoteHistoryForDisplay({
+      quoteHistory: [
+        quote({ close: 556.765, adjclose: 556.765, currency: "GBp" }),
+        quote({ close: 5.5, adjclose: 5.5, currency: "GBP" }),
+      ],
+      displayCurrency: "GBP",
+      quoteDisplayFactor: factor,
+    });
+
+    expect(penceRow.close).toBeCloseTo(5.56765);
+    expect(penceRow.currency).toBe("GBP");
+    expect(poundRow.close).toBeCloseTo(5.5);
+    expect(poundRow.currency).toBe("GBP");
+  });
+
+  it("normalizes thousandth quote-unit rows from their currency metadata", () => {
+    const [displayQuote] = normalizeQuoteHistoryForDisplay({
+      quoteHistory: [quote({ close: 987, adjclose: 987, currency: "KWF" })],
+      displayCurrency: "KWD",
+      quoteDisplayFactor: 1,
+    });
+
+    expect(displayQuote.close).toBeCloseTo(0.987);
+    expect(displayQuote.adjclose).toBeCloseTo(0.987);
+    expect(displayQuote.currency).toBe("KWD");
+  });
+
   it("normalizes quote-unit income fallback amounts to display currency", () => {
     expect(
       sumDisplayIncomeActivities({
         activities: [incomeActivity({ amount: "100", currency: "GBp" })],
         displayCurrency: "GBP",
         quoteDisplayFactor: 0.01,
+      }),
+    ).toBeCloseTo(1);
+  });
+
+  it("normalizes quote-unit income when the latest quote factor is already major", () => {
+    expect(
+      sumDisplayIncomeActivities({
+        activities: [incomeActivity({ amount: "100", currency: "GBp" })],
+        displayCurrency: "GBP",
+        quoteDisplayFactor: 1,
       }),
     ).toBeCloseTo(1);
   });

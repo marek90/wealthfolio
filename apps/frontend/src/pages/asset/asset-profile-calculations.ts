@@ -47,6 +47,39 @@ export function resolveQuoteDisplayFactor({
   return price / close;
 }
 
+function resolveDisplayMultiplier({
+  currency,
+  displayCurrency,
+  quoteDisplayFactor,
+}: {
+  currency: string;
+  displayCurrency: string;
+  quoteDisplayFactor: number | null;
+}): number | null {
+  const normalizedCurrency = normalizeCurrency(currency)?.toUpperCase();
+  const normalizedDisplayCurrency = normalizeCurrency(displayCurrency)?.toUpperCase();
+  if (
+    !normalizedCurrency ||
+    !normalizedDisplayCurrency ||
+    normalizedCurrency !== normalizedDisplayCurrency
+  ) {
+    return null;
+  }
+
+  const quoteUnit = getQuoteUnitCurrency(currency);
+  if (quoteUnit) {
+    return quoteUnit.major.toUpperCase() === normalizedDisplayCurrency ? quoteUnit.factor : null;
+  }
+
+  if (currency.trim().toUpperCase() === displayCurrency.trim().toUpperCase()) {
+    return 1;
+  }
+
+  return quoteDisplayFactor != null && Number.isFinite(quoteDisplayFactor)
+    ? quoteDisplayFactor
+    : null;
+}
+
 export function normalizeQuoteForDisplay({
   quote,
   displayCurrency,
@@ -56,18 +89,12 @@ export function normalizeQuoteForDisplay({
   displayCurrency: string;
   quoteDisplayFactor: number | null;
 }): Quote {
-  const normalizedQuoteCurrency = normalizeCurrency(quote.currency)?.toUpperCase();
-  const normalizedDisplayCurrency = normalizeCurrency(displayCurrency)?.toUpperCase();
-  if (normalizedQuoteCurrency !== normalizedDisplayCurrency) {
-    return quote;
-  }
-
-  // Only rows still stored in a quote-unit currency (e.g. GBp) need the factor
-  // applied. Rows already stored in the major/display currency (e.g. GBP) are
-  // left untouched so a factor derived from a quote-unit latest quote does not
-  // divide already-normalized rows by 100.
-  const multiplier = getQuoteUnitCurrency(quote.currency) ? quoteDisplayFactor : 1;
-  if (multiplier == null || !Number.isFinite(multiplier)) {
+  const multiplier = resolveDisplayMultiplier({
+    currency: quote.currency,
+    displayCurrency,
+    quoteDisplayFactor,
+  });
+  if (multiplier == null) {
     return quote;
   }
 
@@ -110,20 +137,15 @@ export function sumDisplayIncomeActivities({
 
   let sum = 0;
   for (const activity of activities) {
-    const normalizedActivityCurrency = normalizeCurrency(activity.currency)?.toUpperCase();
-    if (normalizedActivityCurrency !== normalizedDisplayCurrency) {
-      return null;
-    }
-
     const amount = Number(activity.amount ?? 0);
     if (!Number.isFinite(amount)) continue;
 
-    const multiplier =
-      !getQuoteUnitCurrency(activity.currency) &&
-      activity.currency.trim().toUpperCase() === displayCurrency.trim().toUpperCase()
-        ? 1
-        : quoteDisplayFactor;
-    if (multiplier == null || !Number.isFinite(multiplier)) {
+    const multiplier = resolveDisplayMultiplier({
+      currency: activity.currency,
+      displayCurrency,
+      quoteDisplayFactor,
+    });
+    if (multiplier == null) {
       return null;
     }
 
