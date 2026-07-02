@@ -7,7 +7,6 @@ use super::economics::{AssetCache, AssetPositionInfo};
 use super::HoldingsCalculator;
 use crate::activities::Activity;
 use crate::errors::{CalculatorError, Error, Result};
-use crate::fx::{denormalization_multiplier, normalize_currency_code};
 use crate::portfolio::snapshot::LotBookBasis;
 use crate::portfolio::snapshot::{AccountStateSnapshot, Position, ShortabilityPolicy};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -474,26 +473,13 @@ impl HoldingsCalculator {
         date: NaiveDate,
         activity_id: &str,
     ) -> Option<Decimal> {
-        let normalized_from = normalize_currency_code(from_currency);
-        let normalized_to = normalize_currency_code(to_currency);
-        let source_multiplier = if normalized_from == from_currency {
-            Decimal::ONE
-        } else {
-            Decimal::ONE / denormalization_multiplier(from_currency)
-        };
-        let target_multiplier = denormalization_multiplier(to_currency);
-
-        if normalized_from == normalized_to {
-            return Some(source_multiplier * target_multiplier);
-        }
-
         match self.fx_service.convert_currency_for_date(
             Decimal::ONE,
-            normalized_from,
-            normalized_to,
+            from_currency,
+            to_currency,
             date,
         ) {
-            Ok(rate) => Some(source_multiplier * rate * target_multiplier),
+            Ok(rate) => Some(rate),
             Err(e) => {
                 warn!(
                     "Holdings Calc (Lot Basis {}): Failed FX rate {}->{} on {}: {}.",
