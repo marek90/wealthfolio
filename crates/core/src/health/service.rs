@@ -4,7 +4,7 @@
 //! and handles fix actions.
 
 use async_trait::async_trait;
-use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday};
+use chrono::{Duration, NaiveDate, Utc};
 use log::{debug, info, warn};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -1141,9 +1141,6 @@ async fn gather_quote_date_gap_issues(
 
     for snapshots in snapshots_by_account.values() {
         for snapshot in snapshots {
-            if !is_market_weekday(snapshot.snapshot_date) {
-                continue;
-            }
             min_date = Some(min_date.map_or(snapshot.snapshot_date, |date| {
                 date.min(snapshot.snapshot_date)
             }));
@@ -1248,10 +1245,6 @@ fn quote_date_gap_issues_from_data(
         snapshots.sort_by_key(|snapshot| snapshot.snapshot_date);
 
         for snapshot in snapshots {
-            if !is_market_weekday(snapshot.snapshot_date) {
-                continue;
-            }
-
             let mut positions: Vec<_> = snapshot.positions.iter().collect();
             positions.sort_by_key(|(asset_id, _)| (*asset_id).clone());
             for (asset_id, position) in positions {
@@ -1307,10 +1300,6 @@ fn quote_date_gap_issues_from_data(
     }
 
     issues
-}
-
-fn is_market_weekday(date: NaiveDate) -> bool {
-    !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
 fn market_calendar_key(asset: &Asset) -> Option<String> {
@@ -1690,13 +1679,13 @@ struct BasisSourceIssue {
     asset_id: String,
     /// The acquiring activity to fix (transactions-tracked only).
     activity_id: Option<String>,
-    /// Date the incomplete basis is observed (latest snapshot date).
+    /// Date the incomplete basis is observed.
     observed_date: NaiveDate,
     reason: ValuationIssueReason,
 }
 
-/// Detects incomplete cost basis at its source, from the latest snapshot per
-/// account. On a HOLDINGS-tracked account the cost lives on the snapshot
+/// Detects incomplete cost basis at its source. On a HOLDINGS-tracked account
+/// the cost lives on each snapshot
 /// position; on a TRANSACTIONS-tracked account it comes from the acquiring
 /// activity that opened the lot, so each unpriced lot is reported against its
 /// `source_activity_id` for a precise deep-link.
@@ -1762,36 +1751,37 @@ fn basis_source_issues_from_snapshots(
         ) {
             continue;
         }
-        let Some(latest) = snapshots_by_account[account_id].last() else {
-            continue;
-        };
         let account_name = account_name_map
             .get(account_id)
             .cloned()
             .unwrap_or_else(|| account_id.clone());
+        let mut snapshots: Vec<_> = snapshots_by_account[account_id].iter().collect();
+        snapshots.sort_by_key(|snapshot| snapshot.snapshot_date);
 
-        let mut positions: Vec<&Position> = latest
-            .positions
-            .values()
-            .filter(|position| !position.is_alternative && !position.quantity.is_zero())
-            .filter(|position| {
-                matches!(
-                    position.basis_status(),
-                    BasisStatus::Unknown | BasisStatus::PartialUnknown
-                )
-            })
-            .collect();
-        positions.sort_by(|a, b| a.asset_id.cmp(&b.asset_id));
+        for snapshot in snapshots {
+            let mut positions: Vec<&Position> = snapshot
+                .positions
+                .values()
+                .filter(|position| !position.is_alternative && !position.quantity.is_zero())
+                .filter(|position| {
+                    matches!(
+                        position.basis_status(),
+                        BasisStatus::Unknown | BasisStatus::PartialUnknown
+                    )
+                })
+                .collect();
+            positions.sort_by(|a, b| a.asset_id.cmp(&b.asset_id));
 
-        for position in positions {
-            raws.push(BasisSourceIssue {
-                account_id: account_id.clone(),
-                account_name: account_name.clone(),
-                asset_id: position.asset_id.clone(),
-                activity_id: None,
-                observed_date: latest.snapshot_date,
-                reason: ValuationIssueReason::IncompleteBasisSnapshot,
-            });
+            for position in positions {
+                raws.push(BasisSourceIssue {
+                    account_id: account_id.clone(),
+                    account_name: account_name.clone(),
+                    asset_id: position.asset_id.clone(),
+                    activity_id: None,
+                    observed_date: snapshot.snapshot_date,
+                    reason: ValuationIssueReason::IncompleteBasisSnapshot,
+                });
+            }
         }
     }
 
@@ -2678,6 +2668,50 @@ mod tests {
     }
 
     #[test]
+    fn missing_weekend_quote_date_is_reported_for_crypto() {
+        let saturday = NaiveDate::from_ymd_opt(2026, 6, 6).unwrap();
+        let snapshots_by_account = HashMap::from([(
+            "acc_crypto".to_string(),
+            vec![snapshot_with_positions(
+                "acc_crypto",
+                saturday,
+                HashMap::from([(
+                    "asset_btc".to_string(),
+                    position_with_basis_status("acc_crypto", "asset_btc", true),
+                )]),
+            )],
+        )]);
+        let account_names = HashMap::from([("acc_crypto".to_string(), "Crypto".to_string())]);
+        let latest_quote_times = HashMap::from([(
+            "asset_btc".to_string(),
+            Utc.with_ymd_and_hms(2026, 6, 8, 12, 0, 0).unwrap(),
+        )]);
+        let mut crypto = health_asset("asset_btc");
+        crypto.instrument_type = Some(InstrumentType::Crypto);
+        crypto.display_code = Some("BTC-USD".to_string());
+        crypto.instrument_symbol = Some("BTC-USD".to_string());
+        crypto.instrument_exchange_mic = None;
+        let assets_by_id = HashMap::from([("asset_btc".to_string(), crypto)]);
+
+        let issues = quote_date_gap_issues_from_data(
+            &snapshots_by_account,
+            &account_names,
+            &latest_quote_times,
+            &HashSet::new(),
+            &HashSet::new(),
+            &assets_by_id,
+        );
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].asset_id.as_deref(), Some("asset_btc"));
+        assert_eq!(issues[0].activity_date, Some(saturday));
+        assert_eq!(
+            issues[0].reason,
+            Some(crate::health::checks::ValuationIssueReason::MissingMarketQuote)
+        );
+    }
+
+    #[test]
     fn incomplete_basis_buy_without_price_is_flagged_and_deep_links_to_activity() {
         // Transaction-tracked acquisitions with no unit price yield zero-cost lots.
         let accounts = vec![health_account(
@@ -2777,6 +2811,46 @@ mod tests {
             && matches!(&a.action, crate::health::model::ActionRef::Navigate { action }
                 if action.route == "/holdings/asset_xyz"
                     && action.query.as_ref().is_some_and(|q| q["tab"] == "snapshots"))));
+    }
+
+    #[test]
+    fn incomplete_basis_holdings_reports_historical_snapshot_gap() {
+        let first_date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let second_date = NaiveDate::from_ymd_opt(2026, 6, 2).unwrap();
+        let snapshots_by_account = HashMap::from([(
+            "acc_hold".to_string(),
+            vec![
+                snapshot_with_positions(
+                    "acc_hold",
+                    first_date,
+                    HashMap::from([(
+                        "asset_xyz".to_string(),
+                        position_with_basis_status("acc_hold", "asset_xyz", false),
+                    )]),
+                ),
+                snapshot_with_positions(
+                    "acc_hold",
+                    second_date,
+                    HashMap::from([(
+                        "asset_xyz".to_string(),
+                        position_with_basis_status("acc_hold", "asset_xyz", true),
+                    )]),
+                ),
+            ],
+        )]);
+        let account_names = HashMap::from([("acc_hold".to_string(), "Manual".to_string())]);
+        let account_tracking = HashMap::from([("acc_hold".to_string(), TrackingMode::Holdings)]);
+
+        let raws = basis_source_issues_from_snapshots(
+            &snapshots_by_account,
+            &account_names,
+            &account_tracking,
+        );
+
+        assert_eq!(raws.len(), 1);
+        assert_eq!(raws[0].asset_id, "asset_xyz");
+        assert_eq!(raws[0].observed_date, first_date);
+        assert!(raws[0].activity_id.is_none());
     }
 
     #[test]
