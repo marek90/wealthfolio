@@ -198,6 +198,9 @@ impl QuoteSyncCheck {
                     .id(format!("quote_sync:error:{}", data_hash))
                     .severity(severity)
                     .category(HealthCategory::PriceStaleness)
+                    .code("quote_sync_error")
+                    .param("count", count as u32)
+                    .param("symbol", persistent_errors[0].symbol.clone())
                     .title(title)
                     .message(
                         "These assets have repeatedly failed to sync prices. Check the symbols or data provider settings.",
@@ -242,6 +245,9 @@ impl QuoteSyncCheck {
                     .id(format!("quote_sync:warning:{}", data_hash))
                     .severity(Severity::Warning)
                     .category(HealthCategory::PriceStaleness)
+                    .code("quote_sync_warning")
+                    .param("count", count as u32)
+                    .param("symbol", warning_errors[0].symbol.clone())
                     .title(title)
                     .message(
                         "Some assets are having trouble syncing prices. This may resolve automatically.",

@@ -1,4 +1,139 @@
 {
+  "issues": {
+    "price_manual_valuation_missing": {
+      "title_one": "Missing manual valuation for {{symbol}}",
+      "title_other": "Missing manual valuations for {{count}} holdings",
+      "message": "Manual/custom holdings need a manual valuation before they can be included as valued performance positions."
+    },
+    "price_no_market_data": {
+      "title_one": "No market data for {{symbol}}",
+      "title_other": "No market data for {{count}} holdings",
+      "message": "Unable to fetch market data for some holdings. This may be due to invalid symbols or provider issues. Your portfolio value may be inaccurate."
+    },
+    "price_stale_outdated": {
+      "title_one": "Outdated price for {{count}} holding",
+      "title_other": "Outdated prices for {{count}} holdings",
+      "message": "Some holdings haven't had prices updated in over 3 days. Your portfolio value may be inaccurate."
+    },
+    "price_update_needed": {
+      "title_one": "Price update needed for {{count}} holding",
+      "title_other": "Price updates needed for {{count}} holdings",
+      "message": "Some holdings haven't had prices updated recently. Consider syncing prices."
+    },
+    "fx_missing": {
+      "title_one": "Missing exchange rate for {{currency}}",
+      "title_other": "Missing exchange rates for {{count}} currencies",
+      "message": "We can't convert some holdings to your base currency. This affects your total portfolio value."
+    },
+    "fx_stale_error": {
+      "title_one": "Outdated exchange rate",
+      "title_other": "Outdated exchange rates for {{count}} currencies",
+      "message": "Some exchange rates haven't been updated in over 3 days. Currency conversions may be inaccurate."
+    },
+    "fx_stale_warning": {
+      "title_one": "Exchange rate update needed",
+      "title_other": "Exchange rate updates needed for {{count}} currencies",
+      "message": "Some exchange rates haven't been updated recently. Consider refreshing rates."
+    },
+    "classification_missing_category": {
+      "title_one": "{{count}} holding needs a category",
+      "title_other": "{{count}} holdings need categories",
+      "message": "Some holdings don't have an {{taxonomy}} assigned. This affects your allocation charts and analytics."
+    },
+    "classification_legacy_migration": {
+      "title_one": "{{count}} asset has legacy classification data",
+      "title_other": "{{count}} assets have legacy classification data",
+      "message": "Some assets have sector/country data from the old format. Migrate to the new taxonomy system for better allocation tracking."
+    },
+    "data_orphan_activity_account": {
+      "title_one": "Transaction references missing account",
+      "title_other": "{{count}} transactions reference missing accounts",
+      "message": "Some transactions point to accounts that no longer exist. This may cause calculation errors."
+    },
+    "data_orphan_activity_asset": {
+      "title_one": "Transaction references missing asset",
+      "title_other": "{{count}} transactions reference missing assets",
+      "message": "Some transactions point to assets that no longer exist. This may cause calculation errors."
+    },
+    "data_negative_position": {
+      "title_one": "Holding has negative quantity",
+      "title_other": "{{count}} holdings have negative quantities",
+      "message": "Some holdings show negative quantities, which usually indicates missing or incorrect transactions."
+    },
+    "data_legacy_classification": {
+      "title_one": "{{count}} asset has old classification data",
+      "title_other": "{{count}} assets have old classification data",
+      "message": "Some assets have legacy sector/country data that can be migrated to the new classification system."
+    },
+    "data_negative_account_balance": {
+      "title_one": "Account has negative portfolio balance",
+      "title_other": "{{count}} accounts have negative portfolio balance",
+      "message": "One or more accounts show a negative total value in their history. This is usually caused by missing buy transactions. Review your activities to fix this."
+    },
+    "data_negative_cash_balance": {
+      "title_one": "Cash account had a negative balance",
+      "title_other": "{{count}} cash accounts had a negative balance",
+      "message": "One or more cash accounts show a negative balance in their history. This may be a normal bank overdraft or a missing deposit entry."
+    },
+    "data_missing_lot_disposal_for_sell": {
+      "title_one": "Sale missing cost-basis match",
+      "title_other": "{{count}} sales missing cost-basis matches",
+      "message": "A sale could not be matched to a lot, so realized gain/loss and performance attribution may be incomplete."
+    },
+    "data_missing_generated_valuation": {
+      "title_one": "Generated valuation history is incomplete",
+      "title_other": "{{count}} generated valuation rows are missing",
+      "message": "Some holdings snapshot dates do not have generated valuation rows. Rebuild account history after fixing missing prices, manual valuations, or FX rates."
+    },
+    "data_incomplete_valuation_value": {
+      "title_one": "Valuation coverage is incomplete",
+      "title_other": "{{count}} valuation rows have incomplete market value",
+      "message": "Some generated valuation rows have incomplete market value coverage. Performance protects correctness by marking affected returns unavailable or degraded; review missing prices or manual valuations."
+    },
+    "data_incomplete_valuation_basis": {
+      "title_one": "Cost basis coverage is incomplete",
+      "title_other": "{{count}} positions have incomplete cost basis",
+      "message": "Some positions have missing or partial acquisition cost basis. Market value can still be shown, but gain/loss and cost-basis returns may be unavailable until the related activities are fixed."
+    },
+    "data_unknown_performance_flow_source": {
+      "title_one": "Performance flow boundary is unknown",
+      "title_other": "{{count}} valuation rows have unknown transfer classification",
+      "message": "Some generated valuation rows include a transfer or flow whose portfolio boundary is unknown. Review transfer activities on the affected dates and mark each transfer external or link it to its matching account."
+    },
+    "account_unconfigured": {
+      "title_one": "{{count}} account needs setup",
+      "title_other": "{{count}} accounts need setup",
+      "message_one": "Choose a tracking mode to start syncing data.",
+      "message_other": "Choose tracking modes to start syncing data."
+    },
+    "account_timezone_missing": {
+      "title": "Timezone not configured",
+      "message": "Set your timezone in General settings to ensure dates match your locale."
+    },
+    "account_timezone_invalid": {
+      "title": "Configured timezone is invalid",
+      "message": "The configured timezone \"{{timezone}}\" is invalid. Update it in General settings."
+    },
+    "account_timezone_mismatch": {
+      "title": "Browser and app timezones differ",
+      "message": "Configured timezone is \"{{configured}}\" but browser timezone is \"{{browser}}\". Dates follow the configured timezone."
+    },
+    "quote_sync_error": {
+      "title_one": "Quotes sync failing for {{symbol}}",
+      "title_other": "Quotes sync failing for {{count}} assets",
+      "message": "These assets have repeatedly failed to sync prices. Check the symbols or data provider settings."
+    },
+    "quote_sync_warning": {
+      "title_one": "Sync issues for {{symbol}}",
+      "title_other": "Sync issues for {{count}} assets",
+      "message": "Some assets are having trouble syncing prices. This may resolve automatically."
+    },
+    "transfer_incomplete": {
+      "title_one": "Incomplete transfer detected",
+      "title_other": "{{count}} incomplete transfers detected",
+      "message": "A transfer is unpaired or missing its matching leg, so its flow was treated as external and may distort returns. Pair it with the matching transfer, or mark it external if that is intended."
+    }
+  },
   "page": {
     "heading": "Data Health",
     "text": "Identify and resolve data quality issues"

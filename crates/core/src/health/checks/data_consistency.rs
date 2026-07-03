@@ -122,6 +122,8 @@ impl DataConsistencyCheck {
                     .id(format!("orphan_activity_account:{}", data_hash))
                     .severity(Severity::Error)
                     .category(HealthCategory::DataConsistency)
+                    .code("data_orphan_activity_account")
+                    .param("count", count as u32)
                     .title(if count == 1 {
                         "Transaction references missing account".to_string()
                     } else {
@@ -151,6 +153,8 @@ impl DataConsistencyCheck {
                     .id(format!("orphan_activity_asset:{}", data_hash))
                     .severity(Severity::Error)
                     .category(HealthCategory::DataConsistency)
+                    .code("data_orphan_activity_asset")
+                    .param("count", count as u32)
                     .title(if count == 1 {
                         "Transaction references missing asset".to_string()
                     } else {
@@ -180,6 +184,8 @@ impl DataConsistencyCheck {
                     .id(format!("negative_position:{}", data_hash))
                     .severity(Severity::Warning)
                     .category(HealthCategory::DataConsistency)
+                    .code("data_negative_position")
+                    .param("count", count as u32)
                     .title(if count == 1 {
                         "Holding has negative quantity".to_string()
                     } else {
@@ -209,6 +215,8 @@ impl DataConsistencyCheck {
                     .id(format!("legacy_classification:{}", data_hash))
                     .severity(Severity::Info)
                     .category(HealthCategory::DataConsistency)
+                    .code("data_legacy_classification")
+                    .param("count", count as u32)
                     .title(if count == 1 {
                         "1 asset has old classification data".to_string()
                     } else {
@@ -277,6 +285,8 @@ impl DataConsistencyCheck {
                 .id(format!("negative_account_balance:{}", data_hash))
                 .severity(Severity::Warning)
                 .category(HealthCategory::DataConsistency)
+                .code("data_negative_account_balance")
+                .param("count", count as u32)
                 .title(if count == 1 {
                     "Account has negative portfolio balance".to_string()
                 } else {
@@ -328,6 +338,8 @@ impl DataConsistencyCheck {
                 .id(format!("negative_cash_balance:{}", data_hash))
                 .severity(Severity::Info)
                 .category(HealthCategory::DataConsistency)
+                .code("data_negative_cash_balance")
+                .param("count", count as u32)
                 .title(if count == 1 {
                     "Cash account had a negative balance".to_string()
                 } else {
@@ -416,6 +428,8 @@ impl DataConsistencyCheck {
                 .id(format!("missing_lot_disposal_for_sell:{}", data_hash))
                 .severity(Severity::Warning)
                 .category(HealthCategory::DataConsistency)
+                .code("data_missing_lot_disposal_for_sell")
+                .param("count", count as u32)
                 .title(if count == 1 {
                     "Sale missing cost-basis match".to_string()
                 } else {
@@ -445,6 +459,7 @@ impl DataConsistencyCheck {
         {
             health_issues.push(build_valuation_quality_issue(
                 "missing_generated_valuation",
+                "data_missing_generated_valuation",
                 missing_issues,
                 Severity::Warning,
                 "Generated valuation history is incomplete",
@@ -456,6 +471,7 @@ impl DataConsistencyCheck {
         if let Some(value_issues) = by_type.get(&ConsistencyIssueType::IncompleteValuationValue) {
             health_issues.push(build_valuation_quality_issue(
                 "incomplete_valuation_value",
+                "data_incomplete_valuation_value",
                 value_issues,
                 Severity::Warning,
                 "Valuation coverage is incomplete",
@@ -467,6 +483,7 @@ impl DataConsistencyCheck {
         if let Some(basis_issues) = by_type.get(&ConsistencyIssueType::IncompleteValuationBasis) {
             health_issues.push(build_valuation_quality_issue(
                 "incomplete_valuation_basis",
+                "data_incomplete_valuation_basis",
                 basis_issues,
                 Severity::Warning,
                 "Cost basis coverage is incomplete",
@@ -479,6 +496,7 @@ impl DataConsistencyCheck {
         {
             health_issues.push(build_unknown_performance_flow_issue(
                 "unknown_performance_flow_source",
+                "data_unknown_performance_flow_source",
                 flow_issues,
                 Severity::Error,
                 "Performance flow boundary is unknown",
@@ -491,16 +509,25 @@ impl DataConsistencyCheck {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_unknown_performance_flow_issue(
     id_prefix: &str,
+    code: &str,
     issues: &[&ConsistencyIssueInfo],
     severity: Severity,
     title: &str,
     plural_title: &str,
     message: &str,
 ) -> HealthIssue {
-    let mut issue =
-        build_valuation_quality_issue(id_prefix, issues, severity, title, plural_title, message);
+    let mut issue = build_valuation_quality_issue(
+        id_prefix,
+        code,
+        issues,
+        severity,
+        title,
+        plural_title,
+        message,
+    );
     let mut query = serde_json::Map::new();
 
     query.insert(
@@ -539,8 +566,10 @@ fn build_unknown_performance_flow_issue(
     issue
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_valuation_quality_issue(
     id_prefix: &str,
+    code: &str,
     issues: &[&ConsistencyIssueInfo],
     severity: Severity,
     title: &str,
@@ -605,6 +634,8 @@ fn build_valuation_quality_issue(
         .id(format!("{}:{}", id_prefix, data_hash))
         .severity(severity)
         .category(HealthCategory::DataConsistency)
+        .code(code)
+        .param("count", issues.len() as u32)
         .title(if issues.len() == 1 {
             title.to_string()
         } else {

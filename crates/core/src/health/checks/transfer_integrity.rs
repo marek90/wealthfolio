@@ -106,6 +106,8 @@ impl TransferIntegrityCheck {
             .id(format!("invalid_transfer_group:{}", data_hash))
             .severity(Severity::Error)
             .category(HealthCategory::DataConsistency)
+            .code("transfer_incomplete")
+            .param("count", count as u32)
             .title(title)
             .message(
                 "A transfer is unpaired or missing its matching leg, so its flow was treated as external and may distort returns. Pair it with the matching transfer, or mark it external if that is intended.",
