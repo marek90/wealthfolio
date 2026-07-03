@@ -1,3 +1,5 @@
+import { getDynamicNavItems, subscribeToNavigationUpdates } from "@/addons/addons-runtime-context";
+import { useAddonNavigationPins } from "@/pages/layouts/navigation/addon-navigation-pins";
 import { PermissionDialog } from "@/pages/settings/addons/components/addon-permission-dialog";
 import { AddonStoreBrowser } from "@/pages/settings/addons/components/addon-store-browser";
 import { AddonUpdateCard } from "@/pages/settings/addons/components/addon-update-card";
@@ -16,9 +18,12 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
 } from "@wealthfolio/ui";
 import { useToast } from "@wealthfolio/ui/components/ui/use-toast";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SettingsHeader } from "../settings-header";
 import { useAddonActions } from "./hooks/use-addon-actions";
 import { useAddonUpdates } from "./hooks/use-addon-updates";
@@ -30,6 +35,8 @@ export default function AddonSettingsPage() {
     addonId?: string;
     addonName?: string;
   }>({ open: false });
+  const [addonNavItems, setAddonNavItems] = useState(() => getDynamicNavItems());
+  const { isAddonPinned, setAddonPinned } = useAddonNavigationPins();
 
   const {
     installedAddons,
@@ -61,6 +68,30 @@ export default function AddonSettingsPage() {
   });
 
   const { toast } = useToast();
+
+  useEffect(() => {
+    const updateAddonNavItems = () => {
+      setAddonNavItems(getDynamicNavItems());
+    };
+
+    updateAddonNavItems();
+    const unsubscribe = subscribeToNavigationUpdates(updateAddonNavItems);
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const addonNavItemsByAddonId = useMemo(() => {
+    const itemsByAddonId = new Map<string, (typeof addonNavItems)[number]>();
+
+    addonNavItems.forEach((item) => {
+      if (!itemsByAddonId.has(item.addonId)) {
+        itemsByAddonId.set(item.addonId, item);
+      }
+    });
+
+    return itemsByAddonId;
+  }, [addonNavItems]);
 
   const handleCheckUpdates = async () => {
     try {
@@ -307,161 +338,201 @@ export default function AddonSettingsPage() {
               </EmptyPlaceholder>
             ) : (
               <div className="space-y-3">
-                {installedAddons.map((addon) => (
-                  <div
-                    key={addon.metadata.id}
-                    className={`group rounded-lg border p-4 transition-all duration-200 sm:p-6 ${
-                      addon.metadata.enabled
-                        ? "bg-card hover:bg-accent/30 hover:shadow-md"
-                        : "bg-muted/30 border-dashed opacity-75 hover:opacity-90"
-                    }`}
-                  >
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0 flex-1 space-y-2 sm:space-y-3">
-                        {/* Header section with name and version */}
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="flex items-center gap-2">
+                {installedAddons.map((addon) => {
+                  const addonNavItem = addonNavItemsByAddonId.get(addon.metadata.id);
+                  const isPinned = addonNavItem ? isAddonPinned(addonNavItem) : false;
+
+                  return (
+                    <div
+                      key={addon.metadata.id}
+                      className={`group rounded-lg border p-4 transition-all duration-200 sm:p-6 ${
+                        addon.metadata.enabled
+                          ? "bg-card hover:bg-accent/30 hover:shadow-md"
+                          : "bg-muted/30 border-dashed opacity-75 hover:opacity-90"
+                      }`}
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0 flex-1 space-y-2 sm:space-y-3">
+                          {/* Header section with name and version */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex items-center gap-2">
+                              {!addon.metadata.enabled && (
+                                <Icons.PauseCircle className="text-muted-foreground/60 h-5 w-5 flex-shrink-0" />
+                              )}
+                              <h4
+                                className={`truncate text-sm font-semibold md:text-lg ${
+                                  addon.metadata.enabled ? "" : "text-muted-foreground"
+                                }`}
+                              >
+                                {addon.metadata.name}
+                              </h4>
+                            </div>
+                            <Badge
+                              variant="outline"
+                              className="text-muted-foreground shrink-0 text-xs"
+                            >
+                              v{addon.metadata.version}
+                            </Badge>
                             {!addon.metadata.enabled && (
-                              <Icons.PauseCircle className="text-muted-foreground/60 h-5 w-5 flex-shrink-0" />
+                              <Badge
+                                variant="secondary"
+                                className="bg-warning/10 text-warning border-warning/20 shrink-0 text-xs"
+                              >
+                                <Icons.AlertCircle className="mr-1 h-3 w-3" />
+                                Disabled
+                              </Badge>
                             )}
-                            <h4
-                              className={`truncate text-sm font-semibold md:text-lg ${
-                                addon.metadata.enabled ? "" : "text-muted-foreground"
+                          </div>
+
+                          {/* Description */}
+                          {addon.metadata.description && (
+                            <p
+                              className={`text-xs leading-relaxed sm:text-sm ${
+                                addon.metadata.enabled
+                                  ? "text-muted-foreground"
+                                  : "text-muted-foreground/70"
                               }`}
                             >
-                              {addon.metadata.name}
-                            </h4>
-                          </div>
-                          <Badge
-                            variant="outline"
-                            className="text-muted-foreground shrink-0 text-xs"
-                          >
-                            v{addon.metadata.version}
-                          </Badge>
-                          {!addon.metadata.enabled && (
-                            <Badge
-                              variant="secondary"
-                              className="bg-warning/10 text-warning border-warning/20 shrink-0 text-xs"
+                              {addon.metadata.description}
+                            </p>
+                          )}
+
+                          {/* Author info */}
+                          {addon.metadata.author && (
+                            <div
+                              className={`flex items-center gap-2 text-xs sm:text-sm ${
+                                addon.metadata.enabled
+                                  ? "text-muted-foreground"
+                                  : "text-muted-foreground/70"
+                              }`}
                             >
-                              <Icons.AlertCircle className="mr-1 h-3 w-3" />
-                              Disabled
-                            </Badge>
+                              <Icons.Users className="h-4 w-4 flex-shrink-0" />
+                              <span className="truncate">By {addon.metadata.author}</span>
+                            </div>
                           )}
                         </div>
 
-                        {/* Description */}
-                        {addon.metadata.description && (
-                          <p
-                            className={`text-xs leading-relaxed sm:text-sm ${
-                              addon.metadata.enabled
-                                ? "text-muted-foreground"
-                                : "text-muted-foreground/70"
-                            }`}
-                          >
-                            {addon.metadata.description}
-                          </p>
-                        )}
+                        {/* Controls section */}
+                        <div className="flex items-center justify-between gap-2 sm:ml-6 sm:justify-normal">
+                          <div className="flex items-center gap-2">
+                            {/* Permissions button */}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleViewPermissions(addon)}
+                              className="text-muted-foreground hover:bg-accent hover:text-foreground h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
+                            >
+                              <Icons.Eye className="h-4 w-4" />
+                              <span className="sr-only">View permissions</span>
+                            </Button>
 
-                        {/* Author info */}
-                        {addon.metadata.author && (
-                          <div
-                            className={`flex items-center gap-2 text-xs sm:text-sm ${
-                              addon.metadata.enabled
-                                ? "text-muted-foreground"
-                                : "text-muted-foreground/70"
-                            }`}
-                          >
-                            <Icons.Users className="h-4 w-4 flex-shrink-0" />
-                            <span className="truncate">By {addon.metadata.author}</span>
+                            {/* Rating button */}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                handleRateAddon(addon.metadata.id, addon.metadata.name)
+                              }
+                              className="text-muted-foreground hover:bg-accent hover:text-foreground h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
+                            >
+                              <Icons.Star className="h-4 w-4" />
+                              <span className="sr-only">Rate addon</span>
+                            </Button>
+
+                            {/* Delete button with confirmation */}
+                            <DeleteConfirm
+                              deleteConfirmTitle="Remove Addon"
+                              deleteConfirmMessage={
+                                <div className="space-y-2">
+                                  <p>
+                                    Are you sure you want to remove{" "}
+                                    <strong>{addon.metadata.name}</strong>?
+                                  </p>
+                                  <p className="text-muted-foreground text-sm">
+                                    This action cannot be undone. The addon will be completely
+                                    removed from your system.
+                                  </p>
+                                </div>
+                              }
+                              handleDeleteConfirm={() => handleUninstallAddon(addon.metadata.id)}
+                              isPending={false}
+                              button={
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
+                                >
+                                  <Icons.Trash className="h-4 w-4" />
+                                  <span className="sr-only">Remove addon</span>
+                                </Button>
+                              }
+                            />
+
+                            {addon.metadata.enabled && addonNavItem && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant={isPinned ? "default" : "outline"}
+                                    size="sm"
+                                    onClick={() => setAddonPinned(addonNavItem, !isPinned)}
+                                    className={
+                                      isPinned
+                                        ? "h-9 w-9 p-0"
+                                        : "text-muted-foreground hover:bg-accent hover:text-foreground h-9 w-9 p-0"
+                                    }
+                                    aria-label={
+                                      isPinned
+                                        ? `Unpin ${addon.metadata.name} from navigation`
+                                        : `Pin ${addon.metadata.name} to navigation`
+                                    }
+                                  >
+                                    {isPinned ? (
+                                      <Icons.PinOff className="h-4 w-4" />
+                                    ) : (
+                                      <Icons.Pin className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">
+                                  {isPinned ? "Unpin from navigation" : "Pin to navigation"}
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+
+                            {/* Enable/Disable Switch */}
+                            <Switch
+                              id={`addon-${addon.metadata.id}`}
+                              checked={addon.metadata.enabled}
+                              onCheckedChange={(checked) =>
+                                handleToggleAddon(addon.metadata.id, !checked)
+                              }
+                              className="data-[state=checked]:bg-green-600"
+                              disabled={togglingAddonId === addon.metadata.id}
+                            />
                           </div>
-                        )}
-                      </div>
-
-                      {/* Controls section */}
-                      <div className="flex items-center justify-between gap-2 sm:ml-6 sm:justify-normal">
-                        <div className="flex items-center gap-2">
-                          {/* Permissions button */}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleViewPermissions(addon)}
-                            className="text-muted-foreground hover:bg-accent hover:text-foreground h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
-                          >
-                            <Icons.Eye className="h-4 w-4" />
-                            <span className="sr-only">View permissions</span>
-                          </Button>
-
-                          {/* Rating button */}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleRateAddon(addon.metadata.id, addon.metadata.name)}
-                            className="text-muted-foreground hover:bg-accent hover:text-foreground h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
-                          >
-                            <Icons.Star className="h-4 w-4" />
-                            <span className="sr-only">Rate addon</span>
-                          </Button>
-
-                          {/* Delete button with confirmation */}
-                          <DeleteConfirm
-                            deleteConfirmTitle="Remove Addon"
-                            deleteConfirmMessage={
-                              <div className="space-y-2">
-                                <p>
-                                  Are you sure you want to remove{" "}
-                                  <strong>{addon.metadata.name}</strong>?
-                                </p>
-                                <p className="text-muted-foreground text-sm">
-                                  This action cannot be undone. The addon will be completely removed
-                                  from your system.
-                                </p>
-                              </div>
-                            }
-                            handleDeleteConfirm={() => handleUninstallAddon(addon.metadata.id)}
-                            isPending={false}
-                            button={
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive h-9 w-9 p-0 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100"
-                              >
-                                <Icons.Trash className="h-4 w-4" />
-                                <span className="sr-only">Remove addon</span>
-                              </Button>
-                            }
-                          />
-
-                          {/* Enable/Disable Switch */}
-                          <Switch
-                            id={`addon-${addon.metadata.id}`}
-                            checked={addon.metadata.enabled}
-                            onCheckedChange={(checked) =>
-                              handleToggleAddon(addon.metadata.id, !checked)
-                            }
-                            className="data-[state=checked]:bg-green-600"
-                            disabled={togglingAddonId === addon.metadata.id}
-                          />
                         </div>
                       </div>
+
+                      {/* Update Card - Show if update is available */}
+                      {(() => {
+                        const updateResult = getUpdateResult(addon.metadata.id);
+                        return updateResult?.updateInfo.updateAvailable ? (
+                          <div className="mt-3">
+                            <AddonUpdateCard
+                              addonId={addon.metadata.id}
+                              addonName={addon.metadata.name}
+                              updateInfo={updateResult.updateInfo}
+                              onUpdateComplete={() => handleUpdateComplete(addon.metadata.id)}
+                              disabled={togglingAddonId === addon.metadata.id}
+                              enableAfterInstall={addon.metadata.enabled ?? true}
+                              approvedNetworkHosts={addon.metadata.network?.approvedHosts ?? []}
+                            />
+                          </div>
+                        ) : null;
+                      })()}
                     </div>
-
-                    {/* Update Card - Show if update is available */}
-                    {(() => {
-                      const updateResult = getUpdateResult(addon.metadata.id);
-                      return updateResult?.updateInfo.updateAvailable ? (
-                        <div className="mt-3">
-                          <AddonUpdateCard
-                            addonId={addon.metadata.id}
-                            addonName={addon.metadata.name}
-                            updateInfo={updateResult.updateInfo}
-                            onUpdateComplete={() => handleUpdateComplete(addon.metadata.id)}
-                            disabled={togglingAddonId === addon.metadata.id}
-                          />
-                        </div>
-                      ) : null;
-                    })()}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -478,16 +549,22 @@ export default function AddonSettingsPage() {
       {/* Permission Dialog */}
       <PermissionDialog
         open={permissionDialog.open}
-        onOpenChange={(open) => setPermissionDialog({ ...permissionDialog, open })}
+        onOpenChange={(open) => {
+          if (!open && permissionDialog.open) {
+            void permissionDialog.onCancel?.();
+          }
+          setPermissionDialog({ ...permissionDialog, open });
+        }}
         manifest={permissionDialog.manifest}
         declaredPermissions={permissionDialog.permissions || []}
         riskLevel={permissionDialog.riskLevel || "low"}
-        onApprove={() => {
+        onApprove={(approvedNetworkHosts) => {
           if (permissionDialog.onApprove) {
-            permissionDialog.onApprove();
+            void permissionDialog.onApprove(approvedNetworkHosts);
           }
         }}
         onDeny={() => {
+          void permissionDialog.onCancel?.();
           setPermissionDialog({ open: false });
           toast({
             title: "Installation cancelled",

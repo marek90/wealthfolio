@@ -1,11 +1,13 @@
 import { getDynamicNavItems, subscribeToNavigationUpdates } from "@/addons/addons-runtime-context";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { getAddonNavPinKey, useAddonNavigationPins } from "./addon-navigation-pins";
 
 export interface NavLink {
+  id?: string;
   title: string;
   href: string;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   keywords?: string[];
   label?: string; // Optional descriptive label for launcher/search
 }
@@ -14,6 +16,9 @@ export interface NavigationProps {
   primary: NavLink[];
   secondary?: NavLink[];
   addons?: NavLink[];
+  addonMenuItems?: NavLink[];
+  pinnedAddons?: NavLink[];
+  setAddonPinned?: (item: NavLink, pinned: boolean) => void;
 }
 
 const staticNavigation: NavigationProps = {
@@ -73,6 +78,8 @@ const staticNavigation: NavigationProps = {
 
 export function useNavigation() {
   const [dynamicItems, setDynamicItems] = useState<NavigationProps["addons"]>([]);
+  const { hasConfiguredAddonPins, pinnedAddonIdSet, setAddonPinned, setPinnedAddonIds } =
+    useAddonNavigationPins();
 
   // Subscribe to navigation updates from addons
   useEffect(() => {
@@ -95,11 +102,34 @@ export function useNavigation() {
   // Spending lives entirely on the dashboard tab (and its deep-linked pages);
   // no top-level nav entry. Combine static navigation items with addons.
   const primary = [...staticNavigation.primary];
+  const addons = useMemo(() => dynamicItems ?? [], [dynamicItems]);
 
+  useEffect(() => {
+    if (hasConfiguredAddonPins || addons.length !== 1) {
+      return;
+    }
+
+    const onlyAddonId = getAddonNavPinKey(addons[0]);
+    setPinnedAddonIds((currentIds) =>
+      currentIds.includes(onlyAddonId) ? currentIds : [...currentIds, onlyAddonId],
+    );
+  }, [addons, hasConfiguredAddonPins, setPinnedAddonIds]);
+
+  const pinnedAddons = useMemo(
+    () => addons.filter((item) => pinnedAddonIdSet.has(getAddonNavPinKey(item))),
+    [addons, pinnedAddonIdSet],
+  );
+  const addonMenuItems = useMemo(
+    () => addons.filter((item) => !pinnedAddonIdSet.has(getAddonNavPinKey(item))),
+    [addons, pinnedAddonIdSet],
+  );
   const navigation: NavigationProps = {
     primary,
     secondary: staticNavigation.secondary,
-    addons: dynamicItems,
+    addons,
+    addonMenuItems,
+    pinnedAddons,
+    setAddonPinned,
   };
 
   return navigation;
