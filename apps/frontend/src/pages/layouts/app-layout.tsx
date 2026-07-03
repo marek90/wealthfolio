@@ -45,7 +45,7 @@ const AppLayoutContent = () => {
   const isAppShellReady = isSettingsReady && !!settings?.onboardingCompleted;
   const pageScrollKey =
     location.pathname.startsWith("/addon/") || location.pathname.startsWith("/addons/")
-      ? location.pathname.split("/").slice(0, 3).join("/")
+      ? "/addons"
       : location.pathname;
 
   const areGlobalEventsReady = useGlobalEventListener();
@@ -106,7 +106,7 @@ const AppLayoutContent = () => {
               className="draggable pointer-events-auto absolute inset-x-0 top-0 z-50 h-6 cursor-grab opacity-0"
             ></div>
             {shouldUseMobileNavigation ? (
-              <MobileNavigationContainer key={location.pathname} />
+              <MobileNavigationContainer key={pageScrollKey} />
             ) : (
               <PageScrollContainer
                 key={pageScrollKey}

@@ -9,10 +9,12 @@ import {
   removeAddonRoute,
 } from "@/addons/addons-runtime-context";
 import { logger } from "@/adapters";
+import { collectAddonThemeSnapshot, type AddonThemeSnapshot } from "./addon-sandbox-theme";
 import { createPermissionGuard, type PermissionGuard } from "../type-bridge";
 
 const CHANNEL = "wealthfolio:addon-sandbox:v1";
 const LOAD_TIMEOUT_MS = 10_000;
+const ROUTE_RENDER_TIMEOUT_MS = 10_000;
 
 interface StartAddonInput {
   addonId: string;
@@ -28,6 +30,14 @@ export interface AddonRouteLocation {
   hash: string;
   params: Record<string, string | undefined>;
 }
+
+export type AddonRouteRenderStatus =
+  | { status: "idle"; routeKey?: string }
+  | { status: "rendering"; cold: boolean; routeKey: string }
+  | { status: "rendered"; routeKey: string }
+  | { status: "error"; error: string; routeKey?: string };
+
+type AddonRouteStatusListener = (status: AddonRouteRenderStatus) => void;
 
 export interface AddonRuntimeHandle {
   disable(): Promise<void>;
@@ -46,8 +56,12 @@ interface Runtime {
     routeId: string;
   };
   isLoaded: boolean;
+  lastRenderedRouteKey?: string;
   permissionGuard: PermissionGuard;
+  activeRouteRequestId?: string;
   routeRenderTimer?: number;
+  routeRenderTimeout?: number;
+  routeStatusListeners: Set<AddonRouteStatusListener>;
   subscriptions: Map<string, () => Promise<void> | void>;
   resolveLoad: (handle: AddonRuntimeHandle) => void;
   rejectLoad: (error: Error) => void;
@@ -78,13 +92,24 @@ function createNonce() {
   return crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36)}`;
 }
 
-function createSandboxUrl(addonId: string, nonce: string) {
+function createSandboxUrl(addonId: string, nonce: string, theme: AddonThemeSnapshot) {
   const basePath = import.meta.env.BASE_URL || "/";
   const sandboxUrl = new URL(
     `${basePath.replace(/\/?$/, "/")}addon-sandbox.html`,
     window.location.href,
   );
-  sandboxUrl.hash = new URLSearchParams({ addonId, nonce }).toString();
+  const params = new URLSearchParams({
+    addonId,
+    backgroundColor: theme.backgroundColor,
+    colorScheme: theme.colorScheme,
+    foregroundColor: theme.foregroundColor,
+    nonce,
+    themeClass: theme.themeClass,
+  });
+  if (theme.fontClass) {
+    params.set("fontClass", theme.fontClass);
+  }
+  sandboxUrl.hash = params.toString();
   return sandboxUrl.toString();
 }
 
@@ -112,6 +137,25 @@ function formatUnknownError(error: unknown) {
     return undefined;
   }
   return JSON.stringify(error) ?? "Unknown error";
+}
+
+function createRouteRenderKey(routeId: string, location: AddonRouteLocation) {
+  const params = Object.entries(location.params)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value ?? "")}`)
+    .join("&");
+  return [routeId, location.pathname, location.search, location.hash, params].join("\n");
+}
+
+function clearPendingRouteRender(runtime: Runtime) {
+  if (runtime.routeRenderTimer) {
+    clearTimeout(runtime.routeRenderTimer);
+    runtime.routeRenderTimer = undefined;
+  }
+  if (runtime.routeRenderTimeout) {
+    clearTimeout(runtime.routeRenderTimeout);
+    runtime.routeRenderTimeout = undefined;
+  }
 }
 
 function getParkingRoot() {
@@ -255,13 +299,17 @@ function getMethod(target: unknown, methodPath: string, allowedMethods: Set<stri
 export class AddonIframeManager {
   private runtimes = new Map<string, Runtime>();
   private listening = false;
+  private themeObserver?: MutationObserver;
+  private themeUpdateFrame?: number;
 
   async startAddon(input: StartAddonInput): Promise<AddonRuntimeHandle> {
     await this.stopAddon(input.addonId);
     this.ensureListener();
+    this.ensureThemeObserver();
 
     const nonce = createNonce();
-    const sandboxUrl = createSandboxUrl(input.addonId, nonce);
+    const initialTheme = collectAddonThemeSnapshot();
+    const sandboxUrl = createSandboxUrl(input.addonId, nonce, initialTheme);
 
     const iframe = document.createElement("iframe");
     iframe.title = `${input.manifest.name || input.addonId} add-on sandbox`;
@@ -269,8 +317,11 @@ export class AddonIframeManager {
     iframe.referrerPolicy = "no-referrer";
     Object.assign(iframe.style, {
       border: "0",
+      backgroundColor: "transparent",
+      colorScheme: initialTheme.colorScheme,
       display: "block",
       height: "100%",
+      visibility: "hidden",
       width: "100%",
     });
 
@@ -295,6 +346,7 @@ export class AddonIframeManager {
         permissionGuard: createPermissionGuard(input.addonId, input.permissions),
         rejectLoad: reject,
         resolveLoad: resolve,
+        routeStatusListeners: new Set(),
         subscriptions: new Map(),
       };
       this.runtimes.set(input.addonId, runtime);
@@ -311,6 +363,43 @@ export class AddonIframeManager {
     });
   }
 
+  getRouteStatus(
+    addonId: string,
+    routeId: string,
+    location: AddonRouteLocation,
+  ): AddonRouteRenderStatus {
+    const runtime = this.runtimes.get(addonId);
+    const routeKey = createRouteRenderKey(routeId, location);
+    if (!runtime) {
+      return { error: `Addon '${addonId}' is not loaded`, routeKey, status: "error" };
+    }
+    if (runtime.lastRenderedRouteKey === routeKey) {
+      return { routeKey, status: "rendered" };
+    }
+    if (runtime.activeRouteRequestId) {
+      return { cold: !runtime.lastRenderedRouteKey, routeKey, status: "rendering" };
+    }
+    return { routeKey, status: "idle" };
+  }
+
+  subscribeRouteStatus(addonId: string, listener: AddonRouteStatusListener) {
+    const runtime = this.runtimes.get(addonId);
+    if (!runtime) {
+      return () => undefined;
+    }
+    runtime.routeStatusListeners.add(listener);
+    return () => {
+      runtime.routeStatusListeners.delete(listener);
+    };
+  }
+
+  retryRoute(addonId: string) {
+    const runtime = this.runtimes.get(addonId);
+    if (runtime) {
+      this.renderActiveRoute(runtime);
+    }
+  }
+
   attachRoute(addonId: string, container: HTMLElement) {
     const runtime = this.runtimes.get(addonId);
     if (!runtime) {
@@ -318,13 +407,13 @@ export class AddonIframeManager {
     }
 
     runtime.activeContainer = container;
+    runtime.iframe.style.visibility = runtime.lastRenderedRouteKey ? "visible" : "hidden";
     if (runtime.iframe.parentElement !== container) {
       container.appendChild(runtime.iframe);
     }
     runtime.iframe.style.height = "100%";
     runtime.iframe.style.minHeight = "calc(100vh - 96px)";
     runtime.iframe.style.width = "100%";
-    this.renderActiveRoute(runtime);
   }
 
   updateRoute(addonId: string, routeId: string, location: AddonRouteLocation) {
@@ -347,7 +436,8 @@ export class AddonIframeManager {
     }
 
     runtime.activeContainer = undefined;
-    runtime.activeRoute = undefined;
+    runtime.activeRouteRequestId = undefined;
+    clearPendingRouteRender(runtime);
     getParkingRoot().appendChild(runtime.iframe);
   }
 
@@ -360,9 +450,8 @@ export class AddonIframeManager {
 
     this.post(runtime, "disable");
     clearTimeout(runtime.loadTimer);
-    if (runtime.routeRenderTimer) {
-      clearTimeout(runtime.routeRenderTimer);
-    }
+    runtime.activeRouteRequestId = undefined;
+    clearPendingRouteRender(runtime);
     runtime.rejectLoad(new Error(`Addon '${addonId}' was unloaded before it finished loading`));
     for (const unsubscribe of runtime.subscriptions.values()) {
       try {
@@ -375,6 +464,7 @@ export class AddonIframeManager {
     runtime.iframe.remove();
     this.runtimes.delete(addonId);
     clearAddonRegistrations(addonId);
+    this.stopThemeObserverIfIdle();
   }
 
   private ensureListener() {
@@ -410,6 +500,7 @@ export class AddonIframeManager {
           this.post(runtime, "loadAddon", {
             code: runtime.code,
             files: runtime.files,
+            theme: collectAddonThemeSnapshot(),
           });
           break;
         case "loaded":
@@ -427,6 +518,12 @@ export class AddonIframeManager {
         }
         case "runtimeError":
           logger.error(`Addon '${runtime.addonId}' runtime error: ${message.error || "unknown"}`);
+          break;
+        case "routeRendered":
+          this.handleRouteRendered(runtime, message);
+          break;
+        case "routeRenderError":
+          this.handleRouteRenderError(runtime, message);
           break;
         case "api":
           await this.handleApiCall(runtime, message);
@@ -534,6 +631,45 @@ export class AddonIframeManager {
     this.respond(runtime, message.requestId, true, undefined);
   }
 
+  private handleRouteRendered(runtime: Runtime, message: SandboxMessage) {
+    if (!message.requestId || message.requestId !== runtime.activeRouteRequestId) {
+      return;
+    }
+
+    const route = runtime.activeRoute;
+    const routeKey = route ? createRouteRenderKey(route.routeId, route.location) : undefined;
+    runtime.activeRouteRequestId = undefined;
+    clearPendingRouteRender(runtime);
+    if (routeKey) {
+      runtime.lastRenderedRouteKey = routeKey;
+      runtime.iframe.style.visibility = "visible";
+      this.emitRouteStatus(runtime, { routeKey, status: "rendered" });
+    }
+  }
+
+  private handleRouteRenderError(runtime: Runtime, message: SandboxMessage) {
+    if (!message.requestId || message.requestId !== runtime.activeRouteRequestId) {
+      return;
+    }
+
+    const route = runtime.activeRoute;
+    const routeKey = route ? createRouteRenderKey(route.routeId, route.location) : undefined;
+    runtime.activeRouteRequestId = undefined;
+    clearPendingRouteRender(runtime);
+    runtime.iframe.style.visibility = runtime.lastRenderedRouteKey ? "visible" : "hidden";
+    this.emitRouteStatus(runtime, {
+      error: message.error || `Failed to render add-on route '${route?.routeId ?? "unknown"}'`,
+      routeKey,
+      status: "error",
+    });
+  }
+
+  private emitRouteStatus(runtime: Runtime, status: AddonRouteRenderStatus) {
+    for (const listener of runtime.routeStatusListeners) {
+      listener(status);
+    }
+  }
+
   private respond(
     runtime: Runtime,
     requestId: string,
@@ -562,21 +698,97 @@ export class AddonIframeManager {
     );
   }
 
+  private ensureThemeObserver() {
+    if (this.themeObserver) {
+      return;
+    }
+
+    this.themeObserver = new MutationObserver(this.scheduleThemeBroadcast);
+    this.themeObserver.observe(document.documentElement, {
+      attributeFilter: ["class", "style"],
+      attributes: true,
+    });
+    this.themeObserver.observe(document.body, {
+      attributeFilter: ["class"],
+      attributes: true,
+    });
+  }
+
+  private stopThemeObserverIfIdle() {
+    if (this.runtimes.size > 0) {
+      return;
+    }
+
+    this.themeObserver?.disconnect();
+    this.themeObserver = undefined;
+    if (this.themeUpdateFrame) {
+      cancelAnimationFrame(this.themeUpdateFrame);
+      this.themeUpdateFrame = undefined;
+    }
+  }
+
+  private scheduleThemeBroadcast = () => {
+    if (this.themeUpdateFrame) {
+      return;
+    }
+
+    this.themeUpdateFrame = requestAnimationFrame(() => {
+      this.themeUpdateFrame = undefined;
+      this.broadcastTheme();
+    });
+  };
+
+  private broadcastTheme() {
+    const theme = collectAddonThemeSnapshot();
+    for (const runtime of this.runtimes.values()) {
+      this.post(runtime, "themeUpdate", { theme });
+    }
+  }
+
   private renderActiveRoute(runtime: Runtime) {
     if (!runtime.isLoaded || !runtime.activeContainer || !runtime.activeRoute) {
       return;
     }
 
-    if (runtime.routeRenderTimer) {
-      clearTimeout(runtime.routeRenderTimer);
-    }
+    const route = runtime.activeRoute;
+    const routeKey = createRouteRenderKey(route.routeId, route.location);
+    const requestId = makeRequestId();
+
+    clearPendingRouteRender(runtime);
+    runtime.activeRouteRequestId = requestId;
+    const hasRenderedContent = Boolean(runtime.lastRenderedRouteKey);
+    runtime.iframe.style.visibility = hasRenderedContent ? "visible" : "hidden";
+    this.emitRouteStatus(runtime, {
+      cold: !hasRenderedContent,
+      routeKey,
+      status: "rendering",
+    });
 
     runtime.routeRenderTimer = window.setTimeout(() => {
-      if (!runtime.isLoaded || !runtime.activeContainer || !runtime.activeRoute) {
+      if (
+        !runtime.isLoaded ||
+        !runtime.activeContainer ||
+        runtime.activeRoute !== route ||
+        runtime.activeRouteRequestId !== requestId
+      ) {
         return;
       }
-      this.post(runtime, "renderRoute", runtime.activeRoute);
+      this.post(runtime, "renderRoute", { ...route, requestId });
     }, 0);
+
+    runtime.routeRenderTimeout = window.setTimeout(() => {
+      if (runtime.activeRouteRequestId !== requestId) {
+        return;
+      }
+      runtime.activeRouteRequestId = undefined;
+      clearPendingRouteRender(runtime);
+      runtime.iframe.style.visibility = runtime.lastRenderedRouteKey ? "visible" : "hidden";
+      this.emitRouteStatus(runtime, {
+        error: `Timed out rendering add-on route '${route.routeId}'`,
+        routeKey,
+        status: "error",
+      });
+    }, ROUTE_RENDER_TIMEOUT_MS);
   }
 }
 

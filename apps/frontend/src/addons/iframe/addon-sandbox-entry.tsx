@@ -4,6 +4,15 @@ import * as React from "react";
 import * as ReactDOMClient from "react-dom/client";
 import { QueryClient } from "@tanstack/react-query";
 import { createHostDependencyModuleUrl, isHostDependencySpecifier } from "./host-dependencies";
+import {
+  clearAddonStyles,
+  createCssModuleSource,
+  installAddonCssFiles,
+  installAddonStyle,
+  isCssFile,
+  type SandboxAddonFile,
+} from "./addon-sandbox-styles";
+import { applyHostTheme, type AddonThemeSnapshot } from "./addon-sandbox-theme";
 
 const CHANNEL = "wealthfolio:addon-sandbox:v1";
 
@@ -22,6 +31,7 @@ interface RouteLocation {
 interface RouteRenderContext {
   root: HTMLElement;
   location: RouteLocation;
+  onRendered?: () => void;
 }
 
 interface LegacyRouteConfig {
@@ -30,12 +40,6 @@ interface LegacyRouteConfig {
   title?: unknown;
   render?: unknown;
   component?: unknown;
-}
-
-interface SandboxAddonFile {
-  name: string;
-  content: string;
-  isMain?: boolean;
 }
 
 interface SandboxMessage {
@@ -53,6 +57,7 @@ interface SandboxMessage {
   error?: string;
   subscriptionId?: string;
   payload?: unknown;
+  theme?: AddonThemeSnapshot;
 }
 
 type RouteRenderer = (context: RouteRenderContext) => Promise<void> | void;
@@ -87,6 +92,12 @@ function callHost(type: string, payload: Record<string, unknown> = {}) {
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
     post(type, { requestId, ...payload });
+  });
+}
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
 }
 
@@ -134,14 +145,20 @@ function getModuleBasename(path: string) {
 
 function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = []) {
   const sources = new Map<string, { path: string; source: string }>();
+  const cssSources = new Map<string, { path: string; source: string }>();
   const mainFile = files.find((file) => file.isMain) ?? files.find((file) => file.content === code);
   const mainPath = normalizeModulePath(mainFile?.name ?? "addon.js");
 
   for (const file of files) {
-    if (!file.name.endsWith(".js")) {
+    const path = normalizeModulePath(file.name);
+    if (isCssFile(path)) {
+      cssSources.set(path, { path, source: file.content });
+      cssSources.set(getModuleBasename(path), { path, source: file.content });
       continue;
     }
-    const path = normalizeModulePath(file.name);
+    if (!path.endsWith(".js")) {
+      continue;
+    }
     const source = stripSourceMapReferences(file.content);
     sources.set(path, { path, source });
     sources.set(getModuleBasename(path), { path, source });
@@ -157,6 +174,22 @@ function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = [])
     }
 
     const resolvedPath = resolveModulePath(importerPath, specifier);
+    const cssEntry =
+      cssSources.get(resolvedPath) ?? cssSources.get(getModuleBasename(resolvedPath));
+    if (cssEntry) {
+      const cssUrlKey = `css:${cssSources.has(resolvedPath) ? resolvedPath : getModuleBasename(resolvedPath)}`;
+      let cssModuleUrl = objectUrls.get(cssUrlKey);
+      if (!cssModuleUrl) {
+        cssModuleUrl = URL.createObjectURL(
+          new Blob([createCssModuleSource(cssEntry.path, cssEntry.source)], {
+            type: "text/javascript",
+          }),
+        );
+        objectUrls.set(cssUrlKey, cssModuleUrl);
+      }
+      return cssModuleUrl;
+    }
+
     const moduleEntry = sources.get(resolvedPath) ?? sources.get(getModuleBasename(resolvedPath));
     if (!moduleEntry) {
       return specifier;
@@ -184,6 +217,7 @@ function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = [])
 
   Object.assign(globalThis, {
     __wealthfolioImport: importModule,
+    __wealthfolioInstallAddonStyle: installAddonStyle,
   });
 
   return {
@@ -330,52 +364,73 @@ function getAddonQueryClient() {
 }
 
 function createApiProxy(path: string[] = []): unknown {
-  return new Proxy(function addonApiProxy() {}, {
-    get(_target, key) {
-      if (key === "then" || typeof key === "symbol") {
-        return undefined;
-      }
-      return createApiProxy([...path, String(key)]);
+  return new Proxy(
+    function addonApiProxy() {
+      return undefined;
     },
-    apply(_target, _thisArg, args: unknown[]) {
-      const method = path.join(".");
-      if (method === "query.getClient") {
-        return getAddonQueryClient();
-      }
-      if (method.startsWith("events.") && typeof args[0] === "function") {
-        const callback = args[0] as (payload: unknown) => void;
-        return callHost("eventSubscribe", { method }).then((value) => {
-          const { subscriptionId } = value as { subscriptionId: string };
-          eventCallbacks.set(subscriptionId, callback);
-          return () => {
-            eventCallbacks.delete(subscriptionId);
-            return callHost("eventUnsubscribe", { subscriptionId });
-          };
-        });
-      }
-      assertCloneable(args);
-      const result = callHost("api", { method, args });
-      if (method.startsWith("logger.") || method.startsWith("toast.")) {
-        result.catch((error: unknown) => console.error(error));
-        return undefined;
-      }
-      return result;
+    {
+      get(_target, key) {
+        if (key === "then" || typeof key === "symbol") {
+          return undefined;
+        }
+        return createApiProxy([...path, String(key)]);
+      },
+      apply(_target, _thisArg, args: unknown[]) {
+        const method = path.join(".");
+        if (method === "query.getClient") {
+          return getAddonQueryClient();
+        }
+        if (method.startsWith("events.") && typeof args[0] === "function") {
+          const callback = args[0] as (payload: unknown) => void;
+          return callHost("eventSubscribe", { method }).then((value) => {
+            const { subscriptionId } = value as { subscriptionId: string };
+            eventCallbacks.set(subscriptionId, callback);
+            return () => {
+              eventCallbacks.delete(subscriptionId);
+              return callHost("eventUnsubscribe", { subscriptionId });
+            };
+          });
+        }
+        assertCloneable(args);
+        const result = callHost("api", { method, args });
+        if (method.startsWith("logger.") || method.startsWith("toast.")) {
+          result.catch((error: unknown) => console.error(error));
+          return undefined;
+        }
+        return result;
+      },
     },
-  });
+  );
+}
+
+export function RouteRenderCommit({ onRendered }: { onRendered?: () => void }) {
+  React.useEffect(() => {
+    onRendered?.();
+  }, [onRendered]);
+  return null;
 }
 
 function createReactRouteRenderer(component: unknown): RouteRenderer {
-  return ({ root: routeRoot }) => {
+  return ({ root: routeRoot, onRendered }) => {
     const Component = component as React.ElementType;
     reactRouteRoot ??= ReactDOMClient.createRoot(routeRoot);
     const reactRoot = reactRouteRoot;
-    reactRoot.render(
-      React.createElement(
-        React.Suspense,
-        { fallback: React.createElement("div", null, "Loading add-on...") },
-        React.createElement(Component),
-      ),
-    );
+    return new Promise<void>((resolve) => {
+      const handleRendered = () => {
+        onRendered?.();
+        resolve();
+      };
+      React.startTransition(() => {
+        reactRoot.render(
+          React.createElement(
+            React.Suspense,
+            { fallback: null },
+            React.createElement(Component),
+            React.createElement(RouteRenderCommit, { onRendered: handleRendered }),
+          ),
+        );
+      });
+    });
   };
 }
 
@@ -397,6 +452,10 @@ function stringFromPrimitive(value: unknown): string | undefined {
   return undefined;
 }
 
+function iconNameFromUnknown(value: unknown): string | undefined {
+  return stringFromPrimitive(value);
+}
+
 function normalizeRoute(route: LegacyRouteConfig) {
   const path = stringFromPrimitive(route.path) ?? "";
   const routeId = (stringFromPrimitive(route.id) ?? path) || crypto.randomUUID?.() || "";
@@ -412,10 +471,11 @@ function createContext() {
     ui: { root },
     sidebar: {
       addItem(cfg: Record<string, unknown>) {
+        const id = stringFromPrimitive(cfg?.id) ?? "";
         const item = {
-          id: stringFromPrimitive(cfg?.id) ?? "",
+          id,
           label: stringFromPrimitive(cfg?.label) ?? "",
-          icon: typeof cfg?.icon === "string" ? cfg.icon : undefined,
+          icon: iconNameFromUnknown(cfg?.icon),
           route: typeof cfg?.route === "string" ? cfg.route : undefined,
           order: typeof cfg?.order === "number" ? cfg.order : undefined,
         };
@@ -476,6 +536,7 @@ function resolveEnable(mod: Record<string, unknown>) {
 }
 
 async function loadAddon(code: string, files: SandboxAddonFile[] = []) {
+  installAddonCssFiles(files);
   const moduleRegistry = createAddonModuleRegistry(code, files);
   addonModuleUrls = moduleRegistry.objectUrls;
   addonCodeUrl = moduleRegistry.mainUrl;
@@ -498,9 +559,17 @@ async function renderRoute(routeId: string, location: RouteLocation) {
   if (!route) {
     unmountReactRouteRoot();
     root.textContent = "Addon route is not available.";
-    return;
+    throw new Error(`Addon route '${routeId}' is not available`);
   }
-  await route({ root, location });
+
+  let didRender = false;
+  const markRendered = () => {
+    didRender = true;
+  };
+  await route({ root, location, onRendered: markRendered });
+  if (!didRender) {
+    await waitForNextPaint();
+  }
 }
 
 async function disableAddon() {
@@ -528,6 +597,7 @@ async function disableAddon() {
     }
   }
   addonModuleUrls.clear();
+  clearAddonStyles();
   root.replaceChildren();
 }
 
@@ -541,12 +611,7 @@ window.addEventListener("unhandledrejection", (event) => {
 
 window.addEventListener("message", (event: MessageEvent<SandboxMessage>) => {
   const message = event.data;
-  if (
-    !message ||
-    message.channel !== CHANNEL ||
-    message.addonId !== ADDON_ID ||
-    message.nonce !== NONCE
-  ) {
+  if (message?.channel !== CHANNEL || message.addonId !== ADDON_ID || message.nonce !== NONCE) {
     return;
   }
 
@@ -572,21 +637,36 @@ window.addEventListener("message", (event: MessageEvent<SandboxMessage>) => {
     return;
   }
 
+  if (message.type === "themeUpdate") {
+    applyHostTheme(message.theme);
+    return;
+  }
+
   void (async () => {
     try {
       if (message.type === "loadAddon" && typeof message.code === "string") {
+        applyHostTheme(message.theme);
         await loadAddon(message.code, message.files);
         post("loaded");
       } else if (message.type === "renderRoute" && message.routeId && message.location) {
         await renderRoute(message.routeId, message.location);
+        post("routeRendered", { requestId: message.requestId });
       } else if (message.type === "disable") {
         await disableAddon();
         post("disabled");
       }
     } catch (error) {
-      post("loadError", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (message.type === "renderRoute") {
+        post("routeRenderError", {
+          error: errorMessage,
+          requestId: message.requestId,
+        });
+      } else {
+        post("loadError", {
+          error: errorMessage,
+        });
+      }
     }
   })();
 });
