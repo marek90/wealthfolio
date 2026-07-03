@@ -12,6 +12,7 @@ import {
 } from "@wealthfolio/ui";
 import { cn } from "@wealthfolio/ui/lib/utils";
 import { useTranslation } from "react-i18next";
+import { translateIssueText } from "../translate-issue";
 import { Link } from "react-router-dom";
 
 interface IssueDetailSheetProps {
@@ -144,8 +145,12 @@ export function IssueDetailSheet({
             <span className="text-muted-foreground">·</span>
             <span className="text-muted-foreground">{t(categoryConfigKeys.labelKey)}</span>
           </div>
-          <SheetTitle className="text-xl leading-tight">{issue.title}</SheetTitle>
-          <p className="text-muted-foreground text-sm leading-relaxed">{issue.message}</p>
+          <SheetTitle className="text-xl leading-tight">
+            {translateIssueText(t, issue, "title")}
+          </SheetTitle>
+          <p className="text-muted-foreground text-sm leading-relaxed">
+            {translateIssueText(t, issue, "message")}
+          </p>
         </SheetHeader>
 
         <ScrollArea className="min-h-0 flex-1">
