@@ -6,6 +6,9 @@ import { debugAddonState, isAddonDevModeEnabled, loadAllAddons } from "./addons/
 import "./addons/addons-runtime-context";
 import App from "./App";
 import "./globals.css";
+// Initialize i18next before the app renders. The active language is applied
+// from the stored user setting by the settings provider.
+import "./i18n/i18n";
 
 if (isAddonDevModeEnabled) {
   void import("./addons/addons-dev-mode");
