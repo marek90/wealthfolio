@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type Dispatch,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { checkActivitiesImport, previewImportAssets, logger } from "@/adapters";
 import type {
   ActivityImport,
@@ -514,6 +515,7 @@ interface ImportProviderProps {
 }
 
 export function ImportProvider({ children, initialAccountId }: ImportProviderProps) {
+  const { t } = useTranslation();
   const [state, dispatch] = useReducer(importReducer, {
     ...INITIAL_STATE,
     accountId: initialAccountId ?? "",
@@ -725,7 +727,8 @@ export function ImportProvider({ children, initialAccountId }: ImportProviderPro
         if (run !== previewRunRef.current || draftRevisionRef.current > requestedRevision) return;
         dispatch({
           type: "SET_ASSET_PREVIEW_ERROR",
-          payload: error instanceof Error ? error.message : "Failed to preview import assets.",
+          payload:
+            error instanceof Error ? error.message : t("activity:import.errors.previewFailed"),
         });
       } finally {
         if (run === previewRunRef.current) {
