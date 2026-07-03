@@ -426,6 +426,7 @@ impl DataConsistencyCheck {
                 )
                 .affected_count(count as u32)
                 .navigate_action(NavigateAction {
+                    id: "to_activities".to_string(),
                     route: "/activities".to_string(),
                     query: Some(serde_json::json!({ "types": "SELL" })),
                     label: "View Activities".to_string(),
@@ -530,6 +531,7 @@ fn build_unknown_performance_flow_issue(
     }
 
     issue.navigate_action = Some(NavigateAction {
+        id: "to_activities".to_string(),
         route: "/activities".to_string(),
         query: Some(serde_json::Value::Object(query)),
         label: "View Activities".to_string(),

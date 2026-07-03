@@ -19,7 +19,20 @@
   },
   "actions": {
     "fix": "Beheben",
-    "clear": "Zurücksetzen"
+    "clear": "Zurücksetzen",
+    "sync_prices": "Kurse aktualisieren",
+    "fetch_fx": "Wechselkurse abrufen",
+    "migrate_classifications": "Klassifizierungen migrieren",
+    "migrate_legacy_classifications": "Migration starten",
+    "retry_sync": "Synchronisierung wiederholen",
+    "to_holdings": "Bestände anzeigen",
+    "to_activities": "Aktivitäten anzeigen",
+    "to_accounts": "Konten anzeigen",
+    "to_taxonomies": "Klassifizierungen anzeigen",
+    "to_market_data": "Marktdaten anzeigen",
+    "to_general_settings": "Allgemeine Einstellungen öffnen",
+    "to_connect": "Konten konfigurieren",
+    "review_transfers": "Überweisungen prüfen"
   },
   "updatedAt": "Aktualisiert um {{time}}",
   "healthy": {

@@ -19,7 +19,20 @@
   },
   "actions": {
     "fix": "Fix",
-    "clear": "Clear"
+    "clear": "Clear",
+    "sync_prices": "Sync Prices",
+    "fetch_fx": "Fetch Exchange Rates",
+    "migrate_classifications": "Migrate Classifications",
+    "migrate_legacy_classifications": "Start Migration",
+    "retry_sync": "Retry Sync",
+    "to_holdings": "View Holdings",
+    "to_activities": "View Activities",
+    "to_accounts": "View Accounts",
+    "to_taxonomies": "View Classifications",
+    "to_market_data": "View Market Data",
+    "to_general_settings": "Open General Settings",
+    "to_connect": "Configure Accounts",
+    "review_transfers": "Review transfers"
   },
   "updatedAt": "Updated {{time}}",
   "healthy": {

@@ -59,6 +59,7 @@ const baseIssue: HealthIssue = {
   dataHash: "abc123",
   timestamp: "2026-03-01T00:00:00Z",
   navigateAction: {
+    id: "to_general_settings",
     route: "/settings/general",
     label: "Open General Settings",
   },
@@ -164,6 +165,7 @@ describe("IssueDetailSheet", () => {
       category: "DATA_CONSISTENCY",
       title: "2 valuation rows have unknown transfer classification",
       navigateAction: {
+        id: "to_activities",
         route: "/activities",
         label: "View Activities",
         query: {
@@ -194,6 +196,7 @@ describe("IssueDetailSheet", () => {
       title: "2 valuation rows have unknown transfer classification",
       details: "Personal\nDate: 2023-02-20\n\nPersonal\nDate: 2025-03-02",
       navigateAction: {
+        id: "to_activities",
         route: "/activities",
         label: "View Activities",
         query: {

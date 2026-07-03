@@ -300,7 +300,9 @@ export function IssueDetailSheet({
               ) : (
                 <Icons.Wand2 className="mr-2 h-4 w-4" />
               )}
-              {issue.fixAction.label}
+              {t(`health:actions.${issue.fixAction.id}`, {
+                defaultValue: issue.fixAction.label,
+              })}
             </Button>
           )}
 
@@ -308,7 +310,9 @@ export function IssueDetailSheet({
             <Button variant="outline" className="w-full" asChild>
               <Link to={navigateActionRoute ?? issue.navigateAction.route}>
                 <Icons.ArrowRight className="mr-2 h-4 w-4" />
-                {issue.navigateAction.label}
+                {t(`health:actions.${issue.navigateAction.id}`, {
+                  defaultValue: issue.navigateAction.label,
+                })}
               </Link>
             </Button>
           )}

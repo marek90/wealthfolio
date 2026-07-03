@@ -2138,6 +2138,7 @@ export type HealthCategory =
  * Navigation action for health issue resolution.
  */
 export interface NavigateAction {
+  id: string;
   route: string;
   query?: Record<string, unknown>;
   label: string;

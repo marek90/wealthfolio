@@ -183,6 +183,9 @@ impl FixAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NavigateAction {
+    /// Stable identifier for this navigation target (e.g., "to_holdings"),
+    /// used by the frontend to look up a translated label.
+    pub id: String,
     /// The route path to navigate to (e.g., "/holdings")
     pub route: String,
     /// Optional query parameters for the route
@@ -286,6 +289,7 @@ impl NavigateAction {
     /// Creates a navigate action to the holdings page with an optional filter.
     pub fn to_holdings(filter: Option<&str>) -> Self {
         Self {
+            id: "to_holdings".to_string(),
             route: "/holdings".to_string(),
             query: filter.map(|f| serde_json::json!({ "filter": f })),
             label: "View Holdings".to_string(),
@@ -295,6 +299,7 @@ impl NavigateAction {
     /// Creates a navigate action to the activities page.
     pub fn to_activities(filter: Option<&str>) -> Self {
         Self {
+            id: "to_activities".to_string(),
             route: "/activities".to_string(),
             query: filter.map(|f| serde_json::json!({ "filter": f })),
             label: "View Activities".to_string(),
@@ -304,6 +309,7 @@ impl NavigateAction {
     /// Creates a navigate action to the accounts page.
     pub fn to_accounts() -> Self {
         Self {
+            id: "to_accounts".to_string(),
             route: "/settings/accounts".to_string(),
             query: None,
             label: "View Accounts".to_string(),
@@ -313,6 +319,7 @@ impl NavigateAction {
     /// Creates a navigate action to the taxonomies settings page.
     pub fn to_taxonomies() -> Self {
         Self {
+            id: "to_taxonomies".to_string(),
             route: "/settings/taxonomies".to_string(),
             query: None,
             label: "View Classifications".to_string(),
@@ -322,6 +329,7 @@ impl NavigateAction {
     /// Creates a navigate action to the market data settings page.
     pub fn to_market_data() -> Self {
         Self {
+            id: "to_market_data".to_string(),
             route: "/settings/market-data".to_string(),
             query: None,
             label: "View Market Data".to_string(),
@@ -331,6 +339,7 @@ impl NavigateAction {
     /// Creates a navigate action to the general settings page.
     pub fn to_general_settings() -> Self {
         Self {
+            id: "to_general_settings".to_string(),
             route: "/settings/general".to_string(),
             query: None,
             label: "Open General Settings".to_string(),
@@ -340,6 +349,7 @@ impl NavigateAction {
     /// Creates a navigate action to the connect page.
     pub fn to_connect() -> Self {
         Self {
+            id: "to_connect".to_string(),
             route: "/connect".to_string(),
             query: None,
             label: "Configure Accounts".to_string(),

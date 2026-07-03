@@ -90,6 +90,7 @@ impl TransferIntegrityCheck {
             query["to"] = json!(to.format("%Y-%m-%d").to_string());
         }
         let navigate = NavigateAction {
+            id: "review_transfers".to_string(),
             route: "/activities".to_string(),
             query: Some(query),
             label: "Review transfers".to_string(),

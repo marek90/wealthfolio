@@ -19,7 +19,20 @@
   },
   "actions": {
     "fix": "Corriger",
-    "clear": "Effacer"
+    "clear": "Effacer",
+    "sync_prices": "Actualiser les cours",
+    "fetch_fx": "Récupérer les taux de change",
+    "migrate_classifications": "Migrer les classifications",
+    "migrate_legacy_classifications": "Démarrer la migration",
+    "retry_sync": "Réessayer la synchronisation",
+    "to_holdings": "Voir les positions",
+    "to_activities": "Voir les activités",
+    "to_accounts": "Voir les comptes",
+    "to_taxonomies": "Voir les classifications",
+    "to_market_data": "Voir les données de marché",
+    "to_general_settings": "Ouvrir les paramètres généraux",
+    "to_connect": "Configurer les comptes",
+    "review_transfers": "Examiner les transferts"
   },
   "updatedAt": "Mis à jour à {{time}}",
   "healthy": {
