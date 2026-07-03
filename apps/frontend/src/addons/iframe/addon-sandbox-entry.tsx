@@ -83,38 +83,6 @@ if (!ADDON_ID || !NONCE || !rootElement) {
 
 const root = rootElement;
 
-function isIOSWebKit() {
-  const userAgent = navigator.userAgent.toLowerCase();
-  const platform = navigator.platform.toLowerCase();
-  return (
-    /iphone|ipad|ipod/.test(userAgent) || (platform === "macintel" && navigator.maxTouchPoints > 1)
-  );
-}
-
-function base64EncodeUtf8(value: string) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function createJavaScriptModuleUrl(source: string) {
-  if (isIOSWebKit()) {
-    return `data:text/javascript;base64,${base64EncodeUtf8(source)}`;
-  }
-
-  return URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
-}
-
-function revokeJavaScriptModuleUrl(url: string) {
-  if (url.startsWith("blob:")) {
-    URL.revokeObjectURL(url);
-  }
-}
-
 function post(type: string, payload: Record<string, unknown> = {}) {
   parent.postMessage({ channel: CHANNEL, addonId: ADDON_ID, nonce: NONCE, type, ...payload }, "*");
 }
@@ -221,11 +189,7 @@ function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = [])
 
   const objectUrls = new Map<string, string>();
   const resolveModuleSpecifier = (importerPath: string, specifier: string) => {
-    const hostModuleUrl = createHostDependencyModuleUrl(
-      specifier,
-      objectUrls,
-      createJavaScriptModuleUrl,
-    );
+    const hostModuleUrl = createHostDependencyModuleUrl(specifier, objectUrls);
     if (hostModuleUrl) {
       return hostModuleUrl;
     }
@@ -237,8 +201,10 @@ function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = [])
       const cssUrlKey = `css:${cssSources.has(resolvedPath) ? resolvedPath : getModuleBasename(resolvedPath)}`;
       let cssModuleUrl = objectUrls.get(cssUrlKey);
       if (!cssModuleUrl) {
-        cssModuleUrl = createJavaScriptModuleUrl(
-          createCssModuleSource(cssEntry.path, cssEntry.source),
+        cssModuleUrl = URL.createObjectURL(
+          new Blob([createCssModuleSource(cssEntry.path, cssEntry.source)], {
+            type: "text/javascript",
+          }),
         );
         objectUrls.set(cssUrlKey, cssModuleUrl);
       }
@@ -253,8 +219,13 @@ function createAddonModuleRegistry(code: string, files: SandboxAddonFile[] = [])
     const urlKey = sources.has(resolvedPath) ? resolvedPath : getModuleBasename(resolvedPath);
     let moduleUrl = objectUrls.get(urlKey);
     if (!moduleUrl) {
-      moduleUrl = createJavaScriptModuleUrl(
-        rewriteModuleSpecifiers(moduleEntry.path, moduleEntry.source, resolveModuleSpecifier),
+      moduleUrl = URL.createObjectURL(
+        new Blob(
+          [rewriteModuleSpecifiers(moduleEntry.path, moduleEntry.source, resolveModuleSpecifier)],
+          {
+            type: "text/javascript",
+          },
+        ),
       );
       objectUrls.set(urlKey, moduleUrl);
     }
@@ -654,12 +625,12 @@ async function disableAddon() {
   addonQueryClient = undefined;
   const mainModuleUrl = addonCodeUrl;
   if (addonCodeUrl) {
-    revokeJavaScriptModuleUrl(addonCodeUrl);
+    URL.revokeObjectURL(addonCodeUrl);
     addonCodeUrl = undefined;
   }
   for (const moduleUrl of addonModuleUrls.values()) {
     if (moduleUrl !== mainModuleUrl) {
-      revokeJavaScriptModuleUrl(moduleUrl);
+      URL.revokeObjectURL(moduleUrl);
     }
   }
   addonModuleUrls.clear();
