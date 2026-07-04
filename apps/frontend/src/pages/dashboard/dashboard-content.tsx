@@ -242,8 +242,8 @@ export function DashboardContent() {
       <div
         className={`bg-linear-to-t flex grow flex-col ${
           isNegative
-            ? "from-destructive/30 via-destructive/15 to-transparent"
-            : "from-success/30 via-success/15 to-transparent"
+            ? "from-destructive/15 via-destructive/8 to-transparent"
+            : "from-success/15 via-success/8 to-transparent"
         }`}
       >
         <div className="h-[280px]">
