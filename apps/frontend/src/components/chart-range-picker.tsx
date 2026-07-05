@@ -7,6 +7,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@wealthfolio/ui/compone
 import { useIsMobile } from "@wealthfolio/ui";
 import type { DateRange as DayPickerDateRange } from "react-day-picker";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 interface ChartRangePickerProps {
   value: DateRange | undefined;
@@ -25,6 +26,7 @@ interface ChartRangePickerProps {
  * inside the calendar popover.
  */
 export function ChartRangePicker({ value, onChange, isActive, className }: ChartRangePickerProps) {
+  const { t } = useTranslation();
   const isMobile = useIsMobile();
   // Selection in progress lives here, NOT in the parent: react-day-picker fires
   // onSelect with {from, to: undefined} on the first tap of a range, and committing
@@ -51,7 +53,8 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
             isActive && "bg-background text-foreground shadow-sm",
             className,
           )}
-          aria-label="Choose custom date range"
+          aria-label={t("ui:dateRange.chooseCustom", "Choose custom date range")}
+          data-testid="chart-range-picker-trigger"
         >
           <Icons.Calendar className="h-4 w-4" />
         </Button>

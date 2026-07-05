@@ -21,6 +21,7 @@ import {
   usePersistentState,
 } from "@wealthfolio/ui";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
+import { formatDate } from "@/lib/utils";
 import { format } from "date-fns";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -266,9 +267,9 @@ export function DashboardContent() {
                 {(selectedInterval || brushDisplayRange) && (
                   <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
                     {brushDisplayRange?.from && brushDisplayRange?.to
-                      ? `${format(brushDisplayRange.from, "MMM d, yyyy")} – ${format(brushDisplayRange.to, "MMM d, yyyy")}`
+                      ? `${formatDate(brushDisplayRange.from)} – ${formatDate(brushDisplayRange.to)}`
                       : isCustomRangeActive && dateRange?.from && dateRange?.to
-                        ? `${format(dateRange.from, "MMM d, yyyy")} – ${format(dateRange.to, "MMM d, yyyy")}`
+                        ? `${formatDate(dateRange.from)} – ${formatDate(dateRange.to)}`
                         : t(`ui:interval.${selectedInterval}`)}
                   </span>
                 )}

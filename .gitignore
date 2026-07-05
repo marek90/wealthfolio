@@ -123,3 +123,6 @@ tasks
 wealthfolio.db
 /secrets/
 /data/
+
+# Exported Docker images
+wealthfolio-custom-*.tar.gz

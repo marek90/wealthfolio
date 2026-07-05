@@ -20,7 +20,7 @@ import {
  *     to blank the chart and unmount the period pills, the picker and the popover.
  */
 
-const CALENDAR_TRIGGER = "Choose custom date range";
+const CALENDAR_TRIGGER = "chart-range-picker-trigger";
 
 async function seedPortfolio(page: Page) {
   await completeOnboardingIfNeeded(page);
@@ -46,7 +46,7 @@ async function seedPortfolio(page: Page) {
 
 async function openDashboardCalendar(page: Page) {
   await gotoAppPath(page, "/");
-  const trigger = page.getByLabel(CALENDAR_TRIGGER).first();
+  const trigger = page.getByTestId(CALENDAR_TRIGGER).first();
   await expect(trigger).toBeVisible({ timeout: 30000 });
   await trigger.scrollIntoViewIfNeeded();
   await trigger.click();
@@ -122,7 +122,7 @@ test.describe("Chart calendar range picker", () => {
       await expect(page.getByRole("grid").first()).toBeVisible();
       await clickDay(page, 12);
       await expect(page.locator(".history-brush").first()).toBeVisible();
-      await expect(page.getByLabel(CALENDAR_TRIGGER).first()).toBeVisible();
+      await expect(page.getByTestId(CALENDAR_TRIGGER).first()).toBeVisible();
     });
   });
 });
