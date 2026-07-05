@@ -108,12 +108,20 @@ pub fn default_adapter_descriptors() -> Vec<EntityAdapterDescriptor> {
             table_name: "allocation_target_weights",
         },
         EntityAdapterDescriptor {
+            entity: SyncEntity::AllocationTargetConstraint,
+            table_name: "allocation_target_constraints",
+        },
+        EntityAdapterDescriptor {
             entity: SyncEntity::SpendingSetting,
             table_name: "app_settings",
         },
         EntityAdapterDescriptor {
             entity: SyncEntity::ActivityTaxonomyAssignment,
             table_name: "activity_taxonomy_assignments",
+        },
+        EntityAdapterDescriptor {
+            entity: SyncEntity::SpendingActivitySplit,
+            table_name: "spending_activity_splits",
         },
         EntityAdapterDescriptor {
             entity: SyncEntity::SpendingActivityEvent,

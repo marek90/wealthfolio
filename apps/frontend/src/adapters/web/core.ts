@@ -164,6 +164,10 @@ export const COMMANDS: CommandMap = {
   set_secret: { method: "POST", path: "/secrets" },
   get_secret: { method: "GET", path: "/secrets" },
   delete_secret: { method: "DELETE", path: "/secrets" },
+  set_addon_secret: { method: "POST", path: "/addons" },
+  get_addon_secret: { method: "GET", path: "/addons" },
+  delete_addon_secret: { method: "DELETE", path: "/addons" },
+  addon_network_request: { method: "POST", path: "/addons" },
   // Taxonomies
   get_taxonomies: { method: "GET", path: "/taxonomies" },
   get_taxonomy: { method: "GET", path: "/taxonomies" },
@@ -204,6 +208,9 @@ export const COMMANDS: CommandMap = {
   get_activity_assignments: { method: "GET", path: "/spending/activities" },
   assign_activity_category: { method: "PUT", path: "/spending/activities" },
   unassign_activity_category: { method: "DELETE", path: "/spending/activities" },
+  get_activity_splits: { method: "GET", path: "/spending/activities" },
+  replace_activity_splits: { method: "PUT", path: "/spending/activities" },
+  clear_activity_splits: { method: "DELETE", path: "/spending/activities" },
   bulk_assign_categories: { method: "POST", path: "/spending/assignments/bulk" },
   // Spending categorization rules
   list_categorization_rules: { method: "GET", path: "/spending/rules" },
@@ -385,6 +392,8 @@ export const COMMANDS: CommandMap = {
     path: "/allocation-targets/save-with-weights",
   },
   get_allocation_target_drift: { method: "POST", path: "/allocation-targets" },
+  list_target_constraints: { method: "GET", path: "/allocation-targets" },
+  save_target_constraints: { method: "POST", path: "/allocation-targets" },
   calculate_rebalance_plan: { method: "POST", path: "/allocation-targets/rebalance/calculate" },
   // Alternative Assets
   create_alternative_asset: { method: "POST", path: "/alternative-assets" },
@@ -394,6 +403,13 @@ export const COMMANDS: CommandMap = {
   unlink_liability: { method: "DELETE", path: "/alternative-assets" },
   update_alternative_asset_metadata: { method: "PUT", path: "/alternative-assets" },
   get_alternative_holdings: { method: "GET", path: "/alternative-holdings" },
+  // Agent Access (PATs + audit log)
+  get_agent_access_status: { method: "GET", path: "/agent-access/status" },
+  list_agent_access_tokens: { method: "GET", path: "/agent-access/tokens" },
+  create_agent_access_token: { method: "POST", path: "/agent-access/tokens" },
+  delete_agent_access_token: { method: "DELETE", path: "/agent-access/tokens" },
+  list_agent_audit_log: { method: "GET", path: "/agent-access/audit" },
+  purge_agent_audit_log: { method: "POST", path: "/agent-access/audit/purge" },
 };
 
 /**
@@ -1092,6 +1108,33 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       url += `?${params.toString()}`;
       break;
     }
+    case "set_addon_secret": {
+      const { addonId, key, secret } = payload as {
+        addonId: string;
+        key: string;
+        secret: string;
+      };
+      url += `/${encodeURIComponent(addonId)}/secrets`;
+      body = JSON.stringify({ key, secret });
+      break;
+    }
+    case "get_addon_secret":
+    case "delete_addon_secret": {
+      const { addonId, key } = payload as { addonId: string; key: string };
+      const params = new URLSearchParams();
+      params.set("key", key);
+      url += `/${encodeURIComponent(addonId)}/secrets?${params.toString()}`;
+      break;
+    }
+    case "addon_network_request": {
+      const { addonId, request } = payload as {
+        addonId: string;
+        request: unknown;
+      };
+      url += `/${encodeURIComponent(addonId)}/network/request`;
+      body = JSON.stringify({ request });
+      break;
+    }
     // Taxonomy commands
     case "get_taxonomies":
       break;
@@ -1346,6 +1389,25 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       url += `/${encodeURIComponent(activityId)}/assignments/${encodeURIComponent(taxonomyId)}`;
       break;
     }
+    case "get_activity_splits": {
+      const { activityId } = payload as { activityId: string };
+      url += `/${encodeURIComponent(activityId)}/splits`;
+      break;
+    }
+    case "replace_activity_splits": {
+      const { activityId, splits } = payload as {
+        activityId: string;
+        splits: unknown[];
+      };
+      url += `/${encodeURIComponent(activityId)}/splits`;
+      body = JSON.stringify(splits);
+      break;
+    }
+    case "clear_activity_splits": {
+      const { activityId } = payload as { activityId: string };
+      url += `/${encodeURIComponent(activityId)}/splits`;
+      break;
+    }
     case "bulk_assign_categories": {
       const { items } = payload as { items: unknown[] };
       body = JSON.stringify(items);
@@ -1465,13 +1527,14 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     }
     // Addons
     case "install_addon_zip": {
-      const { zipData, enableAfterInstall } = payload as {
+      const { zipData, enableAfterInstall, approvedNetworkHosts } = payload as {
         zipData: Uint8Array | number[];
         enableAfterInstall?: boolean;
+        approvedNetworkHosts?: string[];
       };
       // Send compact base64 payload to avoid gigantic JSON arrays of numbers
       const zipDataB64 = toBase64(zipData);
-      body = JSON.stringify({ zipDataB64, enableAfterInstall });
+      body = JSON.stringify({ zipDataB64, enableAfterInstall, approvedNetworkHosts });
       break;
     }
     case "toggle_addon": {
@@ -1509,11 +1572,12 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     case "install_addon_from_staging": {
-      const { addonId, enableAfterInstall } = payload as {
+      const { addonId, enableAfterInstall, approvedNetworkHosts } = payload as {
         addonId: string;
         enableAfterInstall?: boolean;
+        approvedNetworkHosts?: string[];
       };
-      body = JSON.stringify({ addonId, enableAfterInstall });
+      body = JSON.stringify({ addonId, enableAfterInstall, approvedNetworkHosts });
       break;
     }
     case "clear_addon_staging": {
@@ -1881,6 +1945,20 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify({ filter, includeHoldings: includeHoldings ?? false });
       break;
     }
+    case "list_target_constraints": {
+      const { targetId } = payload as { targetId: string };
+      url += `/${encodeURIComponent(targetId)}/constraints`;
+      break;
+    }
+    case "save_target_constraints": {
+      const { targetId, constraints } = payload as {
+        targetId: string;
+        constraints: unknown[];
+      };
+      url += `/${encodeURIComponent(targetId)}/constraints`;
+      body = JSON.stringify(constraints);
+      break;
+    }
     case "calculate_rebalance_plan": {
       const { targetId, availableCash, filter, scenarioMode } = payload as {
         targetId: string;
@@ -1888,7 +1966,12 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
         filter: unknown;
         scenarioMode: string;
       };
-      body = JSON.stringify({ targetId, availableCash, filter, scenarioMode });
+      body = JSON.stringify({
+        targetId,
+        availableCash,
+        filter,
+        scenarioMode,
+      });
       break;
     }
     // AI Providers
@@ -1972,6 +2055,40 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     case "get_ai_thread_tags": {
       const { threadId } = payload as { threadId: string };
       url += `/${encodeURIComponent(threadId)}/tags`;
+      break;
+    }
+    // Agent Access
+    case "create_agent_access_token": {
+      const { name, expiresAt, scopes } = payload as {
+        name: string;
+        expiresAt?: string;
+        scopes: string[];
+      };
+      body = JSON.stringify({ name, expiresAt, scopes });
+      break;
+    }
+    case "delete_agent_access_token": {
+      const { id } = payload as { id: string };
+      url += `/${encodeURIComponent(id)}`;
+      break;
+    }
+    case "list_agent_audit_log": {
+      const { page, pageSize, q, tools, outcomes, actorKinds } = payload as {
+        page: number;
+        pageSize: number;
+        q?: string;
+        tools?: string[];
+        outcomes?: string[];
+        actorKinds?: string[];
+      };
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("pageSize", String(pageSize));
+      if (q) params.set("q", q);
+      if (tools?.length) params.set("tools", tools.join(","));
+      if (outcomes?.length) params.set("outcomes", outcomes.join(","));
+      if (actorKinds?.length) params.set("actorKinds", actorKinds.join(","));
+      url += `?${params.toString()}`;
       break;
     }
   }

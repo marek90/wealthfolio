@@ -6,7 +6,7 @@ import { useCurrentValuation } from "@/hooks/use-current-account-valuations";
 import { useHoldings } from "@/hooks/use-holdings";
 import { useValuationHistory } from "@/hooks/use-valuation-history";
 import { HoldingType, isAlternativeAssetKind } from "@/lib/constants";
-import { performanceSummaryReturn, performancePeriodPnl } from "@/lib/performance";
+import { performancePeriodPnl, performanceSummaryReturn } from "@/lib/performance";
 import { QueryKeys } from "@/lib/query-keys";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { DateRange, TimePeriod } from "@/lib/types";
@@ -23,6 +23,7 @@ import {
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { format } from "date-fns";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AccountsSummary } from "./accounts-summary";
 import Balance from "./balance";
 import SavingGoals from "./goals";
@@ -72,15 +73,13 @@ function getDashboardNetContributionMaxDomainSpanRatio(period: UITimePeriod): nu
 }
 
 export function DashboardContent() {
+  const { t } = useTranslation();
   // Use the same persisted state as IntervalSelector for the interval code
   const [intervalCode] = usePersistentState<UITimePeriod>(INTERVAL_STORAGE_KEY, DEFAULT_INTERVAL);
 
   // Derive initial values from the persisted interval code
   const [dateRange, setDateRange] = useState<DateRange | undefined>(
     () => getInitialIntervalData(intervalCode).range,
-  );
-  const [selectedIntervalDescription, setSelectedIntervalDescription] = useState<string>(
-    () => getInitialIntervalData(intervalCode).description,
   );
   const [selectedInterval, setSelectedInterval] = useState<UITimePeriod>(() => intervalCode);
   const [isAllTime, setIsAllTime] = useState<boolean>(() => intervalCode === "ALL");
@@ -190,11 +189,10 @@ export function DashboardContent() {
   // Callback for IntervalSelector
   const handleIntervalSelect = (
     code: TimePeriod,
-    description: string,
+    _description: string,
     range: DateRange | undefined,
   ) => {
     setSelectedInterval(code);
-    setSelectedIntervalDescription(description);
     setDateRange(range);
     setIsAllTime(code === "ALL");
     setBrushDisplayRange(undefined);
@@ -208,11 +206,6 @@ export function DashboardContent() {
     setIsAllTime(false);
     setBrushDisplayRange(undefined);
     setIsCustomRangeActive(!!(range?.from && range?.to));
-    if (range?.from && range?.to) {
-      setSelectedIntervalDescription(
-        `${format(range.from, "MMM d, yyyy")} - ${format(range.to, "MMM d, yyyy")}`,
-      );
-    }
   };
 
   return (
@@ -266,11 +259,13 @@ export function DashboardContent() {
                     )}
                   </>
                 )}
-                {(selectedIntervalDescription || brushDisplayRange) && (
+                {(selectedInterval || brushDisplayRange) && (
                   <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
                     {brushDisplayRange?.from && brushDisplayRange?.to
                       ? `${format(brushDisplayRange.from, "MMM d, yyyy")} – ${format(brushDisplayRange.to, "MMM d, yyyy")}`
-                      : selectedIntervalDescription}
+                      : isCustomRangeActive && dateRange?.from && dateRange?.to
+                        ? `${format(dateRange.from, "MMM d, yyyy")} – ${format(dateRange.to, "MMM d, yyyy")}`
+                        : t(`ui:interval.${selectedInterval}`)}
                   </span>
                 )}
               </div>
@@ -280,13 +275,15 @@ export function DashboardContent() {
       </div>
 
       <div
-        className={`bg-linear-to-t flex grow flex-col ${
-          isNegative
-            ? "from-destructive/30 via-destructive/15 to-transparent"
-            : "from-success/30 via-success/15 to-transparent"
-        }`}
+        className="flex grow flex-col"
+        style={{
+          backgroundImage: isNegative
+            ? `linear-gradient(to top, color-mix(in srgb, var(--destructive) 30%, transparent), color-mix(in srgb, var(--destructive) 15%, transparent) 50%, transparent 100%)`
+            : `linear-gradient(to top, color-mix(in srgb, var(--success) 30%, transparent), color-mix(in srgb, var(--success) 15%, transparent) 50%, transparent 100%)`,
+        }}
       >
-        <div className="h-[320px]">
+        {/* Taller than upstream's h-70 (280px): the brush bar at the bottom needs the extra 40px. */}
+        <div className="h-80">
           <HistoryChart
             data={chartData}
             isLoading={isValuationHistoryLoading}
@@ -319,7 +316,7 @@ export function DashboardContent() {
           )}
         </div>
 
-        <div className="grow px-4 pb-[var(--mobile-nav-total-offset)] pt-12 md:px-6 md:pb-6 md:pt-6 lg:px-10 lg:pb-8 lg:pt-8">
+        <div className="grow px-4 pb-[var(--mobile-nav-total-offset)] pt-14 md:px-6 md:pb-6 md:pt-12 lg:px-10 lg:pb-8 lg:pt-14">
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-3 lg:gap-20">
             <div className="lg:col-span-2">
               <AccountsSummary

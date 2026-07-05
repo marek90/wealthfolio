@@ -29,7 +29,10 @@ use crate::db::{get_connection, WriteHandle};
 use crate::errors::StorageError;
 use crate::schema::{
     accounts, activities, assets, import_account_templates, import_runs, import_templates,
+    spending_activity_splits,
 };
+use crate::spending::activity_splits::ActivitySplitDB;
+use crate::spending::activity_sync::should_sync_activity_local_id_outbox;
 use crate::sync::broker_activity_patch::{
     apply_pending_broker_activity_user_patches_tx, broker_activity_identity,
     broker_activity_user_overlay_changed, broker_activity_user_patch_request,
@@ -149,6 +152,45 @@ fn queue_activity_update_outbox(
         }
     } else {
         tx.update(after)?;
+    }
+
+    Ok(())
+}
+
+fn activity_update_invalidates_spending_splits(before: &ActivityDB, after: &ActivityDB) -> bool {
+    before.account_id != after.account_id
+        || before.activity_type != after.activity_type
+        || before.activity_type_override != after.activity_type_override
+        || before.subtype != after.subtype
+        || before.amount != after.amount
+        || before.source_group_id != after.source_group_id
+}
+
+fn clear_spending_splits_for_activity_tx(
+    tx: &mut crate::db::write_actor::DbWriteTx<'_>,
+    activity_id: &str,
+) -> Result<()> {
+    let existing_ids = spending_activity_splits::table
+        .filter(spending_activity_splits::activity_id.eq(activity_id))
+        .select(spending_activity_splits::id)
+        .load::<String>(tx.conn())
+        .map_err(StorageError::from)?;
+    if existing_ids.is_empty() {
+        return Ok(());
+    }
+
+    let should_sync = should_sync_activity_local_id_outbox(tx.conn(), activity_id)?;
+    diesel::delete(
+        spending_activity_splits::table
+            .filter(spending_activity_splits::activity_id.eq(activity_id)),
+    )
+    .execute(tx.conn())
+    .map_err(StorageError::from)?;
+
+    if should_sync {
+        for id in existing_ids {
+            tx.delete::<ActivitySplitDB>(id);
+        }
     }
 
     Ok(())
@@ -373,6 +415,7 @@ impl ActivityRepository {
         date_from_utc: Option<DateTime<Utc>>,
         date_to_utc_exclusive: Option<DateTime<Utc>>,
         instrument_type_filter: Option<Vec<String>>,
+        activity_id_filter: Option<Vec<String>>,
     ) -> Result<ActivitySearchResponse> {
         let mut conn = get_connection(&self.pool)?;
 
@@ -385,6 +428,9 @@ impl ActivityRepository {
                 .filter(accounts::is_archived.eq(false))
                 .into_boxed();
 
+            if let Some(ref activity_ids) = activity_id_filter {
+                query = query.filter(activities::id.eq_any(activity_ids));
+            }
             if let Some(ref account_ids) = account_id_filter {
                 query = query.filter(activities::account_id.eq_any(account_ids));
             }
@@ -507,6 +553,7 @@ impl ActivityRepository {
                 activities::unit_price,
                 activities::currency,
                 activities::fee,
+                activities::tax,
                 activities::amount,
                 activities::notes,
                 activities::fx_rate,
@@ -628,6 +675,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
         date_from: Option<NaiveDate>,      // Optional start date filter (inclusive)
         date_to: Option<NaiveDate>,        // Optional end date filter (inclusive)
         instrument_type_filter: Option<Vec<String>>, // Optional instrument_type filter
+        activity_id_filter: Option<Vec<String>>, // Optional exact activity-id filter
     ) -> Result<ActivitySearchResponse> {
         let date_from_utc = date_from.map(Self::naive_date_start_utc);
         let date_to_utc_exclusive = date_to
@@ -645,6 +693,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
             date_from_utc,
             date_to_utc_exclusive,
             instrument_type_filter,
+            activity_id_filter,
         )
     }
 
@@ -661,6 +710,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
         date_from_utc: Option<DateTime<Utc>>,
         date_to_utc_exclusive: Option<DateTime<Utc>>,
         instrument_type_filter: Option<Vec<String>>,
+        activity_id_filter: Option<Vec<String>>,
     ) -> Result<ActivitySearchResponse> {
         self.search_activities_with_utc_bounds(
             page,
@@ -673,6 +723,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
             date_from_utc,
             date_to_utc_exclusive,
             instrument_type_filter,
+            activity_id_filter,
         )
     }
 
@@ -733,6 +784,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     unit_price,
                     amount,
                     fee,
+                    tax,
                     ..
                 } = existing;
 
@@ -744,6 +796,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 activity_to_update.amount =
                     apply_decimal_patch(amount, activity_update_owned.amount);
                 activity_to_update.fee = apply_decimal_patch(fee, activity_update_owned.fee);
+                activity_to_update.tax = apply_decimal_patch(tax, activity_update_owned.tax);
                 activity_to_update.fx_rate =
                     apply_decimal_patch(fx_rate, activity_update_owned.fx_rate);
                 // Preserve source identity fields
@@ -796,6 +849,12 @@ impl ActivityRepositoryTrait for ActivityRepository {
                         .set(&activity_to_update)
                         .get_result::<ActivityDB>(tx.conn())
                         .map_err(StorageError::from)?;
+                if activity_update_invalidates_spending_splits(
+                    &existing_before_update,
+                    &updated_activity,
+                ) {
+                    clear_spending_splits_for_activity_tx(tx, &updated_activity.id)?;
+                }
                 queue_activity_update_outbox(
                     tx,
                     &existing_before_update,
@@ -1137,6 +1196,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                         unit_price,
                         amount,
                         fee,
+                        tax,
                         fx_rate,
                         ..
                     } = existing;
@@ -1147,6 +1207,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                         apply_decimal_patch(unit_price, update_owned.unit_price);
                     activity_db.amount = apply_decimal_patch(amount, update_owned.amount);
                     activity_db.fee = apply_decimal_patch(fee, update_owned.fee);
+                    activity_db.tax = apply_decimal_patch(tax, update_owned.tax);
                     activity_db.fx_rate = apply_decimal_patch(fx_rate, update_owned.fx_rate);
                     if activity_db.source_system.is_none() {
                         activity_db.source_system = source_system;
@@ -1522,9 +1583,9 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     .map_err(StorageError::from)?;
 
                 let now = Utc::now().naive_utc();
-                // Preserve the existing row id so the sync entity_id stays stable across
+                // Preserve the existing row id so the sync subject_id stays stable across
                 // updates. Generating a new UUID on every upsert would cause the outbox to
-                // emit a different entity_id than the row that already lives on remote devices,
+                // emit a different subject_id than the row that already lives on remote devices,
                 // making their replay INSERT collide on UNIQUE(account_id, context_kind, source_system).
                 let existing_link_id = existing_link.as_ref().map(|l| l.id.clone());
                 let account_local_id = if mapping.context_kind == import_type::HOLDINGS {
@@ -1611,7 +1672,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
             .exec_tx(move |tx| -> Result<()> {
                 use chrono::Utc;
                 let now = Utc::now().naive_utc();
-                // Reuse the existing row id to keep the sync entity_id stable across updates.
+                // Reuse the existing row id to keep the sync subject_id stable across updates.
                 let existing_id: Option<String> = import_account_templates::table
                     .filter(import_account_templates::account_id.eq(&account_id))
                     .filter(import_account_templates::context_kind.eq(&context_kind))
@@ -2495,6 +2556,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                             activities::unit_price.eq(excluded(activities::unit_price)),
                             activities::currency.eq(excluded(activities::currency)),
                             activities::fee.eq(excluded(activities::fee)),
+                            activities::tax.eq(excluded(activities::tax)),
                             activities::amount.eq(excluded(activities::amount)),
                             activities::status.eq(excluded(activities::status)),
                             activities::notes.eq(excluded(activities::notes)),
@@ -2653,7 +2715,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
 mod tests {
     use super::*;
     use crate::db::{create_pool, get_connection, init, run_migrations, write_actor::spawn_writer};
-    use crate::schema::sync_outbox;
+    use crate::schema::{spending_activity_splits, sync_outbox};
     use rust_decimal::Decimal;
     use tempfile::tempdir;
     use wealthfolio_core::activities::{import_type, ActivityStatus, ActivityUpsert};
@@ -2841,6 +2903,7 @@ mod tests {
             unit_price: None,
             amount: Some("100".to_string()),
             fee: Some("0".to_string()),
+            tax: None,
             currency: currency.to_string(),
             fx_rate: None,
             notes: None,
@@ -2921,6 +2984,7 @@ mod tests {
             unit_price: None,
             currency: "USD".to_string(),
             fee: None,
+            tax: None,
             amount: None,
             status: Some(ActivityStatus::Posted),
             notes: Some("User note".to_string()),
@@ -3025,11 +3089,32 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("search by effective type");
         assert_eq!(filtered.data.len(), 1);
         assert_eq!(filtered.data[0].id, "broker-buy-override");
         assert_eq!(filtered.data[0].activity_type, "SELL");
+
+        // Server-side filter by exact activity id returns just that activity,
+        // regardless of other rows or paging.
+        let by_id = repo
+            .search_activities(
+                0,
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(vec!["broker-dividend".to_string()]),
+            )
+            .expect("search by activity id");
+        assert_eq!(by_id.data.len(), 1);
+        assert_eq!(by_id.data[0].id, "broker-dividend");
 
         let sorted = repo
             .search_activities(
@@ -3042,6 +3127,7 @@ mod tests {
                     id: "activityType".to_string(),
                     desc: false,
                 }),
+                None,
                 None,
                 None,
                 None,
@@ -3062,6 +3148,7 @@ mod tests {
                 None,
                 None,
                 Some("InternalSecurityTransfer".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -3125,6 +3212,7 @@ mod tests {
                 Some(date_from_utc),
                 Some(date_to_utc_exclusive),
                 None,
+                None,
             )
             .expect("search by utc range");
 
@@ -3166,6 +3254,7 @@ mod tests {
             unit_price: None,
             currency: "USD".to_string(),
             fee: None,
+            tax: None,
             amount: None,
             status: Some(ActivityStatus::Posted),
             notes: Some("New note".to_string()),
@@ -3200,6 +3289,7 @@ mod tests {
             unit_price: None,
             currency: "USD".to_string(),
             fee: None,
+            tax: None,
             amount: None,
             status: Some(ActivityStatus::Posted),
             notes: Some("New note".to_string()),
@@ -3251,6 +3341,7 @@ mod tests {
             unit_price: None,
             currency: "USD".to_string(),
             fee: None,
+            tax: None,
             amount: Some(Some(Decimal::new(6000, 2))),
             status: Some(ActivityStatus::Posted),
             notes: Some("Broker note".to_string()),
@@ -3294,6 +3385,7 @@ mod tests {
             unit_price: Some("100".to_string()),
             amount: Some("100".to_string()),
             fee: Some("0".to_string()),
+            tax: None,
             currency: "USD".to_string(),
             fx_rate: None,
             notes: None,
@@ -3313,6 +3405,18 @@ mod tests {
             .values(&activity)
             .execute(conn)
             .expect("insert activity with subtype");
+    }
+
+    fn insert_spending_split(conn: &mut SqliteConnection, id: &str, activity_id: &str) {
+        diesel::sql_query(format!(
+            "INSERT INTO spending_activity_splits \
+             (id, activity_id, taxonomy_id, category_id, amount, note, sort_order, created_at, updated_at) \
+             VALUES ('{}', '{}', 'spending_categories', 'cat_food', '100', NULL, 0, \
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            id, activity_id
+        ))
+        .execute(conn)
+        .expect("insert spending split");
     }
 
     fn activity_metadata(conn: &mut SqliteConnection, id: &str) -> serde_json::Value {
@@ -3466,6 +3570,7 @@ mod tests {
                 unit_price: None,
                 currency: "USD".to_string(),
                 fee: None,
+                tax: None,
                 amount: None,
                 status: None,
                 notes: None,
@@ -3476,6 +3581,55 @@ mod tests {
             .expect("update activity");
 
         assert_eq!(updated.subtype, None);
+    }
+
+    #[tokio::test]
+    async fn update_activity_amount_clears_spending_splits() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account(&mut conn, "acc-splits");
+            insert_activity_with_subtype(
+                &mut conn,
+                "activity-with-splits",
+                "acc-splits",
+                "WITHDRAWAL",
+                None,
+                None,
+            );
+            insert_spending_split(&mut conn, "split-before-edit", "activity-with-splits");
+        }
+
+        repo.update_activity(ActivityUpdate {
+            id: "activity-with-splits".to_string(),
+            account_id: "acc-splits".to_string(),
+            asset: None,
+            activity_type: "WITHDRAWAL".to_string(),
+            subtype: None,
+            activity_date: "2024-01-15T00:00:00+00:00".to_string(),
+            quantity: None,
+            unit_price: None,
+            currency: "USD".to_string(),
+            fee: None,
+            tax: None,
+            amount: Some(Some(Decimal::new(125, 0))),
+            status: None,
+            notes: None,
+            fx_rate: None,
+            metadata: None,
+        })
+        .await
+        .expect("update activity");
+
+        let mut conn = get_connection(&pool).expect("conn");
+        assert_eq!(
+            spending_activity_splits::table
+                .count()
+                .get_result::<i64>(&mut conn)
+                .expect("count splits"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -3526,8 +3680,8 @@ mod tests {
     }
 
     /// Regression: re-linking the same (account_id, context_kind, source_system) must preserve the row `id`
-    /// so that sync outbox events keep a stable entity_id across updates. Generating a new UUID
-    /// on every upsert causes remote devices to receive a different entity_id and fail with a
+    /// so that sync outbox events keep a stable subject_id across updates. Generating a new UUID
+    /// on every upsert causes remote devices to receive a different subject_id and fail with a
     /// UNIQUE(account_id, context_kind, source_system) constraint error on replay.
     #[tokio::test]
     async fn relink_preserves_row_id() {
@@ -3566,7 +3720,7 @@ mod tests {
         // id must be stable — changing the linked template must not rotate the sync identity
         assert_eq!(
             id_after_first, id_after_relink,
-            "row id changed on relink; sync entity_id would diverge from remote devices"
+            "row id changed on relink; sync subject_id would diverge from remote devices"
         );
 
         // template_id must have been updated
@@ -3769,6 +3923,7 @@ mod tests {
                 unit_price: Some(None),
                 currency: "USD".to_string(),
                 fee: Some(None),
+                tax: None,
                 amount: Some(Some(Decimal::new(100, 0))),
                 status: Some(ActivityStatus::Posted),
                 notes: None,
@@ -4263,6 +4418,7 @@ mod tests {
             unit_price: Some(Decimal::from(100)),
             currency: "USD".to_string(),
             fee: Some(Decimal::ZERO),
+            tax: None,
             amount: Some(Decimal::from(100)),
             status: None,
             notes: Some("first import".to_string()),
@@ -4287,6 +4443,7 @@ mod tests {
             unit_price: Some(Decimal::from(101)),
             currency: "USD".to_string(),
             fee: Some(Decimal::ZERO),
+            tax: None,
             amount: Some(Decimal::from(101)),
             status: None,
             notes: Some("updated import".to_string()),
@@ -4371,6 +4528,7 @@ mod tests {
             unit_price: Some(Decimal::from(100)),
             currency: "USD".to_string(),
             fee: Some(Decimal::ZERO),
+            tax: None,
             amount: Some(Decimal::from(100)),
             status: None,
             notes: Some("first import".to_string()),
@@ -4395,6 +4553,7 @@ mod tests {
             unit_price: Some(Decimal::from(101)),
             currency: "USD".to_string(),
             fee: Some(Decimal::ZERO),
+            tax: None,
             amount: Some(Decimal::from(101)),
             status: None,
             notes: Some("updated import".to_string()),

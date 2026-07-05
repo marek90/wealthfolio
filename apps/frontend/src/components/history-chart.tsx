@@ -5,6 +5,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay } from "@wealthfolio/ui";
 import { useId, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Area, AreaChart, Brush, ReferenceArea, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
 import {
@@ -65,6 +66,7 @@ const CustomTooltip = ({
   isBalanceHidden,
   isChartHovered,
 }: CustomTooltipProps) => {
+  const { t } = useTranslation();
   if (!active || !payload?.length) {
     return null;
   }
@@ -95,7 +97,9 @@ const CustomTooltip = ({
       <div className="flex items-center justify-between space-x-2">
         <div className="flex items-center space-x-1.5">
           <span className="block h-0.5 w-3" style={{ backgroundColor: tooltipColor }} />
-          <span className="text-muted-foreground text-xs">Total Value:</span>
+          <span className="text-muted-foreground text-xs">
+            {t("common:component.total_value_label")}
+          </span>
         </div>
         <AmountDisplay
           value={tvPayload.totalValue}
@@ -111,7 +115,9 @@ const CustomTooltip = ({
               className="block h-0 w-3 border-b-2 border-dashed"
               style={{ borderColor: "var(--muted-foreground)" }}
             />
-            <span className="text-muted-foreground text-xs">Net Deposit:</span>
+            <span className="text-muted-foreground text-xs">
+              {t("common:component.net_deposit_label")}
+            </span>
           </div>
           <AmountDisplay
             value={netContributionPayload.netContribution}
@@ -136,6 +142,7 @@ export function HistoryChart({
   minDomainSpanRatio,
   onVisibleRangeChange,
 }: HistoryChartProps) {
+  const { t } = useTranslation();
   const { triggerHaptic } = useHapticFeedback();
   const { isBalanceHidden } = useBalancePrivacy();
   const [isChartHovered, setIsChartHovered] = useState(false);
@@ -182,10 +189,10 @@ export function HistoryChart({
 
   const chartConfig = {
     totalValue: {
-      label: "Total Value",
+      label: t("common:component.total_value"),
     },
     netContribution: {
-      label: "Net Contribution",
+      label: t("common:component.net_contribution"),
     },
   } satisfies ChartConfig;
 

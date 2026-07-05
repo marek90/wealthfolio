@@ -7,6 +7,7 @@ import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { AnimatePresence, motion } from "motion/react";
 import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Navigate } from "react-router-dom";
 import { OnboardingAppearance, OnboardingAppearanceHandle } from "./onboarding-appearance";
 import { OnboardingConnect } from "./onboarding-connect";
@@ -17,6 +18,7 @@ const DESKTOP_MAX_STEPS = 4;
 const MOBILE_MAX_STEPS = 3;
 
 const OnboardingPage = () => {
+  const { t } = useTranslation();
   const {
     data: settings,
     error: settingsError,
@@ -68,7 +70,10 @@ const OnboardingPage = () => {
   };
 
   return (
-    <div className="bg-background flex h-screen flex-col pt-[env(safe-area-inset-top)]">
+    <div
+      data-testid="onboarding-page"
+      className="bg-background flex h-screen flex-col pt-[env(safe-area-inset-top)]"
+    >
       {/* Fixed Header with Logo and Steppers */}
       <header className="flex-none px-4 pt-8 sm:px-6 sm:pt-12">
         <div className="flex flex-col items-center">
@@ -136,7 +141,7 @@ const OnboardingPage = () => {
               <div className="order-2 sm:order-1">
                 <Button variant="ghost" onClick={handleBack} size="sm">
                   <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
-                  Back
+                  {t("common:back")}
                 </Button>
               </div>
               <div className="order-1 flex flex-col gap-2 sm:order-2 sm:flex-row sm:gap-3">
@@ -147,7 +152,7 @@ const OnboardingPage = () => {
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Subscribe & Connect
+                      {t("onboarding:buttons.subscribeConnect")}
                       <Icons.ExternalLink className="ml-1.5 h-4 w-4" />
                     </a>
                   </Button>
@@ -157,7 +162,7 @@ const OnboardingPage = () => {
                   className="from-primary to-primary/90 bg-linear-to-r order-1 sm:order-2"
                   onClick={() => updateSettings({ onboardingCompleted: true })}
                 >
-                  Get Started
+                  {t("onboarding:buttons.getStarted")}
                   <Icons.ArrowRight className="ml-1.5 h-4 w-4" />
                 </Button>
               </div>
@@ -168,16 +173,17 @@ const OnboardingPage = () => {
                 {currentStep > 1 && (
                   <Button variant="ghost" onClick={handleBack} size="sm">
                     <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
-                    Back
+                    {t("common:back")}
                   </Button>
                 )}
               </div>
               <Button
+                data-testid="onboarding-continue-button"
                 onClick={handleContinue}
                 disabled={!isStepValid}
                 className="from-primary to-primary/90 bg-linear-to-r"
               >
-                Continue
+                {t("onboarding:buttons.continue")}
                 <Icons.ArrowRight className="ml-1.5 h-4 w-4" />
               </Button>
             </div>

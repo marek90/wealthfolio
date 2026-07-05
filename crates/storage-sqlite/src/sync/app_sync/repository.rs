@@ -932,11 +932,13 @@ fn entity_storage_mapping(entity: &SyncEntity) -> Option<(&'static str, &'static
         SyncEntity::PortfolioAccount => Some(("portfolio_accounts", "id")),
         SyncEntity::AllocationTarget => Some(("allocation_targets", "id")),
         SyncEntity::AllocationTargetWeight => Some(("allocation_target_weights", "id")),
+        SyncEntity::AllocationTargetConstraint => Some(("allocation_target_constraints", "id")),
         SyncEntity::SpendingSetting => Some(("app_settings", "setting_key")),
         // CustomTaxonomy uses bundle replay — handled by custom branch in apply_remote_event_lww_tx
         SyncEntity::CustomTaxonomy => None,
         // Spending module entities
         SyncEntity::ActivityTaxonomyAssignment => Some(("activity_taxonomy_assignments", "id")),
+        SyncEntity::SpendingActivitySplit => Some(("spending_activity_splits", "id")),
         SyncEntity::SpendingActivityEvent => Some(("spending_activity_events", "activity_id")),
         SyncEntity::SpendingCategorizationRule => Some(("spending_categorization_rules", "id")),
         // Composite primary key; handled by custom branch in apply_remote_event_lww_tx.
@@ -3700,6 +3702,7 @@ mod tests {
                 unit_price: Some(Decimal::new(5, 0)),
                 currency: "USD".to_string(),
                 fee: Some(Decimal::new(1, 0)),
+                tax: None,
                 amount: Some(Decimal::new(50, 0)),
                 status: None,
                 notes: Some("Broker note".to_string()),
@@ -6155,6 +6158,7 @@ mod tests {
             SyncEntity::Snapshot,
             SyncEntity::AllocationTarget,
             SyncEntity::AllocationTargetWeight,
+            SyncEntity::AllocationTargetConstraint,
         ];
 
         for entity in entities {

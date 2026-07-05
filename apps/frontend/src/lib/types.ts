@@ -105,6 +105,7 @@ export interface ActivityLegacy {
   unitPrice: number;
   currency: string;
   fee: number;
+  tax?: number;
   isDraft: boolean;
   comment?: string | null;
   accountId?: string | null;
@@ -139,6 +140,7 @@ export interface Activity {
   unitPrice?: string | null;
   amount?: string | null;
   fee?: string | null;
+  tax?: string | null;
   currency: string;
   fxRate?: string | null;
 
@@ -208,6 +210,7 @@ export interface ActivityDetails {
   unitPrice: string | null;
   amount: string | null;
   fee: string | null;
+  tax?: string | null;
   currency: string;
   needsReview: boolean;
   comment?: string;
@@ -285,6 +288,7 @@ export interface ActivityCreate {
   amount?: string | number | null;
   currency?: string;
   fee?: string | number | null;
+  tax?: string | number | null;
   comment?: string | null;
   fxRate?: string | number | null;
   metadata?: string | Record<string, unknown>; // Metadata (serialized to JSON string before sending)
@@ -309,6 +313,7 @@ export interface ActivityUpdate {
   amount?: string | number | null;
   currency?: string;
   fee?: string | number | null;
+  tax?: string | number | null;
   comment?: string | null;
   fxRate?: string | number | null;
   metadata?: string | Record<string, unknown>; // Metadata (serialized to JSON string before sending)
@@ -645,6 +650,9 @@ export interface AssetLotView {
   accountName: string;
   assetId: string;
   source: AssetLotSource;
+  currency: string;
+  baseCurrency?: string | null;
+  valuationCurrency: string;
   quantity: number;
   originalQuantity: number;
   remainingQuantity: number;
@@ -652,6 +660,10 @@ export interface AssetLotView {
   costBasisBase?: number | null;
   unitCost: number;
   fees: number;
+  taxes: number;
+  taxesBase?: number | null;
+  valuationUnitCost?: number | null;
+  valuationCostBasis?: number | null;
   fxRateToBase?: number | null;
   splitRatio: number;
   contractMultiplier: number;
@@ -664,6 +676,8 @@ export interface AssetLotView {
   disposalCostBasisBase?: number | null;
   realizedPnl?: number | null;
   realizedPnlBase?: number | null;
+  valuationDisposalCostBasis?: number | null;
+  valuationRealizedPnl?: number | null;
 }
 
 export interface Position {
@@ -773,6 +787,8 @@ export interface Asset {
   // Valuation
   quoteMode: "MARKET" | "MANUAL";
   quoteCcy: string; // Currency prices/valuations are quoted in
+  valuationMarketPrice?: number | null;
+  valuationMarketCurrency?: string | null;
 
   // Instrument identity (null for non-market assets)
   instrumentType?: string | null; // EQUITY, CRYPTO, FX, OPTION, METAL
@@ -834,6 +850,7 @@ export interface QuoteUpdate {
 export interface Settings {
   theme: string;
   font: string;
+  language: string;
   baseCurrency: string;
   defaultReturnMetric: "twr" | "irr" | "valueReturn";
   timezone: string;
@@ -2141,7 +2158,8 @@ export interface NavigateAction {
 export interface FixAction {
   id: string;
   label: string;
-  payload: Record<string, unknown>;
+  /** Arbitrary JSON payload (e.g. an array of asset IDs); shape varies by action id. */
+  payload: unknown;
 }
 
 /**
@@ -2155,6 +2173,78 @@ export interface AffectedItem {
 }
 
 /**
+ * A single supporting-evidence row for a diagnostic.
+ */
+export interface Evidence {
+  label: string;
+  value: string;
+  route?: string;
+}
+
+/**
+ * An ordered remediation action attached to a diagnostic.
+ *
+ * Serialized flat with a `kind` discriminator: `fix` carries the {@link FixAction}
+ * fields (id/label/payload); `navigate` carries the {@link NavigateAction} fields
+ * (route/query/label).
+ */
+export type DiagnosticAction = { primary: boolean } & (
+  | ({ kind: "fix" } & FixAction)
+  | ({ kind: "navigate" } & NavigateAction)
+);
+
+export type DiagnosticDomain =
+  | "unknown"
+  | "accountSetup"
+  | "ledger"
+  | "marketData"
+  | "fx"
+  | "classification"
+  | "generatedData"
+  | "performanceInputs";
+
+export type DiagnosticLevel = "source" | "generated" | "workflow";
+
+export interface HealthImpact {
+  affectedCount?: number;
+  affectedMvPct?: number;
+  amount?: number;
+  currency?: string;
+  description?: string;
+}
+
+export interface HealthEntityRef {
+  kind: string;
+  id: string;
+  label?: string;
+  route?: string;
+}
+
+export interface HealthDateRange {
+  start: string;
+  end: string;
+}
+
+/**
+ * A structured diagnostic: root cause, supporting evidence, and ordered actions.
+ */
+export interface HealthDiagnostic {
+  fingerprint: string;
+  domain: DiagnosticDomain;
+  level: DiagnosticLevel;
+  severity: HealthSeverity;
+  code: string;
+  title: string;
+  explanation: string;
+  impact?: HealthImpact;
+  entities: HealthEntityRef[];
+  date?: string;
+  dateRange?: HealthDateRange;
+  evidence: Evidence[];
+  actions: DiagnosticAction[];
+}
+
+/**
  * A single health issue detected by the health center.
  */
 export interface HealthIssue {
@@ -2163,12 +2253,17 @@ export interface HealthIssue {
   category: HealthCategory;
   title: string;
   message: string;
+  /** Stable message code; when present the frontend renders health:issues.<code>.* */
+  code?: string;
+  /** Interpolation params for the translated title/message (count, symbol, dates, …). */
+  params?: Record<string, unknown>;
   affectedCount: number;
   affectedMvPct?: number;
   fixAction?: FixAction;
   navigateAction?: NavigateAction;
   details?: string;
   affectedItems?: AffectedItem[];
+  diagnostics?: HealthDiagnostic[];
   dataHash: string;
   timestamp: string;
 }
@@ -2452,6 +2547,7 @@ export interface AllocationTarget {
   minTradeAmount: string;
   wholeSharesOnly: boolean;
   allowSells: boolean;
+  maxTurnoverBps?: number | null;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -2470,6 +2566,7 @@ export interface NewAllocationTarget {
   minTradeAmount?: string;
   wholeSharesOnly?: boolean;
   allowSells?: boolean;
+  maxTurnoverBps?: number | null;
 }
 
 export interface AllocationTargetWeight {
@@ -2494,6 +2591,23 @@ export interface NewAllocationTargetWeight {
 export interface SaveAllocationTargetResult {
   target: AllocationTarget;
   weights: AllocationTargetWeight[];
+}
+
+export type ConstraintSubjectType = "asset" | "account" | "category";
+export type ConstraintAction = "buy" | "sell" | "trade";
+export type ConstraintEffect = "block" | "avoid";
+
+export interface AllocationTargetConstraint {
+  id: string;
+  targetId: string;
+  subjectType: ConstraintSubjectType;
+  subjectId: string;
+  action: ConstraintAction;
+  effect: ConstraintEffect;
+  reason?: string | null;
+  metadataJson?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DriftRow {
@@ -2557,7 +2671,9 @@ export type RebalanceWarningKind =
   | "no_buy_candidate"
   | "tagged_cash"
   | "unclassified_asset"
-  | "partial_classification";
+  | "partial_classification"
+  | "constraint_skipped_sell"
+  | "turnover_cap_reached";
 
 export interface RebalanceWarning {
   kind: RebalanceWarningKind;
@@ -2570,6 +2686,8 @@ export interface SuggestedManualTrade {
   categoryId: string;
   categoryName: string;
   assetId?: string | null;
+  accountId?: string | null;
+  holdingId?: string | null;
   symbol?: string | null;
   name?: string | null;
   quantity?: number | null;

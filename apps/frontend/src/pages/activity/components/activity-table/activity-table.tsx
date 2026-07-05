@@ -29,7 +29,7 @@ import {
   isSplitActivity,
   formatSplitRatio,
 } from "@/lib/activity-utils";
-import { ActivityType, getExchangeDisplayName } from "@/lib/constants";
+import { ActivityType, SUBTYPE_DISPLAY_NAMES, getExchangeDisplayName } from "@/lib/constants";
 import { ActivityDetails } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 import { useSettingsContext } from "@/lib/settings-provider";
@@ -45,6 +45,7 @@ import {
 } from "@tanstack/react-table";
 import { Button, EmptyPlaceholder, formatAmount } from "@wealthfolio/ui";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useActivityMutations } from "../../hooks/use-activity-mutations";
 import { ActivityOperations } from "../activity-operations";
 import { ActivityTypeBadge } from "../activity-type-badge";
@@ -76,6 +77,7 @@ export const ActivityTable = ({
   onAdd,
   onClearFilters,
 }: ActivityTableProps) => {
+  const { t } = useTranslation();
   const { duplicateActivityMutation } = useActivityMutations();
   const { settings } = useSettingsContext();
   const appTimezone = settings?.timezone?.trim() || undefined;
@@ -118,16 +120,29 @@ export const ActivityTable = ({
         id: "activityType",
         accessorKey: "activityType",
         enableHiding: false,
-        header: ({ column }) => <DataTableColumnHeader column={column} title="Type" />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("activity:table_type")} />
+        ),
         cell: ({ row }) => {
           const activityType = row.getValue("activityType");
+          const normalizedActivityType = String(activityType).trim().toUpperCase();
+          const normalizedSubtype = row.original.subtype?.trim().toUpperCase();
+          const subtypeLabel =
+            normalizedSubtype && normalizedSubtype !== normalizedActivityType
+              ? (SUBTYPE_DISPLAY_NAMES[normalizedSubtype] ?? row.original.subtype)
+              : undefined;
+
           return (
-            <div className="flex items-center text-sm">
+            <div className="flex min-w-0 max-w-[160px] flex-col items-start gap-1 text-sm">
               <ActivityTypeBadge
                 type={activityType as ActivityType}
-                subtype={row.original.subtype}
                 className="whitespace-nowrap text-xs font-normal"
               />
+              {subtypeLabel && (
+                <span className="text-muted-foreground max-w-full truncate text-xs font-light">
+                  {subtypeLabel}
+                </span>
+              )}
             </div>
           );
         },
@@ -144,7 +159,9 @@ export const ActivityTable = ({
         id: "date",
         accessorKey: "date",
         enableHiding: false,
-        header: ({ column }) => <DataTableColumnHeader column={column} title="Date" />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("activity:table_date")} />
+        ),
         cell: ({ row }) => {
           const dateVal = row.getValue("date");
           const formattedDate =
@@ -162,7 +179,9 @@ export const ActivityTable = ({
       {
         id: "assetSymbol",
         accessorKey: "assetSymbol",
-        header: ({ column }) => <DataTableColumnHeader column={column} title="Symbol" />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("activity:table_symbol")} />
+        ),
         cell: ({ row }) => {
           const symbol = String(row.getValue("assetSymbol"));
           const assetId = row.original.assetId;
@@ -184,7 +203,7 @@ export const ActivityTable = ({
           // (e.g., "AMAZON*MARKETPLACE" instead of just "Cash").
           const cashPayee = isCash ? (row.original.comment ?? "").trim() : "";
           const displaySymbol = isCash
-            ? cashPayee || "Cash"
+            ? cashPayee || t("activity:table.cash")
             : parsedOption
               ? parsedOption.underlying
               : symbol;
@@ -219,7 +238,7 @@ export const ActivityTable = ({
                 <span className="text-muted-foreground truncate text-xs font-light">
                   {isCash
                     ? cashPayee
-                      ? `Cash · ${String(currency)}`
+                      ? `${t("activity:table.cash")} · ${String(currency)}`
                       : String(currency)
                     : (optionSubtitle ?? String(assetName ?? currency))}
                 </span>
@@ -244,13 +263,13 @@ export const ActivityTable = ({
         enableHiding: true,
         enableSorting: false,
         meta: {
-          label: "Quantity",
+          label: t("activity:table_quantity"),
         },
         header: ({ column }) => (
           <DataTableColumnHeader
             className="justify-end text-right"
             column={column}
-            title="Quantity"
+            title={t("activity:table_quantity")}
           />
         ),
         cell: ({ row }) => {
@@ -298,13 +317,13 @@ export const ActivityTable = ({
         enableSorting: false,
         enableHiding: true,
         meta: {
-          label: "Price / Amount",
+          label: t("activity:table_price_amount"),
         },
         header: ({ column }) => (
           <DataTableColumnHeader
             className="justify-end text-right"
             column={column}
-            title="Price/Amount"
+            title={t("activity:table_price_amount")}
           />
         ),
         cell: ({ row }) => {
@@ -348,10 +367,14 @@ export const ActivityTable = ({
         enableHiding: true,
         enableSorting: false,
         meta: {
-          label: "Fee",
+          label: t("activity:table_fee"),
         },
         header: ({ column }) => (
-          <DataTableColumnHeader className="justify-end text-right" column={column} title="Fee" />
+          <DataTableColumnHeader
+            className="justify-end text-right"
+            column={column}
+            title={t("activity:table_fee")}
+          />
         ),
         cell: ({ row }) => {
           const activityType = String(row.getValue("activityType"));
@@ -370,15 +393,50 @@ export const ActivityTable = ({
         },
       },
       {
+        id: "tax",
+        accessorKey: "tax",
+        enableHiding: true,
+        enableSorting: false,
+        meta: {
+          label: t("activity:table.tax"),
+        },
+        header: ({ column }) => (
+          <DataTableColumnHeader
+            className="justify-end text-right"
+            column={column}
+            title={t("activity:table.tax")}
+          />
+        ),
+        cell: ({ row }) => {
+          const activityType = String(row.getValue("activityType"));
+          const tax = Number(row.getValue("tax") ?? 0);
+          const currencyVal = row.getValue("currency");
+          const currency =
+            typeof currencyVal === "string" && currencyVal
+              ? currencyVal
+              : row.original.accountCurrency || "USD";
+
+          return (
+            <div className="text-right">
+              {activityType === "SPLIT" ? "-" : formatAmount(tax, currency)}
+            </div>
+          );
+        },
+      },
+      {
         id: "value",
         accessorKey: "value",
         enableSorting: false,
         enableHiding: true,
         meta: {
-          label: "Total",
+          label: t("activity:table_total"),
         },
         header: ({ column }) => (
-          <DataTableColumnHeader className="justify-end text-right" column={column} title="Total" />
+          <DataTableColumnHeader
+            className="justify-end text-right"
+            column={column}
+            title={t("activity:table_total")}
+          />
         ),
         cell: ({ row }) => {
           const activity = row.original;
@@ -399,9 +457,11 @@ export const ActivityTable = ({
         enableSorting: false,
         enableHiding: true,
         meta: {
-          label: "Account",
+          label: t("activity:table_account"),
         },
-        header: ({ column }) => <DataTableColumnHeader column={column} title="Account" />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("activity:table_account")} />
+        ),
         cell: ({ row }) => {
           const accountName = row.getValue("account");
           const accountCurrency = row.getValue("accountCurrency");
@@ -421,9 +481,11 @@ export const ActivityTable = ({
         enableSorting: false,
         enableHiding: true,
         meta: {
-          label: "Currency",
+          label: t("activity:table_currency"),
         },
-        header: ({ column }) => <DataTableColumnHeader column={column} title="Currency" />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("activity:table_currency")} />
+        ),
         cell: ({ row }) => <div>{row.getValue("currency")}</div>,
       },
       {
@@ -461,7 +523,7 @@ export const ActivityTable = ({
                     variant="outline"
                     size="icon"
                     className="h-8 w-8 rounded-lg"
-                    title="Toggle columns"
+                    title={t("activity:table_toggle_columns")}
                   >
                     <Icons.ChevronDown className="h-4 w-4" />
                   </Button>
@@ -501,12 +563,14 @@ export const ActivityTable = ({
       },
     ],
     [
+      appTimezone,
       handleEdit,
       handleDelete,
       handleDuplicate,
       onLinkTransfer,
       onUnlinkTransfer,
       symbolExchangeCountMap,
+      t,
     ],
   );
 
@@ -537,7 +601,7 @@ export const ActivityTable = ({
   if (isLoading) {
     return (
       <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-        Loading...
+        {t("activity:table.loading")}
       </div>
     );
   }
@@ -549,22 +613,22 @@ export const ActivityTable = ({
       <div className="flex h-full flex-col">
         <EmptyPlaceholder>
           <EmptyPlaceholder.Icon name="Activity" />
-          <EmptyPlaceholder.Title>No activities</EmptyPlaceholder.Title>
+          <EmptyPlaceholder.Title>{t("activity:table.no_activities")}</EmptyPlaceholder.Title>
           <EmptyPlaceholder.Description>
             {filtersActive
-              ? "No activities match your filters."
-              : "Add your first activity to get started."}
+              ? t("activity:table.no_activities_filtered")
+              : t("activity:table.no_activities_desc")}
           </EmptyPlaceholder.Description>
           {filtersActive ? (
             onClearFilters ? (
               <Button variant="outline" onClick={onClearFilters}>
-                Clear filters
+                {t("activity:table.clear_filters")}
               </Button>
             ) : null
           ) : onAdd ? (
             <Button onClick={onAdd}>
               <Icons.Plus className="mr-2 h-4 w-4" aria-hidden="true" />
-              Add Activity
+              {t("activity:add_activity")}
             </Button>
           ) : null}
         </EmptyPlaceholder>

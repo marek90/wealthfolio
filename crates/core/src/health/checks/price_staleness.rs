@@ -9,7 +9,10 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use std::collections::HashMap;
 
 use crate::errors::Result;
-use crate::health::model::{AffectedItem, FixAction, HealthCategory, HealthIssue, Severity};
+use crate::health::model::{
+    AffectedItem, DiagnosticDomain, Evidence, FixAction, HealthCategory, HealthDiagnostic,
+    HealthEntityRef, HealthIssue, NavigateAction, Severity,
+};
 use crate::health::traits::{HealthCheck, HealthContext};
 use crate::utils::time_utils;
 
@@ -134,6 +137,9 @@ impl PriceStalenessCheck {
                     .id(format!("manual_valuation:missing:{data_hash}"))
                     .severity(Severity::Warning)
                     .category(HealthCategory::PriceStaleness)
+                    .code("price_manual_valuation_missing")
+                    .param("count", count as u32)
+                    .param("symbol", manual_without_value[0].symbol.clone())
                     .title(title)
                     .message(
                         "Manual/custom holdings need a manual valuation before they can be included as valued performance positions.",
@@ -141,6 +147,14 @@ impl PriceStalenessCheck {
                     .affected_count(count as u32)
                     .affected_mv_pct(0.0)
                     .affected_items(affected_items)
+                    .diagnostics(vec![price_diagnostic(
+                        &manual_without_value,
+                        latest_quote_times,
+                        "MISSING_MANUAL_VALUATION",
+                        "Missing manual valuation",
+                        "These are manual/custom holdings with no manual valuation entered, so \
+                         their market value can't be determined until you add a price.",
+                    )])
                     .details(details)
                     .data_hash(data_hash)
                     .build(),
@@ -199,17 +213,29 @@ impl PriceStalenessCheck {
                 .filter(|a| !latest_quote_times.contains_key(&a.asset_id))
                 .count();
 
-            let title = if missing_count == count {
+            let (code, title, message): (&str, String, &str) = if missing_count == count {
                 // All assets are missing prices (no quote data at all)
-                if count == 1 {
+                let title = if count == 1 {
                     format!("No market data for {}", error_assets[0].symbol)
                 } else {
                     format!("No market data for {} holdings", count)
-                }
-            } else if count == 1 {
-                "Outdated price for 1 holding".to_string()
+                };
+                (
+                    "price_no_market_data",
+                    title,
+                    "Unable to fetch market data for some holdings. This may be due to invalid symbols or provider issues. Your portfolio value may be inaccurate.",
+                )
             } else {
-                format!("Outdated prices for {} holdings", count)
+                let title = if count == 1 {
+                    "Outdated price for 1 holding".to_string()
+                } else {
+                    format!("Outdated prices for {} holdings", count)
+                };
+                (
+                    "price_stale_outdated",
+                    title,
+                    "Some holdings haven't had prices updated in over 3 days. Your portfolio value may be inaccurate.",
+                )
             };
 
             let asset_ids: Vec<String> = error_assets.iter().map(|a| a.asset_id.clone()).collect();
@@ -224,23 +250,56 @@ impl PriceStalenessCheck {
             // Build details string listing affected assets
             let details = build_asset_details(&error_assets, latest_quote_times);
 
-            let message = if missing_count > 0 {
-                "Unable to fetch market data for some holdings. This may be due to invalid symbols or provider issues. Your portfolio value may be inaccurate."
-            } else {
-                "Some holdings haven't had prices updated in over 3 days. Your portfolio value may be inaccurate."
-            };
+            // Split into "no quote at all" (missing) vs "quote is stale" so each
+            // gets its own root-cause diagnostic.
+            let (missing_assets, stale_assets): (Vec<&AssetHoldingInfo>, Vec<&AssetHoldingInfo>) =
+                error_assets
+                    .iter()
+                    .copied()
+                    .partition(|a| !latest_quote_times.contains_key(&a.asset_id));
+            let mut diagnostics = Vec::new();
+            if !missing_assets.is_empty() {
+                diagnostics.push(price_diagnostic(
+                    &missing_assets,
+                    latest_quote_times,
+                    "MISSING_MARKET_QUOTE",
+                    "No market price",
+                    "These holdings have no market price on record, so their value can't be \
+                     computed. The symbol may be unresolved or the data provider has no data.",
+                ));
+            }
+            if !stale_assets.is_empty() {
+                diagnostics.push(price_diagnostic(
+                    &stale_assets,
+                    latest_quote_times,
+                    "STALE_MARKET_QUOTE",
+                    "Outdated price",
+                    "These prices are several days old, so portfolio value for the affected \
+                     holdings may be inaccurate until they are refreshed.",
+                ));
+            }
 
             issues.push(
                 HealthIssue::builder()
                     .id(format!("price_stale:error:{}", data_hash))
                     .severity(severity)
                     .category(HealthCategory::PriceStaleness)
+                    .code(code)
+                    .param("count", count as u32)
+                    .param(
+                        "symbol",
+                        error_assets
+                            .first()
+                            .map(|a| a.symbol.clone())
+                            .unwrap_or_default(),
+                    )
                     .title(title)
                     .message(message)
                     .affected_count(count as u32)
                     .affected_mv_pct(mv_pct)
                     .affected_items(affected_items)
                     .fix_action(FixAction::sync_prices(asset_ids))
+                    .diagnostics(diagnostics)
                     .details(details)
                     .data_hash(data_hash)
                     .build(),
@@ -287,6 +346,8 @@ impl PriceStalenessCheck {
                     .id(format!("price_stale:warning:{}", data_hash))
                     .severity(severity)
                     .category(HealthCategory::PriceStaleness)
+                    .code("price_update_needed")
+                    .param("count", count as u32)
                     .title(title)
                     .message(
                         "Some holdings haven't had prices updated recently. Consider syncing prices.",
@@ -295,6 +356,14 @@ impl PriceStalenessCheck {
                     .affected_mv_pct(mv_pct)
                     .affected_items(affected_items)
                     .fix_action(FixAction::sync_prices(asset_ids))
+                    .diagnostics(vec![price_diagnostic(
+                        &warning_assets,
+                        latest_quote_times,
+                        "STALE_MARKET_QUOTE",
+                        "Price update needed",
+                        "These prices haven't been refreshed recently; portfolio value for the \
+                         affected holdings may drift until they are synced.",
+                    )])
                     .details(details)
                     .data_hash(data_hash)
                     .build(),
@@ -303,6 +372,76 @@ impl PriceStalenessCheck {
 
         issues
     }
+}
+
+/// Builds a structured diagnostic for a group of price-related holdings: one
+/// evidence row per asset (symbol, quote freshness, market value, deep-link) and
+/// an ordered action ladder (sync → market-data settings → add manual price).
+fn price_diagnostic(
+    assets: &[&AssetHoldingInfo],
+    latest_quote_times: &HashMap<String, DateTime<Utc>>,
+    code: &str,
+    title: &str,
+    explanation: &str,
+) -> HealthDiagnostic {
+    let mut diagnostic =
+        HealthDiagnostic::new(code, title, explanation).domain(DiagnosticDomain::MarketData);
+    for asset in assets {
+        let asset_route = format!(
+            "/holdings/{}?tab=quotes&healthContext=price",
+            urlencoding::encode(&asset.asset_id)
+        );
+        let asset_label = asset
+            .name
+            .as_ref()
+            .map(|name| format!("{} — {name}", asset.symbol))
+            .unwrap_or_else(|| asset.symbol.clone());
+        let quote_state = match latest_quote_times.get(&asset.asset_id) {
+            Some(ts) => format!("last quote {}", ts.format("%Y-%m-%d")),
+            None => "no quote on record".to_string(),
+        };
+        let value = format!(
+            "{} — {} · affects ~{:.0} in base currency",
+            asset.symbol, quote_state, asset.market_value
+        );
+        let label = asset.name.clone().unwrap_or_else(|| asset.symbol.clone());
+        diagnostic = diagnostic
+            .entity(
+                HealthEntityRef::new("asset", asset.asset_id.clone())
+                    .label(asset_label)
+                    .route(asset_route.clone()),
+            )
+            .evidence(Evidence::new(label, value).with_route(asset_route));
+    }
+
+    let asset_ids: Vec<String> = assets.iter().map(|a| a.asset_id.clone()).collect();
+
+    if code == "MISSING_MANUAL_VALUATION" {
+        // Manual holdings: primary is to open the price editor. For a single asset
+        // deep-link straight to its quotes tab; otherwise the market-data screen.
+        if let [single] = assets {
+            diagnostic = diagnostic.navigate(
+                true,
+                NavigateAction::to_asset_manual_quote(single.asset_id.clone()),
+            );
+        } else {
+            diagnostic = diagnostic.navigate(true, NavigateAction::to_market_data());
+        }
+        return diagnostic;
+    }
+
+    // Market-priced holdings: sync first, then settings to fix symbol/provider,
+    // then a manual/import fallback when the provider genuinely can't supply data.
+    diagnostic = diagnostic
+        .fix(true, FixAction::sync_prices(asset_ids))
+        .navigate(false, NavigateAction::to_market_data());
+    if let [single] = assets {
+        diagnostic = diagnostic.navigate(
+            false,
+            NavigateAction::to_asset_manual_quote(single.asset_id.clone()),
+        );
+    }
+    diagnostic
 }
 
 impl Default for PriceStalenessCheck {
