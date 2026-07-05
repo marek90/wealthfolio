@@ -74,57 +74,12 @@ A compact calendar icon bubble that sits inline beside the period pills.
 - Icon-only (no date text on the button) — the selected range shows inside the calendar popover.
 - Ghost button variant, `h-8 w-9 rounded-full p-0` — matches the DateRangeSelector trigger style used elsewhere in the app.
 - `isActive?: boolean` prop — when true, applies `bg-background text-foreground shadow-sm` to replicate the same "white bubble" highlight the period pills use.
-- `numberOfMonths={3}` — shows 3 months in the calendar popover.
-- Uses existing UI primitives from `@wealthfolio/ui/components/ui/{button,calendar,popover,icons}` — no new dependencies.
+- `numberOfMonths={isMobile ? 1 : 3}` via `useIsMobile()` from `@wealthfolio/ui` — 3 stacked months overflow a phone viewport and made the picker unusable on mobile. One month + react-day-picker's default `<` `>` month nav on phones; 3 months on desktop. Same split `DateRangeSelector` (packages/ui) uses.
+- **Draft-range state** — react-day-picker v9 range mode fires `onSelect` with `{from, to: undefined}` on the FIRST tap. Committing that to the parent refetches a degenerate window, the chart empties, and (before the dashboard mount fix, §3.3) the whole controls row incl. the open popover unmounted. The in-progress selection is therefore held in local `draft` state; `onChange` fires only when both `from` and `to` are set. Opening/closing the popover discards the draft and reseeds from `value`.
+- PopoverContent gets `max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] overflow-y-auto` (copied from DateRangeSelector's desktop branch) so the calendar can never overflow the viewport again.
+- Uses existing UI primitives from `@wealthfolio/ui` — no new dependencies.
 
-**Full file:**
-```tsx
-import type { DateRange } from "@/lib/types";
-import { cn } from "@/lib/utils";
-import { Button } from "@wealthfolio/ui/components/ui/button";
-import { Calendar } from "@wealthfolio/ui/components/ui/calendar";
-import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { Popover, PopoverContent, PopoverTrigger } from "@wealthfolio/ui/components/ui/popover";
-import type { DateRange as DayPickerDateRange } from "react-day-picker";
-
-interface ChartRangePickerProps {
-  value: DateRange | undefined;
-  onChange: (range: DateRange | undefined) => void;
-  isActive?: boolean;
-  className?: string;
-}
-
-export function ChartRangePicker({ value, onChange, isActive, className }: ChartRangePickerProps) {
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "h-8 w-9 rounded-full p-0",
-            isActive && "bg-background text-foreground shadow-sm",
-            className,
-          )}
-          aria-label="Choose custom date range"
-        >
-          <Icons.Calendar className="h-4 w-4" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className="w-auto p-0" align="center">
-        <Calendar
-          mode="range"
-          defaultMonth={value?.from}
-          selected={value as DayPickerDateRange | undefined}
-          onSelect={(range: DayPickerDateRange | undefined) => onChange(range as DateRange | undefined)}
-          numberOfMonths={3}
-        />
-      </PopoverContent>
-    </Popover>
-  );
-}
-```
+**Full file:** see `apps/frontend/src/components/chart-range-picker.tsx` (kept in-repo; the listing previously embedded here went stale after the v3.6.0-era calendar fixes — the file itself is the source of truth).
 
 ---
 
@@ -418,17 +373,24 @@ const handleIntervalSelect = (code, description, range) => {
 
 ```tsx
 const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
-  setDateRange({ from: range?.from, to: range?.to });
+  if (!range?.from || !range?.to) return; // never let a half-open range trigger a refetch
+  setDateRange({ from: range.from, to: range.to });
   setIsAllTime(false);
   setBrushDisplayRange(undefined);
-  setIsCustomRangeActive(!!(range?.from && range?.to));
-  if (range?.from && range?.to) {
-    setSelectedIntervalDescription(
-      `${format(range.from, "MMM d, yyyy")} - ${format(range.to, "MMM d, yyyy")}`,
-    );
-  }
+  setIsCustomRangeActive(true);
 };
 ```
+
+(v3.6.0 note: upstream deleted `selectedIntervalDescription`; the period label is now derived at render time — priority `brushDisplayRange` → custom range from `dateRange` when `isCustomRangeActive` → `t(\`ui:interval.${selectedInterval}\`)`.)
+
+#### Controls row is NOT gated on `chartData.length`
+
+```tsx
+{valuationHistory && (   // deliberately not `&& chartData.length > 0`
+  <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
+```
+
+If a picked range legitimately returns no points, the pills + calendar must stay mounted or the user has no way to recover (this was the "calendar tap makes everything vanish" bug).
 
 #### Chart controls layout (inline row)
 
@@ -464,11 +426,11 @@ const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) 
 #### Chart container height
 
 ```tsx
-<div className="h-[320px]">
+<div className="h-80">
   <HistoryChart ... />
 ```
 
-Increased from `h-[280px]` to `h-[320px]` to make room for the brush bar at the bottom.
+Increased from upstream's `h-70` (280px) to `h-80` (320px) to make room for the brush bar at the bottom.
 
 #### `onVisibleRangeChange` wiring
 
@@ -524,9 +486,10 @@ const handleIntervalSelect = (code, _desc, range) => {
 
 ```tsx
 const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
-  setDateRange({ from: range?.from, to: range?.to });
+  if (!range?.from || !range?.to) return; // never let a half-open range trigger a refetch
+  setDateRange({ from: range.from, to: range.to });
   setBrushDisplayRange(undefined);
-  setIsCustomRangeActive(!!(range?.from && range?.to));
+  setIsCustomRangeActive(true);
 };
 ```
 
@@ -789,7 +752,7 @@ The Dockerfile cross-compiles Rust for the host architecture. On an arm64 host (
 ### 5.12 Account-Page Chart Container Requires Extra Layout Care
 
 The dashboard and account page look similar but have a critical structural difference:
-- **Dashboard**: `HistoryChart` + controls row sit inside a `h-[320px]` div that lives in an **open gradient background** — overflow is invisible and nothing clips it.
+- **Dashboard**: `HistoryChart` + controls row sit inside a `h-80` (320px) div that lives in an **open gradient background** — overflow is invisible and nothing clips it.
 - **Account**: the same elements sit inside a `Card` / `CardContent`, which has a visible border. Anything that overflows the card's height is outside that border and looks broken.
 
 This means the controls row shift must clear the brush (fix: `bottom-6` not `bottom-10`), AND the card container must be tall enough to keep the controls within its visible border (fix: `pb-8` on the flex-column wrapper).
@@ -814,12 +777,22 @@ The Argon2 password hash has the format `$argon2id$v=19$m=...$...`. If you put t
 | `apps/frontend/src/pages/dashboard/dashboard-content.tsx` | Modified | Calendar picker integration, brush echo, pill suppression |
 | `apps/frontend/src/pages/account/account-page.tsx` | Modified | Same as dashboard, adapted for account page state |
 | `apps/frontend/src/globals.css` | Modified | CSS overrides for pill suppression and brush rounding |
+| `packages/ui/src/components/financial/interval-selector.tsx` | Modified | Mobile: horizontal touch-scroll for the pill row inside the Embla carousel (commit 90d5c4e4) |
 | `./secrets/.env.docker` | New (gitignored) | Docker environment variables |
 | `.gitignore` | Modified | Added `secrets/`, `data/`, `.env` |
 
+### `packages/ui` exception — interval-selector.tsx
+
+The original constraint was to never edit the shared UI library, and the pill-highlight
+suppression still uses the globals.css workaround for that reason. One exception was
+later made (commit 90d5c4e4): `interval-selector.tsx` needed a JS touch handler +
+class changes to make the pill row horizontally scrollable on mobile inside the
+dashboard's Embla carousel (`touch-action: pan-y` on carousel descendants blocks native
+horizontal panning). See the commit message for the full mechanism.
+
 ### Files Explicitly Not Modified
 
-- `packages/ui/` — any file. The constraint was to never edit the shared UI library.
+- `packages/ui/` — any other file.
 - `apps/tauri/` — any file.
 - `crates/` — any Rust file.
 - `apps/server/` — any file.
@@ -858,7 +831,7 @@ If starting from a clean clone of the fork, here is the minimal sequence to rest
    - Update period description to show brush window.
    - Change `IntervalSelector` className to `w-auto max-w-full` + conditional `interval-pill-suppressed`.
    - Add `ChartRangePicker` inline beside IntervalSelector.
-   - Increase chart container to `h-[320px]`.
+   - Increase chart container to `h-80` (320px).
    - Pass `onVisibleRangeChange` to `HistoryChart`.
 
 4. Edit `apps/frontend/src/pages/account/account-page.tsx`: Same pattern as dashboard (section 3.4), plus two account-specific layout fixes:
@@ -889,4 +862,36 @@ If starting from a clean clone of the fork, here is the minimal sequence to rest
 
 ---
 
-*Last updated: 2026-06-27. Covers all changes through Round 6 (account-page layout fixes).*
+## 9. Upstream v3.6.0 Merge (2026-07-05)
+
+Upstream v3.6.0 (i18n in 5 languages, MCP agent access, short positions, activity
+taxes, split transactions, rebalancer phase 2, Health Center rebuild — 200 commits)
+was merged into the fork with `git merge v3.6.0`. Pre-merge state is preserved on
+branch `backup/pre-v3.6.0` (commit 90d5c4e4).
+
+Only 2 files had textual conflicts; resolutions:
+
+- **history-chart.tsx** — imports only: upstream added `useTranslation`, we have
+  `Brush`/`ReferenceArea`. Took both. Upstream's i18n `t()` calls in the tooltip and
+  `chartConfig` labels auto-merged around our brush code.
+- **dashboard-content.tsx** — three hunks:
+  1. Upstream **deleted `selectedIntervalDescription` state** (labels now come from
+     `t(\`ui:interval.${code}\`)`). Our custom-range/brush description was reworked to a
+     render-time derivation — priority: `brushDisplayRange` → `dateRange` when
+     `isCustomRangeActive` → `t(\`ui:interval.${selectedInterval}\`)`. The
+     `setSelectedIntervalDescription` call in `handleCustomRangeChange` was dropped.
+  2. Chart height: upstream `h-70` (280px) vs our 320px — kept 320px as `h-80`.
+  3. Controls row: kept our `-translate-y-6 items-center gap-2 px-4` version.
+  Upstream's gradient-to-inline-style change and `pt-14` spacing were taken as-is.
+- Auto-merged with both sides intact: `account-page.tsx` (upstream pure i18n),
+  `interval-selector.tsx` (upstream i18n `title` line + our touch-scroll block),
+  `.gitignore`.
+- `globals.css`, `compose.yml`, `Dockerfile` were untouched by upstream.
+
+At the same time two calendar-picker bugs were fixed (see §3.1): mobile month count
+and the half-open-range refetch; plus the dashboard controls row is no longer gated
+on `chartData.length` (see §3.3).
+
+---
+
+*Last updated: 2026-07-05. Covers all changes through the v3.6.0 merge and the mobile calendar fixes.*

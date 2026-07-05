@@ -4,7 +4,9 @@ import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Calendar } from "@wealthfolio/ui/components/ui/calendar";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Popover, PopoverContent, PopoverTrigger } from "@wealthfolio/ui/components/ui/popover";
+import { useIsMobile } from "@wealthfolio/ui";
 import type { DateRange as DayPickerDateRange } from "react-day-picker";
+import { useState } from "react";
 
 interface ChartRangePickerProps {
   value: DateRange | undefined;
@@ -23,8 +25,22 @@ interface ChartRangePickerProps {
  * inside the calendar popover.
  */
 export function ChartRangePicker({ value, onChange, isActive, className }: ChartRangePickerProps) {
+  const isMobile = useIsMobile();
+  // Selection in progress lives here, NOT in the parent: react-day-picker fires
+  // onSelect with {from, to: undefined} on the first tap of a range, and committing
+  // that to the parent triggers a refetch for a degenerate range. Only a complete
+  // range is handed to onChange.
+  const [draft, setDraft] = useState<DayPickerDateRange | undefined>(undefined);
+
+  const selected = draft ?? (value as DayPickerDateRange | undefined);
+
   return (
-    <Popover>
+    <Popover
+      onOpenChange={() => {
+        // Opening or closing discards any half-picked range; reseed from `value`.
+        setDraft(undefined);
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -40,13 +56,21 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
           <Icons.Calendar className="h-4 w-4" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-auto p-0" align="center">
+      <PopoverContent
+        className="max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] w-auto overflow-y-auto overscroll-contain p-0 [-webkit-overflow-scrolling:touch]"
+        align="center"
+      >
         <Calendar
           mode="range"
-          defaultMonth={value?.from}
-          selected={value as DayPickerDateRange | undefined}
-          onSelect={(range: DayPickerDateRange | undefined) => onChange(range as DateRange | undefined)}
-          numberOfMonths={3}
+          defaultMonth={selected?.from}
+          selected={selected}
+          onSelect={(range: DayPickerDateRange | undefined) => {
+            setDraft(range);
+            if (range?.from && range?.to) {
+              onChange(range as DateRange);
+            }
+          }}
+          numberOfMonths={isMobile ? 1 : 3}
         />
       </PopoverContent>
     </Popover>

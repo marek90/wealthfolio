@@ -605,9 +605,13 @@ const AccountPage = () => {
   // Callback for the custom date range picker (sets the same dateRange the
   // period buttons use, so the existing useValuationHistory hook refetches it).
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
-    setDateRange({ from: range?.from, to: range?.to });
+    // Only a complete range may reach dateRange: a half-open one ({from, to: undefined})
+    // would refetch a degenerate window and blank the chart. The picker already filters
+    // partial selections; this guard keeps the invariant local.
+    if (!range?.from || !range?.to) return;
+    setDateRange({ from: range.from, to: range.to });
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(!!(range?.from && range?.to));
+    setIsCustomRangeActive(true);
   };
 
   const percentageToDisplay = useMemo(() => {

@@ -202,10 +202,14 @@ export function DashboardContent() {
   // Callback for the custom date range picker (sets the same dateRange the
   // period buttons use, so the existing useValuationHistory hook refetches it).
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
-    setDateRange({ from: range?.from, to: range?.to });
+    // Only a complete range may reach dateRange: a half-open one ({from, to: undefined})
+    // would refetch a degenerate window and blank the chart. The picker already filters
+    // partial selections; this guard keeps the invariant local.
+    if (!range?.from || !range?.to) return;
+    setDateRange({ from: range.from, to: range.to });
     setIsAllTime(false);
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(!!(range?.from && range?.to));
+    setIsCustomRangeActive(true);
   };
 
   return (
@@ -294,7 +298,9 @@ export function DashboardContent() {
               setBrushDisplayRange(r ? { from: new Date(r.from), to: new Date(r.to) } : undefined)
             }
           />
-          {valuationHistory && chartData.length > 0 && (
+          {/* Not gated on chartData.length: if a picked range returns no points, the
+              pills and calendar must stay mounted so the user can pick their way back. */}
+          {valuationHistory && (
             <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
               <IntervalSelector
                 className={`pointer-events-auto relative z-20 w-auto max-w-full ${
