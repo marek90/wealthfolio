@@ -126,11 +126,63 @@ ctx.sidebar.addItem({
 ctx.sidebar.addItem({
   id: "my-addon",
   label: "My Addon",
-  icon: "blocks", // host-provided icon name (lucide)
+  icon: "blocks", // one of the host's supported icon names (see below)
   route: "/addon/my-addon", // navigate via route instead of onClick
   order: 100,
 });
 ```
+
+### Supported icon names
+
+The `icon` string must name an icon the **host** bundles — the sidebar is host
+chrome, so the host draws it. This is a curated set (not the full lucide
+catalog); an unrecognized name renders a generic puzzle-piece icon rather than
+erroring. Matching is **case- and separator-insensitive**, so `"TrendingUp"`,
+`"trending-up"`, and `"trendingup"` all resolve to the same icon.
+
+> This restriction applies **only to the sidebar/nav icon**. Inside your addon's
+> own route/page you render with your own React, so you can use any icon you
+> like there (e.g. `import { Rocket } from "lucide-react"`).
+
+Accepted names (215):
+
+<!-- prettier-ignore -->
+```
+Activity, Activity2, Addons, AlertCircle, AlertTriangle, Apple, ArrowDown,
+ArrowDownLeft, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowRightLeft, ArrowUp,
+ArrowUpRight, Award, BadgeDollarSign, Banknote, BarChart, Baseline, Bitcoin,
+Blocks, Brain, Briefcase, Building, Calendar, CalendarDots, CalendarIcon, Car,
+CaseSensitive, ChartBar, Check, CheckCircle, CheckSquare, ChevronDown,
+ChevronLeft, ChevronRight, ChevronUp, ChevronsLeft, ChevronsRight,
+ChevronsUpDown, Circle, CircleGauge, CirclesFour, Clock, ClockCounterClockwise,
+Close, Cloud, CloudOff, CloudSync, CloudSync2, Code, Coffee, Coins,
+CollectibleDuotone, Copy, CreditCard, Dashboard, Database, DatabaseBackup,
+DatabaseZap, Devices, DollarSign, Dot, DotsThree, DotsThreeVertical, Download,
+Dumbbell, Ellipsis, Eraser, ExternalLink, Eye, EyeOff, File, FileArchive,
+FileAudio, FileCsv, FileImage, FileJson, FileSpreadsheet, FileText, FileVideo,
+FileX, Files, Film, Folder, FolderOpen, Fuel, Fullscreen, Gamepad2, Gem, Gift,
+Globe, Goal, Goals, Google, GraduationCap, Grid3x3, Group, HandCoins, Hash,
+Heart, HelpCircle, History, Holdings, Home, House, Import, Income, Info,
+InfoCircle, Insight, Invoice, Laptop, LayoutDashboard, LiabilityDuotone,
+Lightbulb, Link, List, ListChecks, ListCollapse, ListFilter, Loader, Lock,
+LockOpen, LogOut, Mail, Minus, MinusCircle, Monitor, Moon, MoreHorizontal,
+MoreVertical, OctagonX, OtherAssetDuotone, Package, Palette, PanelLeft,
+PanelLeftOpen, ParkingCircle, PauseCircle, Pencil, Percent, PieChart, PiggyBank,
+Pill, Pin, PinOff, Plane, PlayCircle, Plus, PlusCircle, PreciousDuotone,
+Presentation, PuzzlePiece, QrCode, RealEstateDuotone, Receipt, ReceiptDuotone,
+ReceiptText, RectangleEllipsis, Refresh, RefreshCw, RotateCcw, Rows3, Save,
+Scissors, Search, Search2, Settings, Settings2, Shield, ShieldAlert,
+ShieldCheck, Shirt, ShoppingBag, ShoppingCart, Smartphone, Smile, Sofa,
+Sparkles, SparklesOutline, Spinner, Split, SplitHorizontal, Square, Star,
+Stethoscope, Store, Sun, Tag, Target, Train, Trash, Trash2, TrendingDown,
+TrendingUp, Truck, Tv, Type, Undo, Unlink, Upload, UploadSimple, User,
+UserSwitch, Users, UtensilsCrossed, VehicleDuotone, Wallet, Wand2, Wifi, Wine,
+Wrench, X, XCircle
+```
+
+A few friendly aliases also resolve to a themed icon: `addon`/`addons`,
+`barchart`, `calendar-days`, `chart` (→ Insight), `chart-line`/`trading` (→
+TrendingUp), `fee`/`fees` (→ Invoice), `puzzle` (→ PuzzlePiece).
 
 ---
 
