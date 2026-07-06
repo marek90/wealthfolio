@@ -4,6 +4,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-07-04
+
+Addons now run in an isolated sandbox iframe. This is a **breaking** release for
+addons that register routes. See the
+[v3.5 → v3.6 migration guide](../../docs/addons/addon-migration-guide-v3.5-to-v3.6.md).
+
+### Breaking
+
+- **Route registration**: `RouteConfig.component` (a lazy React component) is
+  replaced by `RouteConfig.render(ctx)`, which mounts into a host-provided
+  `ctx.root: HTMLElement`. New types: `AddonRouteRenderer`,
+  `AddonRouteRenderContext`, `AddonRouteLocation`.
+- **React exports removed**: the SDK no longer re-exports `React` / `ReactDOM`
+  from host globals. Import from `react` / `react-dom/client`; mark them
+  `external` in your build.
+- **`SidebarItemConfig`**: `icon` is now a string (host icon name) only —
+  `React.ReactNode` icons and the `onClick` handler were removed. Use `route`.
+- **React** guaranteed version bumped 19.1.1 → 19.2.4.
+
+### Added
+
+- `HOST_DEPENDENCIES` export — the versioned packages the sandbox provides
+  (react, react-dom, @tanstack/react-query, @wealthfolio/ui, date-fns,
+  lucide-react, recharts).
+- Brokered networking: `ctx.api.network.request()` with manifest-declared
+  `network.allowedHosts` and bearer auth resolved from scoped secret storage
+  (`NetworkAPI`, `NetworkRequest`, `NetworkResponse`, `NetworkAuth`).
+- Manifest fields: `minWealthfolioVersion`, `hostDependencies`, `network`,
+  `sha256`. `AddonHostDependencies` type.
+- Addon SDK tax fields on activity/data types (#1188).
+
 ## [1.0.0] - 2024-12-19
 
 ### Added
