@@ -9,7 +9,8 @@ import { Link } from "react-router-dom";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { updateToolResult } from "@/adapters";
-import { ActivityType, ACTIVITY_TYPE_DISPLAY_NAMES, QuoteMode } from "@/lib/constants";
+import { localizeActivityTypeName } from "@/lib/activity-utils";
+import { ActivityType, QuoteMode } from "@/lib/constants";
 import type { ActivityDetails } from "@/lib/types";
 import { parse as dateFnsParse } from "date-fns";
 import {
@@ -392,9 +393,7 @@ function SuccessState({ draft, createdActivityId, currency }: SuccessStateProps)
     [currency, isBalanceHidden],
   );
 
-  const activityTypeDisplay =
-    (ACTIVITY_TYPE_DISPLAY_NAMES as Record<string, string>)[draft.activityType] ??
-    draft.activityType;
+  const activityTypeDisplay = localizeActivityTypeName(t, draft.activityType);
 
   return (
     <Card className="bg-muted/40 border-success/30">
@@ -837,9 +836,7 @@ function DraftForm({
   }
 
   const FormComponent = config.component;
-  const activityTypeDisplay =
-    (ACTIVITY_TYPE_DISPLAY_NAMES as Record<string, string>)[draft.activityType] ??
-    draft.activityType;
+  const activityTypeDisplay = localizeActivityTypeName(t, draft.activityType);
   const cardTitle = isEditing
     ? t("ai:recordActivity.editActivity", { type: activityTypeDisplay.toLowerCase() })
     : t("ai:recordActivity.reviewActivity", { type: activityTypeDisplay.toLowerCase() });
