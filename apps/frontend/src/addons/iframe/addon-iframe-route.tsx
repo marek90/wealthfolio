@@ -57,6 +57,7 @@ export function AddonIframeRoute({ addonId, routeId }: AddonIframeRouteProps) {
       {isColdLoading ? <AddonRouteSkeleton /> : null}
       {isError ? (
         <AddonRouteError
+          addonId={addonId}
           error={routeStatus.error}
           onRetry={() => addonIframeManager.retryRoute(addonId)}
         />
@@ -86,12 +87,21 @@ function AddonRouteSkeleton() {
   );
 }
 
-function AddonRouteError({ error, onRetry }: { error: string; onRetry: () => void }) {
+function AddonRouteError({
+  addonId,
+  error,
+  onRetry,
+}: {
+  addonId: string;
+  error: string;
+  onRetry: () => void;
+}) {
   return (
     <div className="bg-background/95 text-foreground absolute inset-0 px-6 py-5">
       <div className="border-border bg-card max-w-xl rounded-md border p-4 shadow-sm">
         <h2 className="text-lg font-semibold">Add-on view failed to load</h2>
-        <p className="text-muted-foreground mt-2 text-sm">{error}</p>
+        <p className="text-muted-foreground mt-1 text-xs">{addonId}</p>
+        <p className="text-muted-foreground mt-2 text-sm whitespace-pre-line">{error}</p>
         <button
           type="button"
           className="bg-primary text-primary-foreground hover:bg-primary/90 mt-4 rounded-md px-3 py-2 text-sm font-medium"

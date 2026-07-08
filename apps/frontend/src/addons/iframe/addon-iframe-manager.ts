@@ -186,6 +186,60 @@ function notifyPermissionDenialOnce(addonId: string, method: string | undefined,
   });
 }
 
+// The sandbox reports load/runtime/route-render failures as raw message
+// strings. Left as-is they surface as a blank view or a generic "failed to
+// load" — a class of bug that historically took hours to trace to its real
+// cause (e.g. an addon touching localStorage, which throws in the opaque-origin
+// sandbox). Classify the common signatures into an actionable, human-readable
+// hint so the failure explains itself.
+export function classifyAddonErrorHint(rawMessage: string | undefined): string | undefined {
+  if (!rawMessage) {
+    return undefined;
+  }
+  const message = rawMessage.toLowerCase();
+  if (
+    message.includes("securityerror") ||
+    message.includes("localstorage") ||
+    message.includes("sessionstorage") ||
+    message.includes("allow-same-origin") ||
+    (message.includes("sandbox") && message.includes("storage"))
+  ) {
+    return "This add-on uses browser storage (localStorage/sessionStorage), which is unavailable in the add-on sandbox. Update the add-on to use the storage API.";
+  }
+  if (message.includes("unknown addon host api method")) {
+    return "This add-on called an API this version of Wealthfolio does not provide. Update the add-on, or update Wealthfolio.";
+  }
+  return undefined;
+}
+
+// Enrich a raw sandbox error string with its classified hint (for inline
+// display in the route error panel). Returns the original message unchanged
+// when no signature matches.
+function describeAddonError(rawMessage: string | undefined): string {
+  const base = rawMessage || "The add-on view failed to load.";
+  const hint = classifyAddonErrorHint(rawMessage);
+  return hint ? `${base}\n\n${hint}` : base;
+}
+
+// Toast a classified load/runtime error once per addon+signature per session.
+const notifiedRuntimeErrors = new Set<string>();
+
+function notifyClassifiedAddonErrorOnce(addonId: string, rawMessage: string | undefined) {
+  const hint = classifyAddonErrorHint(rawMessage);
+  if (!hint) {
+    return;
+  }
+  const key = `${addonId}:${hint}`;
+  if (notifiedRuntimeErrors.has(key)) {
+    return;
+  }
+  notifiedRuntimeErrors.add(key);
+  toast.error(`Add-on '${addonId}' error`, {
+    description: hint,
+    duration: 15000,
+  });
+}
+
 function getParkingRoot() {
   let root = document.getElementById("addon-sandbox-parking");
   if (!root) {
@@ -709,6 +763,7 @@ export class AddonIframeManager {
           // already settled, so rejectLoad is a no-op and this would
           // otherwise be silent.
           logger.error(`Addon '${runtime.addonId}' failed to load: ${message.error || "unknown"}`);
+          notifyClassifiedAddonErrorOnce(runtime.addonId, message.error);
           runtime.rejectLoad(
             new Error(message.error || `Failed to load addon '${runtime.addonId}'`),
           );
@@ -717,6 +772,7 @@ export class AddonIframeManager {
         }
         case "runtimeError":
           logger.error(`Addon '${runtime.addonId}' runtime error: ${message.error || "unknown"}`);
+          notifyClassifiedAddonErrorOnce(runtime.addonId, message.error);
           break;
         case "disabled":
           runtime.disableAck?.();
@@ -861,8 +917,11 @@ export class AddonIframeManager {
     runtime.activeRouteRequestId = undefined;
     clearPendingRouteRender(runtime);
     runtime.iframe.style.visibility = runtime.lastRenderedRouteKey ? "visible" : "hidden";
+    notifyClassifiedAddonErrorOnce(runtime.addonId, message.error);
     this.emitRouteStatus(runtime, {
-      error: message.error || `Failed to render add-on route '${route?.routeId ?? "unknown"}'`,
+      error: describeAddonError(
+        message.error || `Failed to render add-on route '${route?.routeId ?? "unknown"}'`,
+      ),
       routeKey,
       status: "error",
     });
