@@ -75,9 +75,11 @@ export type {
 } from './permissions';
 
 export {
+  BASELINE_PERMISSION_CATEGORIES,
   getFunctionRiskLevel,
   getPermissionCategoriesByRisk,
   getPermissionCategory,
+  isBaselineCategory,
   isPermissionRequired,
   PERMISSION_CATEGORIES,
 } from './permissions';

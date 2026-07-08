@@ -99,6 +99,70 @@ fn test_update_permission_escalation_requires_reinstall_approval() {
 }
 
 #[test]
+fn test_update_adding_baseline_ui_permission_is_not_escalation() {
+    let previous = AddonManifest {
+        id: "test-addon".to_string(),
+        name: "Test Addon".to_string(),
+        version: "1.0.0".to_string(),
+        description: None,
+        author: None,
+        sdk_version: None,
+        main: Some("addon.js".to_string()),
+        enabled: Some(true),
+        permissions: None,
+        homepage: None,
+        repository: None,
+        license: None,
+        min_wealthfolio_version: None,
+        keywords: None,
+        icon: None,
+        network: None,
+        host_dependencies: None,
+        installed_at: None,
+        updated_at: None,
+        source: None,
+        size: None,
+    };
+    let mut next = previous.clone();
+    next.version = "1.1.0".to_string();
+    // Legacy baseline declarations (ui/query) must never count as an escalation.
+    next.permissions = Some(vec![
+        AddonPermission {
+            category: "ui".to_string(),
+            purpose: "User interface".to_string(),
+            functions: vec![
+                FunctionPermission {
+                    name: "sidebar.addItem".to_string(),
+                    is_declared: true,
+                    is_detected: false,
+                    detected_at: None,
+                },
+                FunctionPermission {
+                    name: "router.add".to_string(),
+                    is_declared: true,
+                    is_detected: false,
+                    detected_at: None,
+                },
+            ],
+        },
+        AddonPermission {
+            category: "query".to_string(),
+            purpose: "Query cache".to_string(),
+            functions: vec![FunctionPermission {
+                name: "invalidateQueries".to_string(),
+                is_declared: true,
+                is_detected: false,
+                detected_at: None,
+            }],
+        },
+    ]);
+
+    let result = AddonService::ensure_update_does_not_add_permissions(Some(&previous), &next);
+
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_detect_addon_permissions_hello_world() {
     // Test with actual hello world addon content
     let hello_world_content = r#"

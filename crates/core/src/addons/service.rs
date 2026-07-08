@@ -21,6 +21,12 @@ const MAX_ADDON_ARCHIVE_COMPRESSED_SIZE: usize = 50 * 1024 * 1024;
 const MAX_ADDON_STORAGE_KEY_LEN: usize = 128;
 const MAX_ADDON_STORAGE_VALUE_LEN: usize = 1024 * 1024;
 
+/// Implicit baseline capabilities that every addon may use without declaring a
+/// permission or obtaining user consent. Mirrors `BASELINE_PERMISSION_CATEGORIES`
+/// in `packages/addon-sdk/src/permissions.ts`. Legacy manifests that still declare
+/// these keep parsing, but they never count as a permission escalation on update.
+const BASELINE_PERMISSION_CATEGORIES: &[&str] = &["ui", "query", "toast", "logger", "storage"];
+
 #[derive(Clone)]
 struct AddonArchiveFile {
     name: String,
@@ -2049,6 +2055,9 @@ impl AddonService {
             .map(|permissions| {
                 permissions
                     .iter()
+                    .filter(|permission| {
+                        !BASELINE_PERMISSION_CATEGORIES.contains(&permission.category.as_str())
+                    })
                     .flat_map(|permission| {
                         permission
                             .functions

@@ -48,6 +48,7 @@ import type {
   NetworkResponse as SDKNetworkResponse,
   Permission,
 } from "@wealthfolio/addon-sdk";
+import { isBaselineCategory } from "@wealthfolio/addon-sdk";
 
 /**
  * Internal HostAPI interface that matches the actual command function signatures
@@ -244,10 +245,8 @@ export function createPermissionGuard(
     }
   }
 
-  const legacyUiNavigationAllowed = allowed.has("ui:router.add");
   const isAllowed = (category: string, functionName: string) =>
-    allowed.has(`${category}:${functionName}`) ||
-    (category === "ui" && functionName === "navigation.navigate" && legacyUiNavigationAllowed);
+    isBaselineCategory(category) || allowed.has(`${category}:${functionName}`);
 
   return {
     canUse: isAllowed,
@@ -587,7 +586,6 @@ export function createSDKHostAPIBridge(
 
     navigation: {
       navigate: async (route: string) => {
-        guard?.assertCanUse("ui", "navigation.navigate");
         return internalAPI.navigateToRoute(route);
       },
     },
@@ -597,11 +595,9 @@ export function createSDKHostAPIBridge(
         throw new Error("Direct QueryClient access is not available to addons");
       },
       invalidateQueries: (queryKey: string | string[]) => {
-        guard?.assertCanUse("query", "invalidateQueries");
         return internalAPI.invalidateQueries(queryKey);
       },
       refetchQueries: (queryKey: string | string[]) => {
-        guard?.assertCanUse("query", "refetchQueries");
         return internalAPI.refetchQueries(queryKey);
       },
     },

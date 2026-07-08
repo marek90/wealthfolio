@@ -553,15 +553,12 @@ export function createAddonHostAPI(
 }
 
 export function createAddonContext(addonId: string, permissions?: Permission[]): AddonContext {
-  const permissionGuard = createPermissionGuard(addonId, permissions);
-
   return {
     ui: {
       root: document.createElement("div"),
     },
     sidebar: {
       addItem: (cfg) => {
-        permissionGuard.assertCanUse("ui", "sidebar.addItem");
         registerAddonNavItem(addonId, cfg);
 
         return {
@@ -571,7 +568,6 @@ export function createAddonContext(addonId: string, permissions?: Permission[]):
     },
     router: {
       add: (route) => {
-        permissionGuard.assertCanUse("ui", "router.add");
         registerAddonRoute(addonId, {
           path: route.path,
           routeId: route.id ?? route.path,

@@ -802,7 +802,6 @@ export class AddonIframeManager {
     if (!message.requestId || !message.item) {
       return;
     }
-    runtime.permissionGuard.assertCanUse("ui", "sidebar.addItem");
     registerAddonNavItem(runtime.addonId, message.item);
     this.respond(runtime, message.requestId, true, undefined);
   }
@@ -819,7 +818,6 @@ export class AddonIframeManager {
     if (!message.requestId || !message.route?.path || !message.route.routeId) {
       return;
     }
-    runtime.permissionGuard.assertCanUse("ui", "router.add");
     registerAddonRoute(runtime.addonId, {
       path: message.route.path,
       routeId: message.route.routeId,
