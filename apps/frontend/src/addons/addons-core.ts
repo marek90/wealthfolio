@@ -193,6 +193,21 @@ export async function loadInstalledAddons(): Promise<void> {
   clearAllContributions();
   // Reset lazy-activation state so a (re)load re-registers every addon cleanly.
   resetActivations();
+
+  // Register every enabled addon with the activation coordinator BEFORE
+  // ingesting contributions: ingest fires navigation updates that re-render
+  // mounted addon routes, and a route self-healing from a reload (its runtime
+  // was stopped) immediately calls activateView — its bootFn must already be
+  // registered or that activation would fail spuriously. Addons that contribute
+  // views boot lazily on first visit to a contributed route; addons WITHOUT
+  // contributed views must eager-boot ("pinned") so their runtime's
+  // sidebar.addItem/router.add still registers navigation at startup. (Dev-mode
+  // addons take the separate dev path and are always pinned there; this function
+  // only sees installed addons.)
+  for (const addonFile of enabledAddonFiles) {
+    const pinned = !addonFile.manifest.contributes?.views?.length;
+    registerActivatable(addonFile.manifest.id, () => loadAddon(addonFile), { pinned });
+  }
   for (const addonFile of enabledAddonFiles) {
     ingestAddonContributions(addonFile.manifest.id, addonFile.manifest);
   }
@@ -200,17 +215,6 @@ export async function loadInstalledAddons(): Promise<void> {
   if (enabledAddonFiles.length === 0) {
     logger.info("📦 No enabled addons found to load");
     return;
-  }
-
-  // Register every enabled addon with the activation coordinator. Addons that
-  // contribute views boot lazily on first visit to a contributed route; addons
-  // WITHOUT contributed views must eager-boot ("pinned") so their runtime's
-  // sidebar.addItem/router.add still registers navigation at startup. (Dev-mode
-  // addons take the separate dev path and are always pinned there; this function
-  // only sees installed addons.)
-  for (const addonFile of enabledAddonFiles) {
-    const pinned = !addonFile.manifest.contributes?.views?.length;
-    registerActivatable(addonFile.manifest.id, () => loadAddon(addonFile), { pinned });
   }
 
   // Eager-boot ONLY pinned addons at startup. Lazy addons boot later, on first
