@@ -2,6 +2,7 @@
  * Addon manifest and metadata types
  */
 
+import type { AddonIconName } from './icons';
 import type { Permission } from './permissions';
 
 export interface AddonNetworkAccess {
@@ -10,6 +11,32 @@ export interface AddonNetworkAccess {
 }
 
 export type AddonHostDependencies = Record<string, string>;
+
+/**
+ * A view an addon contributes declaratively via `contributes.views`. The host
+ * ingests these at boot without executing addon code, so navigation entries and
+ * routes exist before (and independently of) the addon's runtime activation.
+ */
+export interface AddonContributedView {
+  /** Stable view id. MUST equal the route id the addon registers at runtime. */
+  id: string;
+  /** Human-readable navigation label */
+  label: string;
+  /** Optional host-supported icon name (see {@link AddonIconName}) */
+  icon?: AddonIconName | string;
+  /** Route path the view is mounted at */
+  path: string;
+  /** Optional sort order within the navigation */
+  order?: number;
+}
+
+/**
+ * Declarative contributions an addon makes to the host (currently just views).
+ */
+export interface AddonContributes {
+  /** Views contributed to the host navigation/routing */
+  views?: AddonContributedView[];
+}
 
 /**
  * Unified addon manifest structure that handles both development and runtime scenarios
@@ -51,6 +78,8 @@ export interface AddonManifest {
   network?: AddonNetworkAccess;
   /** Host-provided packages this addon imports instead of bundling */
   hostDependencies?: AddonHostDependencies;
+  /** Declarative contributions to the host (e.g. navigation views) */
+  contributes?: AddonContributes;
 
   // Runtime fields (only present after installation)
   /** Installation timestamp in ISO format */

@@ -850,6 +850,50 @@ pub fn extract_addon_zip_internal(zip_data: Vec<u8>) -> Result<ExtractedAddon, S
     })
 }
 
+/// The running Wealthfolio host version. `wealthfolio-core` inherits the workspace
+/// package version (`workspace.package.version`), which is the app version shipped
+/// by both the Tauri desktop app and the server, so `CARGO_PKG_VERSION` is the
+/// authoritative host version here.
+pub const HOST_WEALTHFOLIO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Parse a dot-separated version into its leading numeric `(major, minor, patch)`
+/// components, ignoring any pre-release/build suffix (e.g. `-beta.1`, `+build`).
+/// Missing components default to 0.
+fn parse_version_triple(version: &str) -> (u64, u64, u64) {
+    let core = version
+        .trim()
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let mut parts = core.split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    (major, minor, patch)
+}
+
+/// Whether `current` satisfies the minimum `required` version (semver-style numeric
+/// comparison of major.minor.patch).
+pub(crate) fn version_meets_minimum(current: &str, required: &str) -> bool {
+    parse_version_triple(current) >= parse_version_triple(required)
+}
+
+/// Hard-fail install/enable when the addon requires a newer host than the one
+/// running. No-op when `minWealthfolioVersion` is absent.
+fn enforce_min_wealthfolio_version(manifest: &AddonManifest) -> Result<(), String> {
+    if let Some(required) = manifest.min_wealthfolio_version.as_deref() {
+        let required = required.trim();
+        if !required.is_empty() && !version_meets_minimum(HOST_WEALTHFOLIO_VERSION, required) {
+            return Err(format!(
+                "Addon requires Wealthfolio {} or newer, but this version is {}. Update Wealthfolio to use this addon.",
+                required, HOST_WEALTHFOLIO_VERSION
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_manifest_json_metadata(manifest_content: &str) -> Result<AddonManifest, String> {
     parse_manifest_json_metadata_with_options(manifest_content, true)
 }
@@ -944,6 +988,30 @@ fn parse_manifest_json_metadata_with_options(
         }
     } else {
         None
+    };
+
+    // Declarative view contributions. Parse the whole `contributes` sub-object via
+    // serde for brevity, then validate that each view carries the required
+    // id/label/path (serde would otherwise error on missing non-Option fields, so
+    // surface a clear manifest error instead of a raw serde message).
+    let contributes = match raw_manifest.get("contributes") {
+        Some(value) if !value.is_null() => {
+            let parsed: AddonContributes = serde_json::from_value(value.clone())
+                .map_err(|e| format!("Invalid 'contributes' field in manifest.json: {}", e))?;
+            for view in &parsed.views {
+                if view.id.trim().is_empty() {
+                    return Err("Missing 'id' field in contributes.views entry".to_string());
+                }
+                if view.label.trim().is_empty() {
+                    return Err("Missing 'label' field in contributes.views entry".to_string());
+                }
+                if view.path.trim().is_empty() {
+                    return Err("Missing 'path' field in contributes.views entry".to_string());
+                }
+            }
+            Some(parsed)
+        }
+        _ => None,
     };
 
     // Validate required fields
@@ -1041,6 +1109,7 @@ fn parse_manifest_json_metadata_with_options(
         icon,
         network,
         host_dependencies,
+        contributes,
         installed_at: None,
         updated_at: None,
         source: None,
@@ -2242,6 +2311,7 @@ impl AddonServiceTrait for AddonService {
         approved_network_hosts: Vec<String>,
     ) -> Result<AddonManifest, String> {
         let extracted = extract_addon_zip_archive(zip_data)?;
+        enforce_min_wealthfolio_version(&extracted.metadata)?;
         let addon_id = extracted.metadata.id.clone();
         let metadata = Self::apply_network_approvals(
             extracted.metadata.to_installed(enable_after_install)?,
@@ -2272,6 +2342,10 @@ impl AddonServiceTrait for AddonService {
                 "Staged addon id mismatch: requested '{}', manifest contains '{}'",
                 addon_id, extracted.metadata.id
             ));
+        }
+        if let Err(err) = enforce_min_wealthfolio_version(&extracted.metadata) {
+            let _ = remove_addon_from_staging(addon_id, &self.addons_root);
+            return Err(err);
         }
         let installed_addon_id = extracted.metadata.id.clone();
         let metadata = Self::apply_network_approvals(
@@ -2463,6 +2537,7 @@ impl AddonServiceTrait for AddonService {
                 addon_id, extracted.metadata.id
             ));
         }
+        enforce_min_wealthfolio_version(&extracted.metadata)?;
         Self::ensure_update_does_not_add_permissions(
             previous_manifest.as_ref(),
             &extracted.metadata,
@@ -2517,6 +2592,9 @@ impl AddonServiceTrait for AddonService {
     fn toggle_addon(&self, addon_id: &str, enabled: bool) -> Result<(), String> {
         let addon_dir = self.existing_addon_dir(addon_id)?;
         let mut manifest = self.read_manifest_or_error(&addon_dir)?;
+        if enabled {
+            enforce_min_wealthfolio_version(&manifest)?;
+        }
         manifest.enabled = Some(enabled);
         self.write_manifest(&addon_dir, &manifest)?;
         Ok(())

@@ -70,6 +70,7 @@ fn test_update_permission_escalation_requires_reinstall_approval() {
         repository: None,
         license: None,
         min_wealthfolio_version: None,
+        contributes: None,
         keywords: None,
         icon: None,
         network: None,
@@ -114,6 +115,7 @@ fn test_update_adding_baseline_ui_permission_is_not_escalation() {
         repository: None,
         license: None,
         min_wealthfolio_version: None,
+        contributes: None,
         keywords: None,
         icon: None,
         network: None,
@@ -421,6 +423,7 @@ fn test_addon_manifest_to_installed() {
         repository: None,
         license: None,
         min_wealthfolio_version: None,
+        contributes: None,
         keywords: None,
         icon: None,
         network: None,
@@ -453,6 +456,7 @@ fn test_addon_manifest_get_main() {
         repository: None,
         license: None,
         min_wealthfolio_version: None,
+        contributes: None,
         keywords: None,
         icon: None,
         network: None,
@@ -479,6 +483,7 @@ fn test_addon_manifest_get_main() {
         repository: None,
         license: None,
         min_wealthfolio_version: None,
+        contributes: None,
         keywords: None,
         icon: None,
         network: None,
@@ -838,6 +843,103 @@ fn test_parse_manifest_json_metadata_service_preserves_host_dependencies() {
         host_dependencies.get("@wealthfolio/ui").map(String::as_str),
         Some("^3.6.0")
     );
+}
+
+#[test]
+fn test_parse_manifest_contributes_views_round_trips() {
+    let manifest_json = r#"
+    {
+        "id": "views-addon",
+        "name": "Views Addon",
+        "version": "1.0.0",
+        "main": "dist/addon.js",
+        "contributes": {
+            "views": [
+                {
+                    "id": "views-addon.dashboard",
+                    "label": "Dashboard",
+                    "icon": "LayoutDashboard",
+                    "path": "/addon/views-addon/dashboard",
+                    "order": 10
+                },
+                {
+                    "id": "views-addon.report",
+                    "label": "Report",
+                    "path": "/addon/views-addon/report"
+                }
+            ]
+        }
+    }
+    "#;
+
+    let parsed = parse_manifest_json_metadata(manifest_json).expect("manifest should parse");
+
+    // Simulate the install rewrite path (`write_manifest` serializes the parsed
+    // manifest), then re-parse to prove the field survives round-trip.
+    let serialized = serde_json::to_string(&parsed).expect("manifest should serialize");
+    let reparsed = parse_manifest_json_metadata(&serialized).expect("manifest should re-parse");
+
+    let contributes = reparsed
+        .contributes
+        .expect("contributes should survive round-trip");
+    assert_eq!(contributes.views.len(), 2);
+
+    let dashboard = &contributes.views[0];
+    assert_eq!(dashboard.id, "views-addon.dashboard");
+    assert_eq!(dashboard.label, "Dashboard");
+    assert_eq!(dashboard.icon.as_deref(), Some("LayoutDashboard"));
+    assert_eq!(dashboard.path, "/addon/views-addon/dashboard");
+    assert_eq!(dashboard.order, Some(10));
+
+    let report = &contributes.views[1];
+    assert_eq!(report.id, "views-addon.report");
+    assert_eq!(report.label, "Report");
+    assert_eq!(report.icon, None);
+    assert_eq!(report.path, "/addon/views-addon/report");
+    assert_eq!(report.order, None);
+
+    // A manifest with no `contributes` stays None (and does not emit the key).
+    let without =
+        parse_manifest_json_metadata(r#"{"id":"a","name":"A","version":"1.0.0","main":"a.js"}"#)
+            .expect("manifest should parse");
+    assert!(without.contributes.is_none());
+    let serialized_without = serde_json::to_string(&without).expect("should serialize");
+    assert!(!serialized_without.contains("contributes"));
+}
+
+#[test]
+fn test_parse_manifest_contributes_views_rejects_missing_required_fields() {
+    let manifest_json = r#"
+    {
+        "id": "views-addon",
+        "name": "Views Addon",
+        "version": "1.0.0",
+        "main": "dist/addon.js",
+        "contributes": { "views": [ { "id": "x", "label": "X" } ] }
+    }
+    "#;
+
+    let err = parse_manifest_json_metadata(manifest_json)
+        .expect_err("view missing 'path' should be rejected");
+    assert!(
+        err.contains("contributes"),
+        "error should mention contributes, got: {err}"
+    );
+}
+
+#[test]
+fn test_version_meets_minimum_semantics() {
+    assert!(version_meets_minimum("3.6.1", "3.6.0"));
+    assert!(version_meets_minimum("3.6.1", "3.6.1"));
+    assert!(version_meets_minimum("3.7.0", "3.6.9"));
+    assert!(version_meets_minimum("4.0.0", "3.9.9"));
+    assert!(!version_meets_minimum("3.6.0", "3.6.1"));
+    assert!(!version_meets_minimum("3.5.9", "3.6.0"));
+    assert!(!version_meets_minimum("2.0.0", "3.0.0"));
+    // Pre-release / build suffixes are ignored for comparison.
+    assert!(version_meets_minimum("3.6.1-beta.1", "3.6.1"));
+    // Missing patch component defaults to 0.
+    assert!(version_meets_minimum("3.6", "3.6.0"));
 }
 
 #[test]
@@ -1379,6 +1481,129 @@ mod service_tests {
         assert!(
             !temp_dir.join("evil").exists(),
             "install must not write outside the addon root"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_install_addon_zip_rejects_too_new_min_wealthfolio_version() {
+        let temp_dir = env::temp_dir().join("wealthfolio_test_min_version_reject");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+        }
+
+        let zip_data = build_test_addon_zip(&[
+            (
+                "manifest.json",
+                r#"{
+                    "id":"future-addon",
+                    "name":"Future Addon",
+                    "version":"1.0.0",
+                    "main":"addon.js",
+                    "minWealthfolioVersion":"999.0.0"
+                }"#,
+            ),
+            ("addon.js", "console.log('ok');"),
+        ]);
+
+        let service = test_addon_service(&temp_dir);
+        let result = service.install_addon_zip(zip_data, true, vec![]).await;
+        let addon_dir = temp_dir.join("addons").join("future-addon");
+
+        assert!(
+            result.is_err(),
+            "install should be rejected when host is older than minWealthfolioVersion"
+        );
+        assert!(
+            result.unwrap_err().contains("requires Wealthfolio"),
+            "error should explain the version requirement"
+        );
+        assert!(
+            !addon_dir.exists(),
+            "addon directory should not be created on rejected install"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_install_addon_zip_accepts_satisfied_min_wealthfolio_version() {
+        let temp_dir = env::temp_dir().join("wealthfolio_test_min_version_accept");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+        }
+
+        let zip_data = build_test_addon_zip(&[
+            (
+                "manifest.json",
+                r#"{
+                    "id":"compatible-addon",
+                    "name":"Compatible Addon",
+                    "version":"1.0.0",
+                    "main":"addon.js",
+                    "minWealthfolioVersion":"1.0.0"
+                }"#,
+            ),
+            ("addon.js", "console.log('ok');"),
+        ]);
+
+        let service = test_addon_service(&temp_dir);
+        let result = service.install_addon_zip(zip_data, true, vec![]).await;
+
+        assert!(
+            result.is_ok(),
+            "install should succeed when host satisfies minWealthfolioVersion: {:?}",
+            result.err()
+        );
+        assert!(
+            temp_dir
+                .join("addons")
+                .join("compatible-addon")
+                .exists(),
+            "addon directory should be created on accepted install"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_toggle_addon_enable_rejects_too_new_min_wealthfolio_version() {
+        let temp_dir = env::temp_dir().join("wealthfolio_test_min_version_toggle");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+        }
+
+        let service = test_addon_service(&temp_dir);
+        let addon_dir = temp_dir.join("addons").join("future-toggle-addon");
+        std::fs::create_dir_all(&addon_dir).expect("addon dir should be created");
+        std::fs::write(
+            addon_dir.join("manifest.json"),
+            r#"{
+                "id":"future-toggle-addon",
+                "name":"Future Toggle Addon",
+                "version":"1.0.0",
+                "main":"addon.js",
+                "enabled":false,
+                "minWealthfolioVersion":"999.0.0"
+            }"#,
+        )
+        .expect("manifest should be written");
+        std::fs::write(addon_dir.join("addon.js"), "console.log('ok');")
+            .expect("addon should be written");
+
+        // Enabling a too-new addon is rejected...
+        let enable = service.toggle_addon("future-toggle-addon", true);
+        assert!(
+            enable.is_err(),
+            "enabling should be rejected for too-new minWealthfolioVersion"
+        );
+        assert!(enable.unwrap_err().contains("requires Wealthfolio"));
+
+        // ...but disabling is always allowed.
+        assert!(
+            service.toggle_addon("future-toggle-addon", false).is_ok(),
+            "disabling should never be blocked by minWealthfolioVersion"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

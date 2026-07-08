@@ -30,6 +30,28 @@ pub struct AddonPermission {
     pub purpose: String,
 }
 
+/// A view contributed declaratively by an addon via `contributes.views`.
+/// Ingested at boot without executing addon code.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonContributedView {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// Declarative contributions an addon makes to the host (currently just views).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonContributes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<AddonContributedView>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonNetworkAccess {
@@ -64,6 +86,8 @@ pub struct AddonManifest {
     pub network: Option<AddonNetworkAccess>,
     #[serde(rename = "hostDependencies")]
     pub host_dependencies: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contributes: Option<AddonContributes>,
 
     // Runtime fields (only present after installation)
     #[serde(skip_serializing_if = "Option::is_none")]
