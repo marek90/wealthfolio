@@ -76,6 +76,31 @@ Notes:
 - `RouteConfig` also gained optional `id` (stable route id) and `title` (used
   for diagnostics).
 
+### Preferred (3.6.1+): `component` instead of `render`
+
+Managing the React root by hand is the #1 source of breakage — a per-route
+`createRoot` (or one root per route) leaves an **orphaned tree** whose
+re-renders never reach the DOM, so buttons and navigation silently stop working.
+As of 3.6.1 you can hand the host a component and let it own the single root:
+
+```tsx
+import { MainPage } from "./pages/MainPage";
+
+export default function enable(ctx: AddonContext) {
+  ctx.router.add({
+    path: "/addon/my-addon",
+    component: MainPage, // host mounts/unmounts this in its managed root
+  });
+}
+```
+
+- Provide **exactly one** of `component` or `render`. If both are set,
+  `component` wins; if neither, the host rejects the route.
+- With `component`, do **not** call `createRoot` yourself and you don't need an
+  `onDisable` unmount for the route — the host manages the lifecycle.
+- Read the current route/location with react-router hooks inside the component.
+- Prefer `component`; keep `render` only for non-React or imperative rendering.
+
 ---
 
 ## 2. React is no longer an SDK export

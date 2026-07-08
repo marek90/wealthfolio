@@ -541,15 +541,17 @@ function createContext() {
     router: {
       add(route: LegacyRouteConfig) {
         const normalizedRoute = normalizeRoute(route);
-        if (typeof route?.render === "function") {
+        // `component` is preferred (host manages the single React root); `render`
+        // is the legacy imperative escape hatch. When both are set, component wins.
+        if (route?.component) {
+          routes.set(normalizedRoute.routeId, createReactRouteRenderer(route.component));
+        } else if (typeof route?.render === "function") {
           routes.set(normalizedRoute.routeId, async (context) => {
             unmountReactRouteRoot();
             await (route.render as RouteRenderer)(context);
           });
-        } else if (route?.component) {
-          routes.set(normalizedRoute.routeId, createReactRouteRenderer(route.component));
         } else {
-          throw new Error("Sandboxed addon routes must provide render(context) or component");
+          throw new Error("Sandboxed addon routes must provide component or render(context)");
         }
         return callHost("router.add", { route: normalizedRoute }).catch((error: unknown) => {
           routes.delete(normalizedRoute.routeId);

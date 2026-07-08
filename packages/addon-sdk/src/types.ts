@@ -1,3 +1,4 @@
+import type { ComponentType } from 'react';
 import type { HostAPI } from './host-api';
 import type { AddonIconName } from './icons';
 
@@ -55,7 +56,20 @@ export type AddonRouteRenderer = (
 ) => void | Promise<void>;
 
 /**
- * Configuration for adding a route
+ * A React component the host mounts for a route. The host owns a single React
+ * root per addon and swaps the mounted component on navigation, so addons must
+ * NOT call `createRoot` themselves — doing so leaves orphaned trees whose
+ * re-renders never reach the DOM (the 3.6 "buttons do nothing" bug). Read the
+ * current route/location with react-router hooks inside the component.
+ */
+export type AddonRouteComponent = ComponentType;
+
+/**
+ * Configuration for adding a route.
+ *
+ * Provide exactly one of `component` (recommended — the host manages the React
+ * root) or `render` (an imperative callback given the container element). If
+ * both are provided, `component` wins; if neither, the host rejects the route.
  */
 export interface RouteConfig {
   /** Optional stable route identifier */
@@ -64,8 +78,16 @@ export interface RouteConfig {
   path: string;
   /** Optional label for diagnostics */
   title?: string;
-  /** Render inside the addon's sandboxed iframe */
-  render: AddonRouteRenderer;
+  /**
+   * React component rendered by the host into its managed single root.
+   * Preferred over `render`.
+   */
+  component?: AddonRouteComponent;
+  /**
+   * Imperative render callback into the addon's sandboxed iframe container.
+   * Legacy/escape hatch — prefer `component`. Optional when `component` is set.
+   */
+  render?: AddonRouteRenderer;
 }
 
 /**
