@@ -1033,6 +1033,16 @@ fn test_version_meets_minimum_semantics() {
     assert!(version_meets_minimum("3.6.1-beta.1", "3.6.1"));
     // Missing patch component defaults to 0.
     assert!(version_meets_minimum("3.6", "3.6.0"));
+    // Multi-digit components compare numerically, not lexically.
+    assert!(!version_meets_minimum("3.6.1", "3.6.10"));
+    assert!(version_meets_minimum("3.6.10", "3.6.9"));
+    // Malformed versions fail closed — they never satisfy the check. Anything
+    // else would silently compare against 0.0.0 and disable the gate.
+    assert!(!version_meets_minimum("3.6.1", "v4.0.0"));
+    assert!(!version_meets_minimum("3.6.1", "4.0.x"));
+    assert!(!version_meets_minimum("3.6.1", "4,0,0"));
+    assert!(!version_meets_minimum("3.6.1", ""));
+    assert!(!version_meets_minimum("garbage", "3.6.0"));
 }
 
 #[test]
@@ -1621,6 +1631,46 @@ mod service_tests {
     }
 
     #[tokio::test]
+    async fn test_install_addon_zip_rejects_malformed_min_wealthfolio_version() {
+        let temp_dir = env::temp_dir().join("wealthfolio_test_min_version_malformed");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+        }
+
+        // "v4.0.0" used to parse as 0.0.0, silently disabling the version gate
+        // and letting the addon install on an incompatible host.
+        let zip_data = build_test_addon_zip(&[
+            (
+                "manifest.json",
+                r#"{
+                    "id":"typo-addon",
+                    "name":"Typo Addon",
+                    "version":"1.0.0",
+                    "main":"addon.js",
+                    "minWealthfolioVersion":"v999.0.0"
+                }"#,
+            ),
+            ("addon.js", "console.log('ok');"),
+        ]);
+
+        let service = test_addon_service(&temp_dir);
+        let result = service.install_addon_zip(zip_data, true, vec![]).await;
+
+        assert!(
+            result.is_err(),
+            "install should be rejected when minWealthfolioVersion is malformed"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Invalid 'minWealthfolioVersion'"),
+            "error should point at the malformed manifest value"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
     async fn test_install_addon_zip_accepts_satisfied_min_wealthfolio_version() {
         let temp_dir = env::temp_dir().join("wealthfolio_test_min_version_accept");
         if temp_dir.exists() {
@@ -2163,6 +2213,44 @@ mod service_tests {
                 .await
                 .is_ok(),
             "keys within the allowed charset must be accepted"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_addon_storage_value_bounded_by_serialized_sync_payload() {
+        let temp_dir = env::temp_dir().join("wealthfolio_test_addon_storage_payload_cap");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+        }
+        let service = test_addon_service(&temp_dir);
+
+        // A comfortably-sized value serializes well under the cap and is accepted.
+        assert!(
+            service
+                .set_addon_storage_item("addon", "ok", &"a".repeat(240_000))
+                .await
+                .is_ok(),
+            "a value under the sync payload cap must be accepted"
+        );
+
+        // A plain value over the cap is rejected with an actionable message.
+        let err = service
+            .set_addon_storage_item("addon", "big", &"a".repeat(260_000))
+            .await
+            .expect_err("value over the sync payload cap must be rejected");
+        assert!(err.contains("too large"), "unexpected error: {err}");
+
+        // Escaping matters: 200k raw bytes of `"` is under a naive raw-byte cap,
+        // but JSON-escapes to ~400k chars in the serialized payload — the exact
+        // plaintext that gets encrypted and pushed — so it must be rejected.
+        assert!(
+            service
+                .set_addon_storage_item("addon", "escaped", &"\"".repeat(200_000))
+                .await
+                .is_err(),
+            "a value whose JSON-escaped form exceeds the cap must be rejected"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

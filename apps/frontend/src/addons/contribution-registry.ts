@@ -48,28 +48,13 @@ function isExternalUrl(path: string) {
   return /^[a-z][a-z0-9+.-]*:/i.test(path.trim()) || path.trim().startsWith("//");
 }
 
-interface IngestOptions {
-  /**
-   * Dev-mode addons stay runtime-registered and pinned (see refactor plan §5 G);
-   * v1 does not ingest dev manifests into the durable layer. When true, ingest is
-   * a no-op.
-   */
-  dev?: boolean;
-}
-
 /**
  * Ingest an addon's declarative contributions (routes + sidebar links) into
  * the durable layer. Does not execute addon code and does not boot an iframe.
+ * Used for both installed addons (at load) and dev-server addons (on dev load),
+ * so a scaffolded addon's manifest-declared sidebar link appears in either mode.
  */
-export function ingestAddonContributions(
-  addonId: string,
-  manifest: AddonManifest,
-  opts: IngestOptions = {},
-): void {
-  if (opts.dev) {
-    return;
-  }
-
+export function ingestAddonContributions(addonId: string, manifest: AddonManifest): void {
   const routes = manifest.contributes?.routes ?? [];
   const links = manifest.contributes?.links ?? {};
   if (routes.length === 0 && Object.keys(links).length === 0) {

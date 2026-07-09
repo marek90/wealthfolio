@@ -352,7 +352,35 @@ broker reads it by `secretKey` so the raw token never enters addon code paths.
 
 ---
 
-## 7. Testing your migration
+## 7. New capability: durable storage (replaces `localStorage`)
+
+`localStorage`/`sessionStorage` throw in the opaque-origin sandbox — the common
+cause of a "Save" button that silently does nothing in 3.6. Use the durable
+storage API instead. It's a **baseline capability** (no `permissions` entry),
+per-addon scoped, survives updates, is cleared on uninstall, and replicates
+across the user's paired devices.
+
+```ts
+// before (throws in the sandbox)
+localStorage.setItem("prefs", JSON.stringify(prefs));
+const prefs = JSON.parse(localStorage.getItem("prefs") ?? "{}");
+
+// after
+await ctx.api.storage.set("prefs", JSON.stringify(prefs));
+const raw = await ctx.api.storage.get("prefs"); // string | null
+const prefs = raw ? JSON.parse(raw) : {};
+```
+
+The API is async (`get`/`set`/`delete` all return promises). Constraints:
+
+- **Keys**: ≤ 128 chars, charset `[A-Za-z0-9_.:-]`.
+- **Values**: ~250 KB each. Because storage syncs across devices, `set` rejects
+  an oversized value rather than failing silently later — split large data
+  across keys, and don't put device-local caches in storage.
+
+---
+
+## 8. Testing your migration
 
 1. **Build**: `pnpm build` — confirm `addon.js` does **not** bundle React
    (externalized) and TypeScript compiles.
@@ -366,7 +394,7 @@ broker reads it by `secretKey` so the raw token never enters addon code paths.
 
 ---
 
-## 8. Common issues
+## 9. Common issues
 
 | Symptom                                        | Cause / fix                                                                                   |
 | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -376,10 +404,12 @@ broker reads it by `secretKey` so the raw token never enters addon code paths.
 | `React is undefined` / `ReactDOM is undefined` | Removed SDK exports. Import from `react` / `react-dom/client` directly.                       |
 | Sidebar icon missing                           | `icon` must be a host icon name string, not a React node.                                     |
 | `fetch` blocked                                | Use `ctx.api.network.request()` with the host declared in `manifest.network.allowedHosts`.    |
+| `SecurityError` / dead Save button             | `localStorage`/`sessionStorage` throw in the sandbox — use `ctx.api.storage` (step 7).        |
+| Storage `set` rejects a value                  | Value exceeds ~250 KB. Split across keys; storage syncs across devices, which bounds size.    |
 
 ---
 
-## 9. Need help
+## 10. Need help
 
 - [API Reference](./addon-api-reference.md)
 - [Architecture Guide](./addon-architecture.md)

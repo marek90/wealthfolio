@@ -551,6 +551,12 @@ export interface SecretsAPI {
  * updates and is removed on uninstall. Each addon can only access its own
  * storage. Use this instead of `localStorage`, which is unavailable in the
  * sandboxed (opaque-origin) iframe.
+ *
+ * Keys are ≤ 128 characters from the charset `[A-Za-z0-9_.:-]`. Values are
+ * capped at roughly 250 KB each (the storage replicates across a user's paired
+ * devices, which bounds per-item size); `set` rejects an oversized value. Use
+ * many small keys rather than one large blob, and keep device-local caches out
+ * of storage.
  */
 export interface StorageAPI {
   /**

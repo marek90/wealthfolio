@@ -1417,7 +1417,15 @@ fn should_apply_against_metadata(
     event_id: &str,
 ) -> Result<bool> {
     let previous_op = enum_from_db::<SyncOperation>(&meta.last_op)?;
-    if entity == SyncEntity::SpendingPresetRuleDeletion {
+    // Pure last-writer-wins entities: a delete is just another write to a key
+    // that can be legitimately re-used, NOT a permanent tombstone. Every op
+    // (create/update/delete) competes on timestamp+event_id. The delete-wins /
+    // tombstone branches below would otherwise let a stale delete clobber a newer
+    // value and permanently swallow any later re-create of a deleted key.
+    if matches!(
+        entity,
+        SyncEntity::SpendingPresetRuleDeletion | SyncEntity::AddonStorage
+    ) {
         Ok(should_apply_lww(
             &meta.last_client_timestamp,
             &meta.last_event_id,
@@ -7954,6 +7962,112 @@ mod tests {
             .get_result(&mut conn)
             .expect("count addon storage");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn replay_addon_storage_stale_delete_does_not_clobber_newer_value() {
+        // A delete is just another write for a reusable key: an older delete must
+        // NOT wipe a newer value. (Under the old tombstone logic a delete always
+        // won over a prior non-delete regardless of timestamp.)
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+        let entity_id = addon_storage_id("addon-a", "prefs");
+
+        assert!(repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id.clone(),
+                SyncOperation::Update,
+                "evt-update-new".to_string(),
+                "2026-02-15T00:00:05Z".to_string(),
+                1,
+                serde_json::json!({ "addonId": "addon-a", "key": "prefs", "value": "v2" }),
+            )
+            .await
+            .expect("apply newer update"));
+
+        // Older delete arrives after the newer update — must be rejected by LWW.
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id,
+                SyncOperation::Delete,
+                "evt-delete-stale".to_string(),
+                "2026-02-15T00:00:01Z".to_string(),
+                2,
+                serde_json::json!({ "addonId": "addon-a", "key": "prefs" }),
+            )
+            .await
+            .expect("apply stale delete");
+        assert!(!applied, "a stale delete must not be applied");
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let value: Option<String> = addon_storage::table
+            .filter(addon_storage::addon_id.eq("addon-a"))
+            .filter(addon_storage::key.eq("prefs"))
+            .select(addon_storage::value)
+            .first::<String>(&mut conn)
+            .optional()
+            .expect("query addon storage");
+        assert_eq!(
+            value.as_deref(),
+            Some("v2"),
+            "newer value must survive a stale delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_addon_storage_newer_update_after_older_delete_reapplies() {
+        // A deleted key can be legitimately re-created: a newer update after an
+        // older delete must apply. (Under the old tombstone logic, once last_op
+        // was Delete, every later create/update was permanently swallowed.)
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+        let entity_id = addon_storage_id("addon-a", "prefs");
+
+        assert!(repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id.clone(),
+                SyncOperation::Delete,
+                "evt-delete-old".to_string(),
+                "2026-02-15T00:00:01Z".to_string(),
+                1,
+                serde_json::json!({ "addonId": "addon-a", "key": "prefs" }),
+            )
+            .await
+            .expect("apply older delete"));
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id,
+                SyncOperation::Update,
+                "evt-update-newer".to_string(),
+                "2026-02-15T00:00:05Z".to_string(),
+                2,
+                serde_json::json!({ "addonId": "addon-a", "key": "prefs", "value": "v3" }),
+            )
+            .await
+            .expect("apply newer update");
+        assert!(
+            applied,
+            "a newer update after an older delete must be applied"
+        );
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let value: Option<String> = addon_storage::table
+            .filter(addon_storage::addon_id.eq("addon-a"))
+            .filter(addon_storage::key.eq("prefs"))
+            .select(addon_storage::value)
+            .first::<String>(&mut conn)
+            .optional()
+            .expect("query addon storage");
+        assert_eq!(
+            value.as_deref(),
+            Some("v3"),
+            "re-created key must hold the newer value"
+        );
     }
 
     #[tokio::test]

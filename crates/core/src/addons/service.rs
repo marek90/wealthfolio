@@ -19,7 +19,18 @@ const MAX_ADDON_ARCHIVE_FILE_SIZE: u64 = 5 * 1024 * 1024;
 const MAX_ADDON_ARCHIVE_TOTAL_SIZE: u64 = 25 * 1024 * 1024;
 const MAX_ADDON_ARCHIVE_COMPRESSED_SIZE: usize = 50 * 1024 * 1024;
 const MAX_ADDON_STORAGE_KEY_LEN: usize = 128;
-const MAX_ADDON_STORAGE_VALUE_LEN: usize = 1024 * 1024;
+/// Upper bound on the serialized `{addon_id, key, value}` sync payload — NOT the
+/// raw value length. A storage write emits a device-sync outbox event whose
+/// payload is this JSON, encrypted (+40 B XChaCha20-Poly1305 nonce/tag) and
+/// base64-encoded before it hits the sync server. The server caps the encrypted
+/// base64 payload at 350,000 chars (`payload` in wealthfolio-cloud
+/// `apps/api/src/schemas/sync.ts`), i.e. 350_000 * 3/4 - 40 = 262,460 plaintext
+/// bytes. We bound the serialized payload (which is what actually gets encrypted,
+/// so JSON escaping can't sneak past a raw-byte check) at 250_000 to keep
+/// headroom. An oversized write is rejected at `set()` — otherwise it would
+/// succeed locally and later dead-letter its whole sync push batch on the server.
+/// To raise this: bump the cloud cap FIRST, then this constant, as a pair.
+const MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN: usize = 250_000;
 
 /// Implicit baseline capabilities that every addon may use without declaring a
 /// permission or obtaining user consent. Mirrors `BASELINE_PERMISSION_CATEGORIES`
@@ -858,30 +869,55 @@ pub const HOST_WEALTHFOLIO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Parse a dot-separated version into its leading numeric `(major, minor, patch)`
 /// components, ignoring any pre-release/build suffix (e.g. `-beta.1`, `+build`).
-/// Missing components default to 0.
-fn parse_version_triple(version: &str) -> (u64, u64, u64) {
+/// Missing components default to 0. Returns `None` when any dotted component is
+/// not a bare integer (`"v4.0.0"`, `"4.0.x"`) — callers must treat that as
+/// unsatisfiable rather than silently comparing against `0.0.0`, which would
+/// turn an author typo into a disabled version gate.
+fn parse_version_triple(version: &str) -> Option<(u64, u64, u64)> {
     let core = version.trim().split(['-', '+']).next().unwrap_or("").trim();
-    let mut parts = core
-        .split('.')
-        .map(|p| p.trim().parse::<u64>().unwrap_or(0));
-    let major = parts.next().unwrap_or(0);
-    let minor = parts.next().unwrap_or(0);
-    let patch = parts.next().unwrap_or(0);
-    (major, minor, patch)
+    if core.is_empty() {
+        return None;
+    }
+    let mut components = [0u64; 3];
+    for (i, part) in core.split('.').enumerate() {
+        let value = part.trim().parse::<u64>().ok()?;
+        if let Some(slot) = components.get_mut(i) {
+            *slot = value;
+        }
+    }
+    Some((components[0], components[1], components[2]))
 }
 
 /// Whether `current` satisfies the minimum `required` version (semver-style numeric
-/// comparison of major.minor.patch).
+/// comparison of major.minor.patch). Fails closed: an unparseable version on
+/// either side never satisfies the check.
 pub(crate) fn version_meets_minimum(current: &str, required: &str) -> bool {
-    parse_version_triple(current) >= parse_version_triple(required)
+    match (
+        parse_version_triple(current),
+        parse_version_triple(required),
+    ) {
+        (Some(current), Some(required)) => current >= required,
+        _ => false,
+    }
 }
 
 /// Hard-fail install/enable when the addon requires a newer host than the one
-/// running. No-op when `minWealthfolioVersion` is absent.
+/// running. No-op when `minWealthfolioVersion` is absent; a malformed value is
+/// rejected outright so the author sees the typo instead of the gate silently
+/// evaporating.
 fn enforce_min_wealthfolio_version(manifest: &AddonManifest) -> Result<(), String> {
     if let Some(required) = manifest.min_wealthfolio_version.as_deref() {
         let required = required.trim();
-        if !required.is_empty() && !version_meets_minimum(HOST_WEALTHFOLIO_VERSION, required) {
+        if required.is_empty() {
+            return Ok(());
+        }
+        if parse_version_triple(required).is_none() {
+            return Err(format!(
+                "Invalid 'minWealthfolioVersion' value '{}' in manifest: expected a version like '3.6.1'",
+                required
+            ));
+        }
+        if !version_meets_minimum(HOST_WEALTHFOLIO_VERSION, required) {
             return Err(format!(
                 "Addon requires Wealthfolio {} or newer, but this version is {}. Update Wealthfolio to use this addon.",
                 required, HOST_WEALTHFOLIO_VERSION
@@ -2664,10 +2700,20 @@ impl AddonServiceTrait for AddonService {
     ) -> Result<(), String> {
         validate_addon_id(addon_id)?;
         Self::validate_storage_key(key)?;
-        if value.len() > MAX_ADDON_STORAGE_VALUE_LEN {
+        // Bound the serialized sync payload, not the raw value: this is the exact
+        // plaintext that gets encrypted and pushed, so it matches what the sync
+        // server validates and JSON escaping can't inflate past the check.
+        let payload_len = serde_json::to_string(&json!({
+            "addon_id": addon_id,
+            "key": key,
+            "value": value,
+        }))
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX);
+        if payload_len > MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN {
             return Err(format!(
-                "Invalid storage value: value must be {} bytes or fewer",
-                MAX_ADDON_STORAGE_VALUE_LEN
+                "Invalid storage value: too large to sync across devices (max ~{} KB)",
+                MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN / 1024
             ));
         }
         self.storage_repo.set(addon_id, key, value).await
