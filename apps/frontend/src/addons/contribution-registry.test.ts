@@ -53,7 +53,7 @@ describe("contribution registry", () => {
         routes: [{ id: "home", path: "/addons/swingfolio" }],
         links: {
           sidebar: [
-            { id: "home-nav", route: "home", label: "Swingfolio", icon: "TrendingUp", order: 5 },
+            { id: "home-nav", route: "home", label: "Swingfolio", icon: "trend-up", order: 5 },
           ],
         },
       }),
@@ -65,7 +65,7 @@ describe("contribution registry", () => {
         id: `${ADDON}:home-nav`,
         title: "Swingfolio",
         href: "/addons/swingfolio",
-        icon: "TrendingUp",
+        icon: "trend-up",
         order: 5,
       }),
     ]);

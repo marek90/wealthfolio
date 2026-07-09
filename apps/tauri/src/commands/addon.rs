@@ -9,10 +9,7 @@ use wealthfolio_core::addons::{
     ExtractedAddon, InstalledAddon,
 };
 
-fn addon_service(
-    app_handle: &AppHandle,
-    state: &ServiceContext,
-) -> Result<AddonService, String> {
+fn addon_service(app_handle: &AppHandle, state: &ServiceContext) -> Result<AddonService, String> {
     let app_data_dir = app_handle
         .path()
         .app_data_dir()

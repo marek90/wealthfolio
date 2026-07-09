@@ -38,7 +38,7 @@ export interface AddonContributedLink {
   /** Human-readable label shown in the host slot */
   label: string;
   /** Optional host-supported icon name (see {@link AddonIconName}) */
-  icon?: AddonIconName | string;
+  icon?: AddonIconName;
   /** Optional sort order within the slot */
   order?: number;
 }

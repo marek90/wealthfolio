@@ -82,8 +82,16 @@ describe("activation coordinator", () => {
   });
 
   it("tracks pinned addons", () => {
-    registerActivatable("pinned", vi.fn(async () => true), { pinned: true });
-    registerActivatable("lazy", vi.fn(async () => true), { pinned: false });
+    registerActivatable(
+      "pinned",
+      vi.fn(async () => true),
+      { pinned: true },
+    );
+    registerActivatable(
+      "lazy",
+      vi.fn(async () => true),
+      { pinned: false },
+    );
 
     expect(isPinned("pinned")).toBe(true);
     expect(isPinned("lazy")).toBe(false);
@@ -91,22 +99,42 @@ describe("activation coordinator", () => {
   });
 
   it("re-registering an addon can flip its pinned state", () => {
-    registerActivatable("a", vi.fn(async () => true), { pinned: true });
+    registerActivatable(
+      "a",
+      vi.fn(async () => true),
+      { pinned: true },
+    );
     expect(isPinned("a")).toBe(true);
-    registerActivatable("a", vi.fn(async () => true), { pinned: false });
+    registerActivatable(
+      "a",
+      vi.fn(async () => true),
+      { pinned: false },
+    );
     expect(isPinned("a")).toBe(false);
   });
 
   it("clearActivatable forgets a single addon", async () => {
-    registerActivatable("a", vi.fn(async () => true), { pinned: true });
+    registerActivatable(
+      "a",
+      vi.fn(async () => true),
+      { pinned: true },
+    );
     clearActivatable("a");
     expect(isPinned("a")).toBe(false);
     await expect(activateView("a")).resolves.toBe(false);
   });
 
   it("resetActivations clears all state", async () => {
-    registerActivatable("a", vi.fn(async () => true), { pinned: true });
-    registerActivatable("b", vi.fn(async () => true), { pinned: false });
+    registerActivatable(
+      "a",
+      vi.fn(async () => true),
+      { pinned: true },
+    );
+    registerActivatable(
+      "b",
+      vi.fn(async () => true),
+      { pinned: false },
+    );
 
     resetActivations();
 

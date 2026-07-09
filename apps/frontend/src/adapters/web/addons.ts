@@ -159,10 +159,7 @@ export const fetchAddonStoreListings = async (): Promise<AddonStoreListing[]> =>
 // Addon Key-Value Storage
 // ============================================================================
 
-export const getAddonStorageItem = async (
-  addonId: string,
-  key: string,
-): Promise<string | null> => {
+export const getAddonStorageItem = async (addonId: string, key: string): Promise<string | null> => {
   return invoke<string | null>("get_addon_storage_item", { addonId, key });
 };
 

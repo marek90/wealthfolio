@@ -860,13 +860,10 @@ pub const HOST_WEALTHFOLIO_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// components, ignoring any pre-release/build suffix (e.g. `-beta.1`, `+build`).
 /// Missing components default to 0.
 fn parse_version_triple(version: &str) -> (u64, u64, u64) {
-    let core = version
-        .trim()
-        .split(['-', '+'])
-        .next()
-        .unwrap_or("")
-        .trim();
-    let mut parts = core.split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0));
+    let core = version.trim().split(['-', '+']).next().unwrap_or("").trim();
+    let mut parts = core
+        .split('.')
+        .map(|p| p.trim().parse::<u64>().unwrap_or(0));
     let major = parts.next().unwrap_or(0);
     let minor = parts.next().unwrap_or(0);
     let patch = parts.next().unwrap_or(0);

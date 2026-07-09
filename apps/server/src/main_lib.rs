@@ -805,10 +805,8 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         categorization_rules_service.clone(),
     );
 
-    let addon_storage_repository = Arc::new(AddonStorageRepository::new(
-        pool.clone(),
-        writer.clone(),
-    ));
+    let addon_storage_repository =
+        Arc::new(AddonStorageRepository::new(pool.clone(), writer.clone()));
     let addon_service: Arc<dyn AddonServiceTrait + Send + Sync> = Arc::new(AddonService::new(
         &config.addons_root,
         &settings.instance_id,

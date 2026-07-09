@@ -84,11 +84,9 @@ impl AddonStorageRepository {
         let addon_id = addon_id.to_string();
         self.writer
             .exec(move |conn| {
-                diesel::delete(
-                    addon_storage::table.filter(addon_storage::addon_id.eq(&addon_id)),
-                )
-                .execute(conn)
-                .map_err(StorageError::from)?;
+                diesel::delete(addon_storage::table.filter(addon_storage::addon_id.eq(&addon_id)))
+                    .execute(conn)
+                    .map_err(StorageError::from)?;
                 Ok(())
             })
             .await
@@ -97,22 +95,13 @@ impl AddonStorageRepository {
 
 #[async_trait::async_trait]
 impl AddonStorageRepositoryTrait for AddonStorageRepository {
-    async fn get(
-        &self,
-        addon_id: &str,
-        key: &str,
-    ) -> std::result::Result<Option<String>, String> {
+    async fn get(&self, addon_id: &str, key: &str) -> std::result::Result<Option<String>, String> {
         AddonStorageRepository::get(self, addon_id, key)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn set(
-        &self,
-        addon_id: &str,
-        key: &str,
-        value: &str,
-    ) -> std::result::Result<(), String> {
+    async fn set(&self, addon_id: &str, key: &str, value: &str) -> std::result::Result<(), String> {
         AddonStorageRepository::set(self, addon_id, key, value)
             .await
             .map_err(|e| e.to_string())
@@ -166,7 +155,11 @@ mod tests {
             repo.get("addon-a", "prefs").await.unwrap().as_deref(),
             Some("v2")
         );
-        assert_eq!(count_rows(&repo), 1, "upsert must not create duplicate rows");
+        assert_eq!(
+            count_rows(&repo),
+            1,
+            "upsert must not create duplicate rows"
+        );
     }
 
     #[tokio::test]

@@ -104,11 +104,11 @@ export default function enable(ctx: AddonContext) {
   `pathname/search/hash/params`), re-passed on each navigation.
 - Prefer `component`; keep `render` only for non-React or imperative rendering.
 
-> **`contributes.routes` + `contributes.links`:** addons can declare their
-> pages and navigation in the manifest, so the host knows them without booting
-> the addon. A **route** is a durable addon page; a **link** places it in a
-> host slot (only `"sidebar"` is consumed today) and must reference a declared
-> route id of the same addon:
+> **`contributes.routes` + `contributes.links`:** addons can declare their pages
+> and navigation in the manifest, so the host knows them without booting the
+> addon. A **route** is a durable addon page; a **link** places it in a host
+> slot (only `"sidebar"` is consumed today) and must reference a declared route
+> id of the same addon:
 >
 > ```jsonc
 > "contributes": {

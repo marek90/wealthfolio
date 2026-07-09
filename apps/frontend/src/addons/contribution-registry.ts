@@ -86,9 +86,7 @@ export function ingestAddonContributions(
     const rawPath = String(route?.path ?? "").trim();
 
     if (!routeId || !rawPath) {
-      logger.warn(
-        `Addon '${addonId}' contributes a route with an empty id/path; skipping.`,
-      );
+      logger.warn(`Addon '${addonId}' contributes a route with an empty id/path; skipping.`);
       continue;
     }
 

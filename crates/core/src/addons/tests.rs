@@ -1650,10 +1650,7 @@ mod service_tests {
             result.err()
         );
         assert!(
-            temp_dir
-                .join("addons")
-                .join("compatible-addon")
-                .exists(),
+            temp_dir.join("addons").join("compatible-addon").exists(),
             "addon directory should be created on accepted install"
         );
 

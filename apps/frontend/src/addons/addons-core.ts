@@ -4,15 +4,8 @@ import {
   getDynamicRoutes,
   setInstalledAddonIds,
 } from "@/addons/addons-runtime-context";
-import {
-  clearAllContributions,
-  ingestAddonContributions,
-} from "@/addons/contribution-registry";
-import {
-  isPinned,
-  registerActivatable,
-  resetActivations,
-} from "@/addons/activation-coordinator";
+import { clearAllContributions, ingestAddonContributions } from "@/addons/contribution-registry";
+import { isPinned, registerActivatable, resetActivations } from "@/addons/activation-coordinator";
 import { addonIframeManager, type AddonRuntimeHandle } from "@/addons/iframe/addon-iframe-manager";
 import { toast } from "sonner";
 import type { AddonManifest } from "@wealthfolio/addon-sdk";
@@ -229,9 +222,7 @@ export async function loadInstalledAddons(): Promise<void> {
 
   // Eager-boot ONLY pinned addons at startup. Lazy addons boot later, on first
   // visit to a contributed route (see AddonIframeRoute).
-  const pinnedAddonFiles = enabledAddonFiles.filter((addonFile) =>
-    isPinned(addonFile.manifest.id),
-  );
+  const pinnedAddonFiles = enabledAddonFiles.filter((addonFile) => isPinned(addonFile.manifest.id));
   const lazyCount = enabledAddonFiles.length - pinnedAddonFiles.length;
 
   let loadedCount = 0;
