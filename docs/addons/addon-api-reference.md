@@ -174,7 +174,7 @@ which is what enables lazy activation. Two primitives:
 
 ```jsonc
 "contributes": {
-  "routes": [{ "id": "my-addon", "path": "/addons/my-addon" }],
+  "routes": [{ "id": "my-addon" }],
   "links": {
     "sidebar": [
       { "id": "my-addon", "route": "my-addon", "label": "My Addon", "icon": "wallet", "order": 100 }
@@ -186,6 +186,10 @@ which is what enables lazy activation. Two primitives:
 - A **route** is a durable addon page — host-renderable before the addon boots,
   and the surface that triggers lazy activation. A route with no link is a legal
   deep-link-only page.
+- The host owns its URL namespace: a route with no `path` mounts at
+  `/addons/<manifest.id>`. An optional `path` is a relative suffix such as
+  `reports/:year`; absolute paths, traversal, queries, and fragments are
+  rejected.
 - A **link** places a route into a host slot and references a declared route by
   `id`. Only `"sidebar"` is consumed today; unknown slot names are reserved for
   future surfaces.

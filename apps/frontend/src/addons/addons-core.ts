@@ -5,7 +5,15 @@ import {
   setInstalledAddonIds,
 } from "@/addons/addons-runtime-context";
 import { clearAllContributions, ingestAddonContributions } from "@/addons/contribution-registry";
-import { isPinned, registerActivatable, resetActivations } from "@/addons/activation-coordinator";
+import {
+  getActivationEpoch,
+  invalidateActivations,
+  isActivationEpochCurrent,
+  isPinned,
+  publishActivationEpoch,
+  registerActivatable,
+  resetActivations,
+} from "@/addons/activation-coordinator";
 import { addonIframeManager, type AddonRuntimeHandle } from "@/addons/iframe/addon-iframe-manager";
 import { toast } from "sonner";
 import type { AddonManifest } from "@wealthfolio/addon-sdk";
@@ -86,8 +94,12 @@ function validateAddonCompatibility(manifest: AddonManifest): boolean {
 /**
  * Loads a single addon using Tauri commands
  */
-async function loadAddon(addonFile: AddonFile): Promise<boolean> {
+async function loadAddon(addonFile: AddonFile, activationEpoch: number): Promise<boolean> {
   try {
+    if (!isActivationEpochCurrent(activationEpoch)) {
+      return false;
+    }
+
     // Dedup guard: skip only when the addon is loaded AND its runtime actually
     // exists. Some stop paths (e.g. a late loadError after a sandbox
     // self-reload) tear the runtime down without clearing loadedAddonIds —
@@ -115,6 +127,9 @@ async function loadAddon(addonFile: AddonFile): Promise<boolean> {
     // Load addon using Tauri command instead of direct file access
     // Load addon for runtime execution using Tauri command
     const extractedAddon = await loadAddonRuntime(addonFile.manifest.id);
+    if (!isActivationEpochCurrent(activationEpoch)) {
+      return false;
+    }
 
     // Find the main file from the extracted addon files
     const mainFile = extractedAddon.files.find((file) => file.isMain);
@@ -154,7 +169,13 @@ async function loadAddon(addonFile: AddonFile): Promise<boolean> {
       files: extractedAddon.files,
       manifest: extractedAddon.metadata,
       permissions,
+      isCurrent: () => isActivationEpochCurrent(activationEpoch),
     });
+
+    if (!isActivationEpochCurrent(activationEpoch)) {
+      await handle.disable();
+      return false;
+    }
 
     loadedAddons.set(extractedAddon.metadata.id, handle);
     loadedAddonIds.add(extractedAddon.metadata.id); // Add to set after successful load and enablement
@@ -180,6 +201,9 @@ export async function loadInstalledAddons(): Promise<void> {
   setInstalledAddonIds(addonFiles.map((addonFile) => addonFile.manifest.id));
 
   if (addonFiles.length === 0) {
+    clearAllContributions();
+    resetActivations();
+    publishActivationEpoch();
     logger.info("⚠️  No addons found to load - check AppData/addons directory");
     return;
   }
@@ -209,11 +233,14 @@ export async function loadInstalledAddons(): Promise<void> {
   // only sees installed addons.)
   for (const addonFile of enabledAddonFiles) {
     const pinned = !addonFile.manifest.contributes?.routes?.length;
-    registerActivatable(addonFile.manifest.id, () => loadAddon(addonFile), { pinned });
+    registerActivatable(addonFile.manifest.id, (epoch) => loadAddon(addonFile, epoch), { pinned });
   }
   for (const addonFile of enabledAddonFiles) {
     ingestAddonContributions(addonFile.manifest.id, addonFile.manifest);
   }
+  // Wake mounted addon routes only after their new-generation boot functions
+  // are registered; publishing earlier can make a route observe an empty gap.
+  publishActivationEpoch();
 
   if (enabledAddonFiles.length === 0) {
     logger.info("📦 No enabled addons found to load");
@@ -226,9 +253,10 @@ export async function loadInstalledAddons(): Promise<void> {
   const lazyCount = enabledAddonFiles.length - pinnedAddonFiles.length;
 
   let loadedCount = 0;
+  const activationEpoch = getActivationEpoch();
   const loadPromises = pinnedAddonFiles.map(async (addonFile) => {
     // Each addon gets its own context, but loadAddon creates its own internally
-    const success = await loadAddon(addonFile);
+    const success = await loadAddon(addonFile, activationEpoch);
     if (success) {
       loadedCount++;
     } else {
@@ -268,6 +296,10 @@ export function unloadAddon(addonId: string): void {
  * Unloads all addons and cleans up resources
  */
 export function unloadAllAddons(): void {
+  // Invalidate async loads before teardown. A load still awaiting backend I/O
+  // cannot publish a runtime after this reload generation has ended.
+  invalidateActivations();
+
   loadedAddons.forEach((addon, id) => {
     try {
       void addon.disable();
@@ -278,6 +310,9 @@ export function unloadAllAddons(): void {
 
   loadedAddons.clear();
   loadedAddonIds.clear(); // Clear the set when unloading all
+  // `loadedAddons` contains only fully booted handles. Also stop manager-owned
+  // runtimes that are still in their loading phase and therefore have no handle.
+  void addonIframeManager.stopAllAddons();
 }
 
 /**

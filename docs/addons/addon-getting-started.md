@@ -96,7 +96,7 @@ permissions it needs:
   "minWealthfolioVersion": "3.6.1",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "hello-world", "path": "/addons/hello-world" }],
+    "routes": [{ "id": "hello-world" }],
     "links": {
       "sidebar": [
         {
@@ -120,6 +120,10 @@ durable addon page; a **link** places a route into a host slot (only `"sidebar"`
 is consumed today) and references a declared route by `id`. The runtime
 `router.add({ id })` in the next section MUST use the same id as the declared
 route.
+
+The host derives the route URL from the manifest `id`, so this root page is
+mounted at `/addons/hello-world-addon`. Omit `path` for the root; nested pages
+use a relative suffix such as `"path": "reports/:year"`.
 
 > **Permissions:** `ui`, `query`, `toast`, `logger`, and `storage` are implicit
 > **baseline capabilities** — you do not declare them. Only data categories
@@ -168,7 +172,7 @@ const enable: AddonEnableFunction = (ctx) => {
   // ctx.sidebar.addItem call here.
   ctx.router.add({
     id: 'hello-world',
-    path: '/addons/hello-world',
+    path: '/addons/hello-world-addon',
     component: HelloWorldRoute,
   });
 
@@ -362,7 +366,7 @@ const enable: AddonEnableFunction = (ctx) => {
 
   ctx.router.add({
     id: 'hello-world',
-    path: '/addons/hello-world',
+    path: '/addons/hello-world-addon',
     component: HelloWorldRoute,
   });
 
@@ -392,7 +396,7 @@ declaring a data `category`, the `functions` you call, and a human-readable
   "minWealthfolioVersion": "3.6.1",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "hello-world", "path": "/addons/hello-world" }],
+    "routes": [{ "id": "hello-world" }],
     "links": {
       "sidebar": [
         {

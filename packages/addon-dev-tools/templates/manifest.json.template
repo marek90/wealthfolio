@@ -9,7 +9,7 @@
   "minWealthfolioVersion": "3.6.1",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "{{addonId}}", "path": "/addons/{{addonId}}" }],
+    "routes": [{ "id": "{{addonId}}" }],
     "links": {
       "sidebar": [
         {

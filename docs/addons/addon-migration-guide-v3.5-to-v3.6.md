@@ -112,7 +112,7 @@ export default function enable(ctx: AddonContext) {
 >
 > ```jsonc
 > "contributes": {
->   "routes": [ { "id": "main", "path": "/addons/my-addon" } ],
+>   "routes": [ { "id": "main" } ],
 >   "links": {
 >     "sidebar": [
 >       { "id": "main-nav", "route": "main", "label": "My Addon", "icon": "wallet", "order": 150 }
@@ -120,6 +120,10 @@ export default function enable(ctx: AddonContext) {
 >   }
 > }
 > ```
+>
+> The host mounts that root route at `/addons/<manifest.id>`. For a nested page,
+> provide only a relative suffix such as `"path": "reports/:year"`; absolute
+> paths are rejected.
 >
 > If you declare a route and also register its renderer at runtime, the runtime
 > `router.add({ id })` **must use the same id** as the declared route

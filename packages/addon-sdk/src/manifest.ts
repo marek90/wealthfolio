@@ -21,8 +21,13 @@ export type AddonHostDependencies = Record<string, string>;
 export interface AddonContributedRoute {
   /** Stable route id. MUST equal the route id the addon registers at runtime. */
   id: string;
-  /** Route path the page is mounted at (inside the addon's route namespace) */
-  path: string;
+  /**
+   * Optional path relative to the host-owned `/addons/<addon-id>` mount.
+   * Omit for the addon root; use a suffix such as `reports/:year` for a
+   * nested page. Absolute paths, traversal, query strings, and fragments are
+   * rejected by the host.
+   */
+  path?: string;
 }
 
 /**

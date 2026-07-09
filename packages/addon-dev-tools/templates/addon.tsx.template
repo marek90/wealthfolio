@@ -36,8 +36,8 @@ const AddonRoute = () => (
 const enable: AddonEnableFunction = (ctx) => {
   addonCtx = ctx;
 
-  // The route `id` MUST match `contributes.routes[].id` in manifest.json,
-  // otherwise the declared nav points at a route the host can't render.
+  // The route `id` MUST match `contributes.routes[].id` in manifest.json.
+  // The host derives this root path from the manifest addon id.
   ctx.router.add({
     id: '{{addonId}}',
     path: '/addons/{{addonId}}',

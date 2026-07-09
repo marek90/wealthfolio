@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useLocation, useParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { activationCoordinator } from "@/addons/activation-coordinator";
@@ -20,6 +20,11 @@ export function AddonIframeRoute({ addonId, routeId }: AddonIframeRouteProps) {
   const [activationError, setActivationError] = useState<string | null>(null);
   // Bumped by the error-panel retry so a failed activation can be re-attempted.
   const [retryNonce, setRetryNonce] = useState(0);
+  const activationEpoch = useSyncExternalStore(
+    activationCoordinator.subscribeToActivationEpoch,
+    activationCoordinator.getPublishedActivationEpoch,
+    activationCoordinator.getPublishedActivationEpoch,
+  );
 
   // Mount: ensure the addon runtime is activated (lazy addons boot here on
   // first visit; pinned addons already have a runtime so this resolves
@@ -64,7 +69,7 @@ export function AddonIframeRoute({ addonId, routeId }: AddonIframeRouteProps) {
       unsubscribe?.();
       addonIframeManager.detachRoute(addonId, container);
     };
-  }, [addonId, retryNonce]);
+  }, [addonId, retryNonce, activationEpoch]);
 
   // Render the active route on location change. No-op until the runtime is
   // ready; runs once `ready` flips true to perform the initial render.

@@ -36,7 +36,10 @@ pub struct AddonPermission {
 #[serde(rename_all = "camelCase")]
 pub struct AddonContributedRoute {
     pub id: String,
-    pub path: String,
+    /// Optional suffix below the host-owned `/addons/<addon-id>` mount.
+    /// `None` represents the addon root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// A placement in a host slot (e.g. `"sidebar"`) declared via

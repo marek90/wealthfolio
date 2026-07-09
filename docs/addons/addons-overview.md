@@ -241,7 +241,7 @@ hello-world-addon/
   "minWealthfolioVersion": "3.6.1",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "my-addon", "path": "/addons/my-addon" }],
+    "routes": [{ "id": "my-addon" }],
     "links": {
       "sidebar": [
         {
@@ -268,6 +268,10 @@ hello-world-addon/
   ]
 }
 ```
+
+The host mounts that route at `/addons/my-addon`, derived from the manifest
+`id`. Omit `path` for the root, or use a relative suffix such as
+`"path": "reports/:year"` for a nested page.
 
 ## Lifecycle Management
 

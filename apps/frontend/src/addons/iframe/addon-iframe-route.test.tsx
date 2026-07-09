@@ -31,9 +31,31 @@ vi.mock("./addon-iframe-manager", () => ({
 }));
 
 const activateView = vi.hoisted(() => vi.fn(async () => true));
+const activationEpochStore = vi.hoisted(() => {
+  let epoch = 0;
+  const listeners = new Set<() => void>();
+  return {
+    advance: () => {
+      epoch += 1;
+      listeners.forEach((listener) => listener());
+    },
+    getSnapshot: () => epoch,
+    reset: () => {
+      epoch = 0;
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+});
 
 vi.mock("@/addons/activation-coordinator", () => ({
-  activationCoordinator: { activateView },
+  activationCoordinator: {
+    activateView,
+    getPublishedActivationEpoch: activationEpochStore.getSnapshot,
+    subscribeToActivationEpoch: activationEpochStore.subscribe,
+  },
 }));
 
 describe("AddonIframeRoute self-healing", () => {
@@ -42,6 +64,7 @@ describe("AddonIframeRoute self-healing", () => {
     manager.hasRuntime.mockReturnValue(true);
     manager.getRouteStatus.mockReturnValue(IDLE_STATUS);
     activateView.mockResolvedValue(true);
+    activationEpochStore.reset();
   });
 
   it("activates once and renders the route on mount", async () => {
@@ -91,6 +114,18 @@ describe("AddonIframeRoute self-healing", () => {
     await act(async () => {
       rerender(<AddonIframeRoute addonId="test-addon" routeId="test-2" />);
     });
+
+    await waitFor(() =>
+      expect(activateView.mock.calls.length).toBeGreaterThan(activationsAfterMount),
+    );
+  });
+
+  it("re-activates when a reload publishes a new activation epoch", async () => {
+    render(<AddonIframeRoute addonId="test-addon" routeId="test" />);
+    await waitFor(() => expect(manager.updateRoute).toHaveBeenCalled());
+    const activationsAfterMount = activateView.mock.calls.length;
+
+    act(() => activationEpochStore.advance());
 
     await waitFor(() =>
       expect(activateView.mock.calls.length).toBeGreaterThan(activationsAfterMount),

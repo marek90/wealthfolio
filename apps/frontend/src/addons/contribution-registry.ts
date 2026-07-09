@@ -2,8 +2,6 @@ import { logger } from "@/adapters";
 import type { AddonManifest } from "@wealthfolio/addon-sdk";
 
 import {
-  cleanRoutePath,
-  isAddonRoutePathAllowed,
   scopedKey,
   toRouterPath,
   triggerNavigationUpdate,
@@ -27,12 +25,11 @@ import {
  * Only the `"sidebar"` slot is consumed today; unknown slot keys are future
  * host surfaces and are ignored here (they still round-trip through install).
  *
- * Security note: validation reuses the exact route-namespace policy of the
- * transient path (`isAddonRoutePathAllowed`) — no security logic is duplicated
- * here. Invalid entries are logged and skipped so one bad entry cannot kill
- * boot. Rust already rejects links referencing undeclared routes at install;
- * the re-check here is defense-in-depth for dev manifests that never passed
- * through the Rust parser.
+ * The host owns each declarative route namespace: manifest paths are relative
+ * suffixes mounted below `/addons/<addon-id>`. Invalid entries are logged and
+ * skipped so one bad entry cannot kill boot. Rust performs the same validation
+ * at install; the re-check here is defense-in-depth for dev manifests that
+ * never passed through the Rust parser.
  */
 
 /** The only link slot the host consumes today. */
@@ -42,10 +39,32 @@ const SIDEBAR_SLOT = "sidebar";
 const durableNavItems = new Map<string, DynamicNavItem>();
 const durableRoutes = new Map<string, DynamicRouteEntry>();
 
-function isExternalUrl(path: string) {
-  // Anything with an explicit scheme or protocol-relative prefix escapes the
-  // in-app router namespace and must be rejected outright.
-  return /^[a-z][a-z0-9+.-]*:/i.test(path.trim()) || path.trim().startsWith("//");
+function isSafeAddonIdSegment(addonId: string) {
+  return (
+    addonId === addonId.trim() &&
+    /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(addonId) &&
+    !/^\.+$/.test(addonId)
+  );
+}
+
+function normalizeContributedRoutePath(path: unknown): string | null {
+  if (path == null) {
+    return "";
+  }
+  if (typeof path !== "string" || path !== path.trim()) {
+    return null;
+  }
+  if (path === "") {
+    return "";
+  }
+  if (
+    path.startsWith("/") ||
+    /[\\?#%]/.test(path) ||
+    path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  return path;
 }
 
 /**
@@ -60,18 +79,22 @@ export function ingestAddonContributions(addonId: string, manifest: AddonManifes
   if (routes.length === 0 && Object.keys(links).length === 0) {
     return;
   }
+  if (!isSafeAddonIdSegment(addonId)) {
+    logger.warn(`Addon '${addonId}' has an invalid route namespace; skipping contributions.`);
+    return;
+  }
 
   let changed = false;
 
   // Routes first: they are the durable pages links resolve against. A route is
   // ingested regardless of links — a route with no link is deep-link only.
   const ingestedRoutes = new Map<string, DynamicRouteEntry>();
+  const ingestedPaths = new Set<string>();
   for (const route of routes) {
     const routeId = String(route?.id ?? "").trim();
-    const rawPath = String(route?.path ?? "").trim();
 
-    if (!routeId || !rawPath) {
-      logger.warn(`Addon '${addonId}' contributes a route with an empty id/path; skipping.`);
+    if (!routeId) {
+      logger.warn(`Addon '${addonId}' contributes a route with an empty id; skipping.`);
       continue;
     }
 
@@ -82,23 +105,22 @@ export function ingestAddonContributions(addonId: string, manifest: AddonManifes
       continue;
     }
 
-    if (isExternalUrl(rawPath)) {
-      logger.warn(
-        `Addon '${addonId}' route '${routeId}' points at an external URL '${rawPath}'; skipping.`,
-      );
+    const relativePath = normalizeContributedRoutePath(route?.path);
+    if (relativePath === null) {
+      logger.warn(`Addon '${addonId}' route '${routeId}' has an invalid relative path; skipping.`);
       continue;
     }
 
-    const href = cleanRoutePath(rawPath);
-    // Reuse the same route-namespace policy as runtime registration — a route
-    // may only mount under a path this addon is allowed to own.
-    if (!isAddonRoutePathAllowed(addonId, href)) {
+    const pathKey = relativePath.toLowerCase();
+    if (ingestedPaths.has(pathKey)) {
       logger.warn(
-        `Addon '${addonId}' route '${routeId}' requests out-of-namespace path '${href}'; skipping.`,
+        `Addon '${addonId}' contributes duplicate route path '${relativePath}'; skipping the duplicate.`,
       );
       continue;
     }
+    ingestedPaths.add(pathKey);
 
+    const href = relativePath ? `/addons/${addonId}/${relativePath}` : `/addons/${addonId}`;
     const entry: DynamicRouteEntry = {
       addonId,
       href,

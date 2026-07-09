@@ -855,8 +855,8 @@ fn test_parse_manifest_contributes_routes_and_links_round_trip() {
         "main": "dist/addon.js",
         "contributes": {
             "routes": [
-                { "id": "main", "path": "/addons/routes-addon" },
-                { "id": "report", "path": "/addons/routes-addon/report" }
+                { "id": "main" },
+                { "id": "report", "path": "reports/:year" }
             ],
             "links": {
                 "sidebar": [
@@ -891,11 +891,11 @@ fn test_parse_manifest_contributes_routes_and_links_round_trip() {
 
     let main_route = &contributes.routes[0];
     assert_eq!(main_route.id, "main");
-    assert_eq!(main_route.path, "/addons/routes-addon");
+    assert_eq!(main_route.path, None);
 
     let report_route = &contributes.routes[1];
     assert_eq!(report_route.id, "report");
-    assert_eq!(report_route.path, "/addons/routes-addon/report");
+    assert_eq!(report_route.path.as_deref(), Some("reports/:year"));
 
     let sidebar = contributes
         .links
@@ -934,18 +934,18 @@ fn test_parse_manifest_contributes_routes_and_links_round_trip() {
 
 #[test]
 fn test_parse_manifest_contributes_rejects_missing_required_fields() {
-    // Route missing `path`.
+    // Route missing `id`.
     let manifest_json = r#"
     {
         "id": "routes-addon",
         "name": "Routes Addon",
         "version": "1.0.0",
         "main": "dist/addon.js",
-        "contributes": { "routes": [ { "id": "main" } ] }
+        "contributes": { "routes": [ { "path": "reports" } ] }
     }
     "#;
     let err = parse_manifest_json_metadata(manifest_json)
-        .expect_err("route missing 'path' should be rejected");
+        .expect_err("route missing 'id' should be rejected");
     assert!(
         err.contains("contributes"),
         "error should mention contributes, got: {err}"
@@ -959,7 +959,7 @@ fn test_parse_manifest_contributes_rejects_missing_required_fields() {
         "version": "1.0.0",
         "main": "dist/addon.js",
         "contributes": {
-            "routes": [ { "id": "main", "path": "/addons/routes-addon" } ],
+            "routes": [ { "id": "main" } ],
             "links": { "sidebar": [ { "route": "main" } ] }
         }
     }
@@ -981,7 +981,7 @@ fn test_parse_manifest_contributes_rejects_bad_route_ref() {
         "version": "1.0.0",
         "main": "dist/addon.js",
         "contributes": {
-            "routes": [ { "id": "main", "path": "/addons/routes-addon" } ],
+            "routes": [ { "id": "main" } ],
             "links": { "sidebar": [ { "route": "missing", "label": "Ghost" } ] }
         }
     }
@@ -1005,8 +1005,8 @@ fn test_parse_manifest_contributes_rejects_duplicate_route_ids() {
         "main": "dist/addon.js",
         "contributes": {
             "routes": [
-                { "id": "main", "path": "/addons/routes-addon" },
-                { "id": "main", "path": "/addons/routes-addon/other" }
+                { "id": "main" },
+                { "id": "main", "path": "other" }
             ]
         }
     }
@@ -1017,6 +1017,60 @@ fn test_parse_manifest_contributes_rejects_duplicate_route_ids() {
     assert!(
         err.contains("duplicate route id 'main'"),
         "error should name the duplicate route id, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_manifest_contributes_rejects_unsafe_route_paths() {
+    for path in [
+        "/absolute",
+        "../settings",
+        "reports//monthly",
+        "reports?view=all",
+        "reports#summary",
+        "%2e%2e/settings",
+        "reports\\monthly",
+        " reports",
+    ] {
+        let manifest = serde_json::json!({
+            "id": "routes-addon",
+            "name": "Routes Addon",
+            "version": "1.0.0",
+            "main": "dist/addon.js",
+            "contributes": { "routes": [{ "id": "main", "path": path }] }
+        });
+
+        let err = parse_manifest_json_metadata(&manifest.to_string())
+            .expect_err("unsafe contributed route path should be rejected");
+        assert!(
+            err.contains("contributes.routes path"),
+            "error should identify the unsafe route path '{path}', got: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_parse_manifest_contributes_rejects_duplicate_effective_route_paths() {
+    let manifest_json = r#"
+    {
+        "id": "routes-addon",
+        "name": "Routes Addon",
+        "version": "1.0.0",
+        "main": "dist/addon.js",
+        "contributes": {
+            "routes": [
+                { "id": "main" },
+                { "id": "alternate-main", "path": "" }
+            ]
+        }
+    }
+    "#;
+
+    let err = parse_manifest_json_metadata(manifest_json)
+        .expect_err("duplicate effective route paths should be rejected");
+    assert!(
+        err.contains("duplicate route path"),
+        "error should identify the duplicate route path, got: {err}"
     );
 }
 

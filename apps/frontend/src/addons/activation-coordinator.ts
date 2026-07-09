@@ -15,7 +15,7 @@ import { addonIframeManager } from "@/addons/iframe/addon-iframe-manager";
  * eviction machinery, added only when needed).
  */
 
-type BootFn = () => Promise<boolean>;
+type BootFn = (epoch: number) => Promise<boolean>;
 
 // De-dupes concurrent activations of the same addon onto a single boot promise.
 const inFlight = new Map<string, Promise<boolean>>();
@@ -23,6 +23,18 @@ const inFlight = new Map<string, Promise<boolean>>();
 const pinnedAddons = new Set<string>();
 // The per-addon boot function registered by addons-core at (re)load time.
 const bootFns = new Map<string, BootFn>();
+const epochListeners = new Set<() => void>();
+// In-memory generation. Advancing it invalidates async boots captured before a
+// reload; it intentionally resets with the application process.
+let activationEpoch = 0;
+let publishedActivationEpoch = 0;
+
+function advanceEpoch(): void {
+  activationEpoch += 1;
+  bootFns.clear();
+  pinnedAddons.clear();
+  inFlight.clear();
+}
 
 /**
  * Registers an addon's boot function so it can be activated later (lazily or
@@ -45,6 +57,29 @@ export function registerActivatable(
 /** Whether the addon must eager-boot at startup. */
 export function isPinned(addonId: string): boolean {
   return pinnedAddons.has(addonId);
+}
+
+export function getActivationEpoch(): number {
+  return activationEpoch;
+}
+
+export function isActivationEpochCurrent(epoch: number): boolean {
+  return epoch === activationEpoch;
+}
+
+export function getPublishedActivationEpoch(): number {
+  return publishedActivationEpoch;
+}
+
+export function subscribeToActivationEpoch(listener: () => void): () => void {
+  epochListeners.add(listener);
+  return () => epochListeners.delete(listener);
+}
+
+/** Notify mounted routes after the new epoch's boot functions are registered. */
+export function publishActivationEpoch(): void {
+  publishedActivationEpoch = activationEpoch;
+  epochListeners.forEach((listener) => listener());
 }
 
 /**
@@ -73,9 +108,21 @@ export async function activateView(addonId: string): Promise<boolean> {
 
   // No `await` before this assignment, so synchronously-concurrent callers all
   // observe the same in-flight promise and the boot function runs exactly once.
-  const promise = bootFn().finally(() => {
-    inFlight.delete(addonId);
-  });
+  const epoch = activationEpoch;
+  const promise = bootFn(epoch)
+    .then((activated) => {
+      // A reload superseded this boot while it was awaiting I/O. Follow the
+      // current generation so callers waiting on the old activation recover
+      // without publishing or attaching its stale result.
+      return epoch === activationEpoch ? activated : activateView(addonId);
+    })
+    .finally(() => {
+      // A stale boot may settle after a newer generation installed its own
+      // promise under the same addon id. Never erase that newer entry.
+      if (inFlight.get(addonId) === promise) {
+        inFlight.delete(addonId);
+      }
+    });
   inFlight.set(addonId, promise);
   return promise;
 }
@@ -87,17 +134,30 @@ export function clearActivatable(addonId: string): void {
   inFlight.delete(addonId);
 }
 
+/**
+ * Invalidate current boots without waking mounted routes. Used at the start of
+ * reload teardown; `publishActivationEpoch` wakes routes after discovery has
+ * synchronously re-registered fresh boot functions.
+ */
+export function invalidateActivations(): void {
+  advanceEpoch();
+}
+
 /** Clear all activation state so a fresh `loadInstalledAddons` re-registers cleanly. */
 export function resetActivations(): void {
-  bootFns.clear();
-  pinnedAddons.clear();
-  inFlight.clear();
+  advanceEpoch();
 }
 
 export const activationCoordinator = {
   registerActivatable,
   isPinned,
+  getActivationEpoch,
+  getPublishedActivationEpoch,
+  isActivationEpochCurrent,
+  subscribeToActivationEpoch,
+  publishActivationEpoch,
   activateView,
   clearActivatable,
+  invalidateActivations,
   resetActivations,
 };

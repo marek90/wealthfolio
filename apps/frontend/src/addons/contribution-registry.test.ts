@@ -50,7 +50,7 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: {
           sidebar: [
             { id: "home-nav", route: "home", label: "Swingfolio", icon: "trend-up", order: 5 },
@@ -64,7 +64,7 @@ describe("contribution registry", () => {
         addonId: ADDON,
         id: `${ADDON}:home-nav`,
         title: "Swingfolio",
-        href: "/addons/swingfolio",
+        href: `/addons/${ADDON}`,
         icon: "trend-up",
         order: 5,
       }),
@@ -73,8 +73,8 @@ describe("contribution registry", () => {
       expect.objectContaining({
         addonId: ADDON,
         routeId: "home",
-        href: "/addons/swingfolio",
-        path: "addons/swingfolio",
+        href: `/addons/${ADDON}`,
+        path: `addons/${ADDON}`,
         title: "Swingfolio",
       }),
     ]);
@@ -84,7 +84,7 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: { sidebar: [{ route: "home", label: "Swingfolio" }] },
       }),
     );
@@ -92,16 +92,20 @@ describe("contribution registry", () => {
     expect(getDurableNavItems().map((item) => item.id)).toEqual([`${ADDON}:home`]);
   });
 
-  it("skips invalid routes (external URL, out-of-namespace, empty field, duplicate id)", () => {
+  it("skips invalid and duplicate route declarations", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
         routes: [
-          { id: "good", path: "/addons/swingfolio" },
+          { id: "good" },
           { id: "ext", path: "https://evil.example.com/x" },
-          { id: "oob", path: "/addon/some-other-addon" },
-          { id: "", path: "/addons/swingfolio/x" },
-          { id: "good", path: "/addons/swingfolio/dup" },
+          { id: "absolute", path: "/addons/swingfolio-addon" },
+          { id: "parent", path: "../settings" },
+          { id: "query", path: "reports?view=all" },
+          { id: "encoded", path: "%2e%2e/settings" },
+          { id: "", path: "empty-id" },
+          { id: "same-path" },
+          { id: "good", path: "duplicate-id" },
         ],
         links: { sidebar: [{ route: "good", label: "Good" }] },
       }),
@@ -110,7 +114,7 @@ describe("contribution registry", () => {
     const routeIds = getDurableRoutes().map((route) => route.routeId);
     expect(routeIds).toEqual(["good"]);
     // The duplicate must not overwrite the first "good" route.
-    expect(getDurableRoutes()[0].href).toBe("/addons/swingfolio");
+    expect(getDurableRoutes()[0].href).toBe(`/addons/${ADDON}`);
     expect(getDurableNavItems().map((item) => item.id)).toEqual([`${ADDON}:good`]);
   });
 
@@ -118,7 +122,7 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: {
           sidebar: [
             { route: "home", label: "Good" },
@@ -142,12 +146,17 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "hidden", path: "/addons/swingfolio/hidden" }],
+        routes: [{ id: "hidden", path: "hidden/:id" }],
       }),
     );
 
     expect(getDurableRoutes()).toEqual([
-      expect.objectContaining({ addonId: ADDON, routeId: "hidden" }),
+      expect.objectContaining({
+        addonId: ADDON,
+        routeId: "hidden",
+        href: `/addons/${ADDON}/hidden/:id`,
+        path: `addons/${ADDON}/hidden/:id`,
+      }),
     ]);
     expect(getDurableNavItems()).toEqual([]);
   });
@@ -156,7 +165,7 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: {
           "asset/actions": [{ route: "home", label: "Open Swingfolio" }],
         },
@@ -171,14 +180,14 @@ describe("contribution registry", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: { sidebar: [{ route: "home", label: "Swingfolio" }] },
       }),
     );
     ingestAddonContributions(
       "other-addon",
       manifest("other-addon", {
-        routes: [{ id: "home", path: "/addons/other" }],
+        routes: [{ id: "home" }],
         links: { sidebar: [{ route: "home", label: "Other" }] },
       }),
     );
@@ -189,11 +198,21 @@ describe("contribution registry", () => {
     expect(getDurableRoutes().map((route) => route.addonId)).toEqual(["other-addon"]);
   });
 
+  it("mounts identical contributed suffixes under each addon's own namespace", () => {
+    ingestAddonContributions(ADDON, manifest(ADDON, { routes: [{ id: "home" }] }));
+    ingestAddonContributions("other-addon", manifest("other-addon", { routes: [{ id: "home" }] }));
+
+    expect(getDurableRoutes().map((route) => route.href)).toEqual([
+      "/addons/other-addon",
+      `/addons/${ADDON}`,
+    ]);
+  });
+
   it("dedupes a transient runtime registration that duplicates a durable id (durable wins)", () => {
     ingestAddonContributions(
       ADDON,
       manifest(ADDON, {
-        routes: [{ id: "home", path: "/addons/swingfolio" }],
+        routes: [{ id: "home" }],
         links: { sidebar: [{ route: "home", label: "Durable Home" }] },
       }),
     );
@@ -203,9 +222,9 @@ describe("contribution registry", () => {
     registerAddonNavItem(ADDON, {
       id: "home",
       label: "Transient Home",
-      route: "/addons/swingfolio",
+      route: `/addons/${ADDON}`,
     });
-    registerAddonRoute(ADDON, { path: "/addons/swingfolio", routeId: "home" });
+    registerAddonRoute(ADDON, { path: `/addons/${ADDON}`, routeId: "home" });
 
     const navForAddon = getDynamicNavItems().filter((item) => item.addonId === ADDON);
     expect(navForAddon).toHaveLength(1);

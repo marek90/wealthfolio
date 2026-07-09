@@ -13,9 +13,15 @@ vi.mock("@/addons/iframe/addon-iframe-manager", () => ({
 import {
   activateView,
   clearActivatable,
+  getActivationEpoch,
+  getPublishedActivationEpoch,
+  invalidateActivations,
+  isActivationEpochCurrent,
   isPinned,
+  publishActivationEpoch,
   registerActivatable,
   resetActivations,
+  subscribeToActivationEpoch,
 } from "./activation-coordinator";
 
 /** A boot function whose resolution can be controlled by the test. */
@@ -66,6 +72,64 @@ describe("activation coordinator", () => {
 
     expect(first.fn).toHaveBeenCalledTimes(1);
     expect(second.fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a stale boot erase or replace the current generation", async () => {
+    const oldBoot = deferredBoot();
+    registerActivatable("a", oldBoot.fn, { pinned: false });
+    const oldActivation = activateView("a");
+
+    resetActivations();
+    const currentBoot = deferredBoot();
+    registerActivatable("a", currentBoot.fn, { pinned: false });
+    const currentActivation = activateView("a");
+
+    oldBoot.resolve(false);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The stale promise follows the current generation, and its `finally`
+    // must not delete the current in-flight entry. A third caller still joins
+    // the one current boot.
+    const concurrentActivation = activateView("a");
+    expect(currentBoot.fn).toHaveBeenCalledTimes(1);
+
+    currentBoot.resolve(true);
+    await expect(
+      Promise.all([oldActivation, currentActivation, concurrentActivation]),
+    ).resolves.toEqual([true, true, true]);
+  });
+
+  it("keeps the reload epoch in memory and notifies only when re-registration is published", async () => {
+    let capturedEpoch = -1;
+    registerActivatable(
+      "a",
+      vi.fn((epoch: number) => {
+        capturedEpoch = epoch;
+        return Promise.resolve(true);
+      }),
+      { pinned: false },
+    );
+    await activateView("a");
+    expect(isActivationEpochCurrent(capturedEpoch)).toBe(true);
+
+    const listener = vi.fn();
+    const unsubscribe = subscribeToActivationEpoch(listener);
+    const publishedEpoch = getPublishedActivationEpoch();
+    invalidateActivations();
+    expect(isActivationEpochCurrent(capturedEpoch)).toBe(false);
+    expect(getPublishedActivationEpoch()).toBe(publishedEpoch);
+    expect(listener).not.toHaveBeenCalled();
+
+    const invalidatedEpoch = getActivationEpoch();
+    resetActivations();
+    expect(getActivationEpoch()).toBeGreaterThan(invalidatedEpoch);
+    expect(listener).not.toHaveBeenCalled();
+
+    publishActivationEpoch();
+    expect(getPublishedActivationEpoch()).toBe(getActivationEpoch());
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 
   it("returns true immediately when the runtime already exists, without booting", async () => {

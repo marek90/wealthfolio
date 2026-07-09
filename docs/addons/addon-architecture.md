@@ -564,7 +564,7 @@ Each addon includes a manifest.json file:
   "sdkVersion": "3.6.1",
   "minWealthfolioVersion": "3.6.1",
   "contributes": {
-    "routes": [{ "id": "my-addon", "path": "/addons/my-addon" }],
+    "routes": [{ "id": "my-addon" }],
     "links": {
       "sidebar": [
         {
@@ -609,6 +609,10 @@ Optional fields:
   `{ category, functions, purpose }`)
 - `sdkVersion`: SDK version the addon targets (`"3.6.1"`)
 - `minWealthfolioVersion`: Minimum host version required to load the addon
+
+The host mounts every contributed route below `/addons/<manifest.id>`. Omit
+`path` for that root page, or set a relative suffix such as `reports/:year` for
+a nested page; manifests cannot choose an absolute route namespace.
 
 ## File Structure
 

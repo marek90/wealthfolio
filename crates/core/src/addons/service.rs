@@ -927,6 +927,43 @@ fn enforce_min_wealthfolio_version(manifest: &AddonManifest) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_contributed_route_path(path: &str) -> Result<(), String> {
+    if path != path.trim() {
+        return Err(
+            "Invalid contributes.routes path: leading or trailing whitespace is not allowed"
+                .to_string(),
+        );
+    }
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.starts_with('/') {
+        return Err(
+            "Invalid contributes.routes path: expected a relative path below the addon mount"
+                .to_string(),
+        );
+    }
+    if path
+        .chars()
+        .any(|character| matches!(character, '\\' | '?' | '#' | '%'))
+    {
+        return Err(
+            "Invalid contributes.routes path: backslashes, escapes, queries, and fragments are not allowed"
+                .to_string(),
+        );
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(
+            "Invalid contributes.routes path: empty and traversal segments are not allowed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn parse_manifest_json_metadata(manifest_content: &str) -> Result<AddonManifest, String> {
     parse_manifest_json_metadata_with_options(manifest_content, true)
 }
@@ -1025,7 +1062,7 @@ fn parse_manifest_json_metadata_with_options(
 
     // Declarative contributions (routes + links). Parse the whole `contributes`
     // sub-object via serde for brevity, then validate: every route has a
-    // non-empty id/path with no duplicate ids, and every link (in any slot,
+    // non-empty id with a unique host-relative path, and every link (in any slot,
     // including unknown future slots, which are accepted and round-tripped
     // as-is) has a non-empty label and references a declared route id.
     let contributes = match raw_manifest.get("contributes") {
@@ -1033,17 +1070,23 @@ fn parse_manifest_json_metadata_with_options(
             let parsed: AddonContributes = serde_json::from_value(value.clone())
                 .map_err(|e| format!("Invalid 'contributes' field in manifest.json: {}", e))?;
             let mut route_ids = std::collections::HashSet::new();
+            let mut route_paths = std::collections::HashSet::new();
             for route in &parsed.routes {
                 if route.id.trim().is_empty() {
                     return Err("Missing 'id' field in contributes.routes entry".to_string());
-                }
-                if route.path.trim().is_empty() {
-                    return Err("Missing 'path' field in contributes.routes entry".to_string());
                 }
                 if !route_ids.insert(route.id.as_str()) {
                     return Err(format!(
                         "Invalid 'contributes' field in manifest.json: duplicate route id '{}'",
                         route.id
+                    ));
+                }
+                let path = route.path.as_deref().unwrap_or("");
+                validate_contributed_route_path(path)?;
+                if !route_paths.insert(path.to_ascii_lowercase()) {
+                    return Err(format!(
+                        "Invalid 'contributes' field in manifest.json: duplicate route path '{}'",
+                        path
                     ));
                 }
             }
