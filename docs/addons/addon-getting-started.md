@@ -116,16 +116,16 @@ permissions it needs:
 Navigation is **declarative**: the host reads `contributes.routes` and
 `contributes.links` from the manifest and renders your sidebar entry _without_
 running your addon (this is what enables lazy activation). A **route** is a
-durable addon page; a **link** places a route into a host slot (only
-`"sidebar"` is consumed today) and references a declared route by `id`. The
-runtime `router.add({ id })` in the next section MUST use the same id as the
-declared route.
+durable addon page; a **link** places a route into a host slot (only `"sidebar"`
+is consumed today) and references a declared route by `id`. The runtime
+`router.add({ id })` in the next section MUST use the same id as the declared
+route.
 
 > **Permissions:** `ui`, `query`, `toast`, `logger`, and `storage` are implicit
 > **baseline capabilities** — you do not declare them. Only data categories
-> (`accounts`, `portfolio`, `activities`, …) plus `files`, `network`,
-> `secrets`, `events`, `snapshots`, and `settings` require a permission entry
-> and user consent.
+> (`accounts`, `portfolio`, `activities`, …) plus `files`, `network`, `secrets`,
+> `events`, `snapshots`, and `settings` require a permission entry and user
+> consent.
 
 ## Main Addon File
 

@@ -859,9 +859,9 @@ Removes a stored value.
 await ctx.api.storage.delete("prefs");
 ```
 
-> **Info** **Storage vs. Secrets**: use `storage` for ordinary addon
-> preferences and state; use `secrets` (below) for sensitive tokens and API
-> keys, which are encrypted at rest.
+> **Info** **Storage vs. Secrets**: use `storage` for ordinary addon preferences
+> and state; use `secrets` (below) for sensitive tokens and API keys, which are
+> encrypted at rest.
 
 ---
 

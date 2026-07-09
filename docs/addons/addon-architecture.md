@@ -520,10 +520,10 @@ export default enable;
 
 ### Dynamic Loading
 
-As of 3.6, each addon module is loaded and executed inside an **isolated
-sandbox iframe** (`sandbox="allow-scripts"`, opaque origin) rather than in the
-host's main runtime — the host shares React and the QueryClient with the sandbox
-at runtime. See the
+As of 3.6, each addon module is loaded and executed inside an **isolated sandbox
+iframe** (`sandbox="allow-scripts"`, opaque origin) rather than in the host's
+main runtime — the host shares React and the QueryClient with the sandbox at
+runtime. See the
 [v3.5 → v3.6 migration guide](./addon-migration-guide-v3.5-to-v3.6.md) for the
 sandbox model. Within the sandbox the loader still resolves the module via a
 dynamic `import()`:
@@ -578,8 +578,16 @@ Each addon includes a manifest.json file:
     }
   },
   "permissions": [
-    { "category": "portfolio", "functions": ["getHoldings"], "purpose": "Read holdings" },
-    { "category": "market-data", "functions": ["sync"], "purpose": "Refresh quotes" }
+    {
+      "category": "portfolio",
+      "functions": ["getHoldings"],
+      "purpose": "Read holdings"
+    },
+    {
+      "category": "market-data",
+      "functions": ["sync"],
+      "purpose": "Refresh quotes"
+    }
   ]
 }
 ```
@@ -597,7 +605,8 @@ Optional fields:
 - `author`: Creator information
 - `contributes`: Declared `routes` and `links` (sidebar navigation) the host can
   render before booting the addon
-- `permissions`: Declared data access (array of `{ category, functions, purpose }`)
+- `permissions`: Declared data access (array of
+  `{ category, functions, purpose }`)
 - `sdkVersion`: SDK version the addon targets (`"3.6.1"`)
 - `minWealthfolioVersion`: Minimum host version required to load the addon
 
