@@ -17,11 +17,12 @@ use wealthfolio_core::sync::{
     SyncOutboxEvent, SyncOutboxStatus, APP_SYNC_TABLES,
 };
 
+use crate::addons::addon_storage_id;
 use crate::db::{get_connection, WriteHandle};
 use crate::errors::StorageError;
 use crate::schema::{
-    spending_preset_rule_deletions, sync_applied_events, sync_cursor, sync_device_config,
-    sync_engine_state, sync_entity_metadata, sync_outbox, sync_table_state,
+    addon_storage, spending_preset_rule_deletions, sync_applied_events, sync_cursor,
+    sync_device_config, sync_engine_state, sync_entity_metadata, sync_outbox, sync_table_state,
 };
 use crate::spending::deterministic_ids::preset_rule_deletion_id;
 use crate::sync::broker_activity_patch::{
@@ -949,6 +950,8 @@ fn entity_storage_mapping(entity: &SyncEntity) -> Option<(&'static str, &'static
         SyncEntity::BudgetGroupAssignment => Some(("budget_group_assignments", "id")),
         SyncEntity::BudgetTarget => Some(("budget_targets", "id")),
         SyncEntity::BudgetRolloverSetting => Some(("budget_rollover_settings", "id")),
+        // Composite primary key; handled by custom branch in apply_remote_event_lww_tx.
+        SyncEntity::AddonStorage => None,
     }
 }
 
@@ -1652,6 +1655,72 @@ fn apply_spending_preset_rule_deletion_event(
     Ok(())
 }
 
+fn addon_storage_identity_from_payload(
+    payload_json: &serde_json::Value,
+) -> Option<(String, String)> {
+    let addon_id = payload_json
+        .get("addon_id")
+        .or_else(|| payload_json.get("addonId"))
+        .and_then(serde_json::Value::as_str)?;
+    let key = payload_json
+        .get("key")
+        .and_then(serde_json::Value::as_str)?;
+    Some((addon_id.to_string(), key.to_string()))
+}
+
+fn apply_addon_storage_event(
+    conn: &mut SqliteConnection,
+    entity_id: &str,
+    op: SyncOperation,
+    payload_json: &serde_json::Value,
+    _client_timestamp: &str,
+) -> Result<()> {
+    let Some((addon_id, key)) = addon_storage_identity_from_payload(payload_json) else {
+        return Err(Error::Database(DatabaseError::Internal(
+            "addon_storage payload must include addon_id/key".to_string(),
+        )));
+    };
+    let expected_entity_id = addon_storage_id(&addon_id, &key);
+    if expected_entity_id != entity_id {
+        return Err(Error::Database(DatabaseError::Internal(format!(
+            "addon_storage entity_id '{}' does not match payload key '{}'",
+            entity_id, expected_entity_id
+        ))));
+    }
+
+    match op {
+        SyncOperation::Delete => {
+            diesel::delete(
+                addon_storage::table
+                    .filter(addon_storage::addon_id.eq(&addon_id))
+                    .filter(addon_storage::key.eq(&key)),
+            )
+            .execute(conn)
+            .map_err(StorageError::from)?;
+        }
+        SyncOperation::Create | SyncOperation::Update => {
+            let value = payload_json
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::Database(DatabaseError::Internal(
+                        "addon_storage payload must include value".to_string(),
+                    ))
+                })?;
+            diesel::replace_into(addon_storage::table)
+                .values((
+                    addon_storage::addon_id.eq(&addon_id),
+                    addon_storage::key.eq(&key),
+                    addon_storage::value.eq(value),
+                ))
+                .execute(conn)
+                .map_err(StorageError::from)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Convert a serializable DB model to a JSON object with snake_case keys
 /// suitable for SQL upsert. Returns None if serialization fails.
 fn model_to_sql_fields<T: serde::Serialize>(
@@ -1941,6 +2010,15 @@ fn apply_remote_event_lww_tx(
                 &client_timestamp_value,
             )?;
             mark_table_incremental_applied_tx(conn, "spending_preset_rule_deletions")?;
+        } else if entity == SyncEntity::AddonStorage {
+            apply_addon_storage_event(
+                conn,
+                &entity_id_value,
+                op,
+                &payload_json,
+                &client_timestamp_value,
+            )?;
+            mark_table_incremental_applied_tx(conn, "addon_storage")?;
         } else if let Some((table_name, pk_name)) = entity_storage_mapping(&entity) {
             match op {
                 SyncOperation::Delete => {
@@ -7814,6 +7892,100 @@ mod tests {
             .get_result(&mut conn)
             .expect("count preset deletion");
         assert_eq!(tombstone_count, 0);
+    }
+
+    #[tokio::test]
+    async fn replay_addon_storage_applies_and_deletes() {
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+        let entity_id = addon_storage_id("addon-a", "prefs");
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id.clone(),
+                SyncOperation::Update,
+                "evt-addon-storage-upsert".to_string(),
+                "2026-02-15T00:00:00Z".to_string(),
+                1,
+                serde_json::json!({
+                    "addonId": "addon-a",
+                    "key": "prefs",
+                    "value": "v1"
+                }),
+            )
+            .await
+            .expect("apply addon storage upsert");
+        assert!(applied);
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let value: Option<String> = addon_storage::table
+            .filter(addon_storage::addon_id.eq("addon-a"))
+            .filter(addon_storage::key.eq("prefs"))
+            .select(addon_storage::value)
+            .first::<String>(&mut conn)
+            .optional()
+            .expect("query addon storage");
+        assert_eq!(value.as_deref(), Some("v1"));
+        drop(conn);
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                entity_id,
+                SyncOperation::Delete,
+                "evt-addon-storage-delete".to_string(),
+                "2026-02-15T00:00:01Z".to_string(),
+                2,
+                serde_json::json!({
+                    "addonId": "addon-a",
+                    "key": "prefs"
+                }),
+            )
+            .await
+            .expect("apply addon storage delete");
+        assert!(applied);
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let count: i64 = addon_storage::table
+            .filter(addon_storage::addon_id.eq("addon-a"))
+            .filter(addon_storage::key.eq("prefs"))
+            .count()
+            .get_result(&mut conn)
+            .expect("count addon storage");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn replay_addon_storage_rejects_mismatched_entity_id() {
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+
+        let err = repo
+            .apply_remote_event_lww(
+                SyncEntity::AddonStorage,
+                "wrong-entity-id".to_string(),
+                SyncOperation::Update,
+                "evt-addon-storage-mismatch".to_string(),
+                "2026-02-15T00:00:00Z".to_string(),
+                1,
+                serde_json::json!({
+                    "addonId": "addon-a",
+                    "key": "prefs",
+                    "value": "v1"
+                }),
+            )
+            .await
+            .expect_err("mismatched entity id should fail replay");
+
+        assert!(err.to_string().contains("does not match payload key"));
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let count: i64 = addon_storage::table
+            .count()
+            .get_result(&mut conn)
+            .expect("count addon storage");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
