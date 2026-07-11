@@ -2177,6 +2177,11 @@ impl PerformanceService {
                 Decimal::ZERO,
                 activity.charge_amt_for(activity_type),
             ),
+            ActivityType::Credit
+            | ActivityType::Deposit
+            | ActivityType::Withdrawal
+            | ActivityType::TransferIn
+            | ActivityType::TransferOut => (Decimal::ZERO, Decimal::ZERO, activity.tax_amt()),
             _ => (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
         }
     }
