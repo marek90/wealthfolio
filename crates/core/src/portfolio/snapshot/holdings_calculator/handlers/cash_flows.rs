@@ -6,7 +6,6 @@ use crate::errors::Result;
 use crate::portfolio::snapshot::AccountStateSnapshot;
 use log::warn;
 use rust_decimal::Decimal;
-use std::str::FromStr;
 
 impl HoldingsCalculator {
     /// Handle DEPOSIT activity.
@@ -123,15 +122,10 @@ impl HoldingsCalculator {
 
         let activity_currency = &activity.currency;
         let activity_amount = activity.amt();
-        let withholding_tax = match ActivityType::from_str(activity.effective_type()) {
-            Ok(ActivityType::Dividend | ActivityType::Interest | ActivityType::Credit) => {
-                activity.tax_amt()
-            }
-            _ => Decimal::ZERO,
-        };
 
-        // Book cash in ACTIVITY currency (gross income - fees - withholding tax)
-        let net_amount = activity_amount - activity.fee_amt() - withholding_tax;
+        // Book cash in ACTIVITY currency (gross income - fees - withholding tax).
+        // All types dispatched here (DIVIDEND/INTEREST/CREDIT) apply withholding tax.
+        let net_amount = activity_amount - activity.fee_amt() - activity.tax_amt();
         add_cash(state, activity_currency, net_amount);
 
         // CREDIT/BONUS is external contribution (new capital entering portfolio)

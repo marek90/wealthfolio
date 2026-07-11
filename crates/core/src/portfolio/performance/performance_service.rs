@@ -2177,6 +2177,9 @@ impl PerformanceService {
                 Decimal::ZERO,
                 activity.charge_amt_for(activity_type),
             ),
+            // Note: fees on these cash flows (and cash transfers below) are booked
+            // to cash but knowingly not attributed — only trade and income fees are
+            // treated as performance costs today.
             ActivityType::Credit | ActivityType::Deposit | ActivityType::Withdrawal => {
                 (Decimal::ZERO, Decimal::ZERO, activity.tax_amt())
             }
