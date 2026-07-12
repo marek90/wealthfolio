@@ -80,6 +80,12 @@ Plan first (analyze before editing), then execute:
      (recovery path), and only complete date ranges may reach `setDateRange`.
    - Account page clips at the Card border — re-check its chart layout
      separately from the dashboard (CUSTOM_CHANGES.md §5.12).
+   - Mobile calendar UIs live in a bottom Sheet, never a Popover — iOS Safari
+     drops taps on the calendar's absolutely-positioned month-nav inside a
+     Popover, and never add `[-webkit-overflow-scrolling:touch]` to a scroll
+     container with absolutely-positioned children (CUSTOM_CHANGES.md §5.14).
+     Chromium/Playwright cannot reproduce this bug — mobile-touch changes need
+     a real-device check; keep the mobile e2e driving via `tap()`, not `click()`.
 6. **Docker rebuild + swap:**
    - `docker compose build` (background it; log to a file).
    - `docker compose down`, then back up the DB **before** the new version's
