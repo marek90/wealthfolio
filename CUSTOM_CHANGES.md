@@ -895,4 +895,34 @@ on `chartData.length` (see §3.3).
 
 ---
 
-*Last updated: 2026-07-05. Covers all changes through the v3.6.0 merge and the mobile calendar fixes.*
+## 10. Upstream v3.6.1 Merge (2026-07-12)
+
+Upstream v3.6.1 (24 commits: addon-SDK sidebar icon set, MCP asset-classification
+write tool, provider-quote prioritization in storage-sqlite, relaxed health
+stale-price threshold, Keycloak dev realm, Windows installer CI, docs) was merged
+with `git merge v3.6.1`. Pre-merge state is on branch `backup/pre-v3.6.1`
+(commit beeda685).
+
+- **Zero conflicts.** Pre-merge impact analysis (GitHub compare API
+  `v3.6.0...v3.6.1` vs `git diff --name-only v3.6.0..main`) showed an empty
+  intersection — upstream touched none of our custom files. The auto-merge was
+  clean; all custom fingerprints (`Brush`, `ReferenceArea`, `onVisibleRangeChange`,
+  `interval-pill-suppressed`, `scrollRef`, `chart-range-picker`) verified present
+  after the merge.
+- **Pre-existing test failure fixed** (commit after the merge): the mobile
+  calendar fix (fff577d9) made `ChartRangePicker` call `useIsMobile()` from
+  `@wealthfolio/ui`, but `dashboard-content.test.tsx` and `account-page.test.tsx`
+  mock that module with explicit factories that lacked the export — 9 tests
+  crashed on render. Verified failing on `backup/pre-v3.6.1` too (not a merge
+  regression). Fix: added `useIsMobile: () => false` to both mock factories.
+  **Lesson:** when adding a new `@wealthfolio/ui` import to a component rendered
+  by the dashboard/account pages, extend the `vi.mock("@wealthfolio/ui", ...)`
+  factories in both page test files.
+- Gates after merge: `pnpm type-check` clean, `pnpm test` 1018/1018 green,
+  E2E `90-chart-calendar` 3/3 green against a disposable container of the
+  rebuilt image.
+- DB backup before the new version's migrations: `data/wealthfolio.db.pre-v3.6.1.bak`.
+
+---
+
+*Last updated: 2026-07-12. Covers all changes through the v3.6.1 merge.*
