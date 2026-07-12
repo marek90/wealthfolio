@@ -200,6 +200,7 @@ vi.mock("@wealthfolio/ui", () => {
     },
     IntervalSelector: () => <div>interval-selector</div>,
     Page: Passthrough,
+    useIsMobile: () => false,
     PageContent: Passthrough,
     PageHeader: ({ children }: { children?: React.ReactNode }) => <header>{children}</header>,
     PrivacyAmount: ({ value, currency }: { value: number; currency: string }) => (

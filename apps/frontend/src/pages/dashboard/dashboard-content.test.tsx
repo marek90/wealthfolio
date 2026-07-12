@@ -59,6 +59,7 @@ vi.mock("@wealthfolio/ui", () => ({
           description: "3M",
         },
   IntervalSelector: () => <div>interval-selector</div>,
+  useIsMobile: () => false,
   usePersistentState: () => [uiMocks.intervalCode, vi.fn()],
 }));
 
