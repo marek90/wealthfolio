@@ -4,6 +4,14 @@ Copy everything below the line into a fresh Claude Code session (started in this
 repo) whenever upstream releases a new version. Replace `X.Y.Z` with the new
 version number. Written 2026-07-05 after the v3.6.0 upgrade.
 
+To make the app accessible from an iPhone / other devices on the network, on the macOS host run: 
+
+```
+socat TCP-LISTEN:8899,fork,reuseaddr TCP:192.168.64.6:8899
+```
+
+and then you can access it over at `http://192.168.0.90:8899/`. 
+
 ---
 
 Wealthfolio X.Y.Z has been released upstream. Completely and autonomously (I am
