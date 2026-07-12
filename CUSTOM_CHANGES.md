@@ -635,7 +635,16 @@ WF_DB_PATH=/data/wealthfolio.db
 WF_SECRET_KEY=<contents of ./secrets/wf_secret_key>
 WF_AUTH_PASSWORD_HASH=<contents of ./secrets/wf_auth_password_hash>
 WF_CORS_ALLOW_ORIGINS=http://localhost:8899
+WF_MCP_ENABLED=true
 ```
+
+**`WF_MCP_ENABLED=true` turns on AI Agent Access** (the `/mcp` endpoint; agents
+authenticate with a PAT created under Settings → Agent Access). It is **runtime
+config, not baked into the image** — every deployment host (including any server
+that deploys from an exported tarball) must set it in its own env file. Verify with
+`curl -s -o /dev/null -w '%{http_code}' http://<host>:8899/mcp` → `401` means
+mounted + auth-gated; `404` means the flag is missing. The compose deployment on
+this host reads `./secrets/.env.compose` (same variables; `compose.yml` `env_file`).
 
 **Important:** Do NOT single-quote the hash value in `.env.docker`. Docker's `--env-file` reads the file literally (no shell processing), so quotes are included as literal characters and break authentication. The `$` in the Argon2 hash string does NOT get interpolated when using `--env-file`.
 
@@ -655,6 +664,28 @@ docker run -d --name wealthfolio-custom \
 # Verify
 curl -fsS http://localhost:8899/api/v1/healthz
 ```
+
+### Deploying on Another Server From an Exported Tarball (no source build)
+
+The build host exports the image after every upgrade (`docker save
+wealthfolio-custom:latest | gzip > wealthfolio-custom-vX.Y.Z.tar.gz`). On the
+target server:
+
+```bash
+gunzip -c wealthfolio-custom-vX.Y.Z.tar.gz | docker load
+# then recreate the container with THAT host's env file (must include
+# WF_MCP_ENABLED=true for AI Agent Access — env is not part of the image):
+docker rm -f wealthfolio-custom
+docker run -d --name wealthfolio-custom \
+  --env-file ./secrets/.env.docker \
+  -p 8899:8088 \
+  -v "$(pwd)/data":/data \
+  wealthfolio-custom
+curl -fsS http://localhost:8899/api/v1/healthz
+```
+
+Back up that server's `data/wealthfolio.db` first when the new image carries DB
+migrations (they are one-way).
 
 ### Rebuild After Code Changes
 
