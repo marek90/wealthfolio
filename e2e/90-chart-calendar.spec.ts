@@ -54,14 +54,14 @@ async function openDashboardCalendar(page: Page) {
   return trigger;
 }
 
-/** Click a day-of-month button inside the (first) visible month grid. */
-async function clickDay(page: Page, day: number) {
-  await page
-    .getByRole("grid")
-    .first()
-    .getByText(String(day), { exact: true })
-    .first()
-    .click();
+/** Click (or tap, on touch viewports) a day-of-month button inside the (first) visible month grid. */
+async function clickDay(page: Page, day: number, opts: { tap?: boolean } = {}) {
+  const dayButton = page.getByRole("grid").first().getByText(String(day), { exact: true }).first();
+  if (opts.tap) {
+    await dayButton.tap();
+  } else {
+    await dayButton.click();
+  }
 }
 
 test.describe.configure({ mode: "serial" });
@@ -97,13 +97,22 @@ test.describe("Chart calendar range picker", () => {
   test.describe("mobile viewport", () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-    test("shows a single month with prev/next nav, fits the viewport", async ({ page }) => {
-      await openDashboardCalendar(page);
+    test("bottom sheet: single month, touch month-nav works, Done commits the range", async ({
+      page,
+    }) => {
+      // Open via TAP, not click — the July 2026 regression (dead month-nav buttons on
+      // iOS) only reproduces through the touch event path.
+      await gotoAppPath(page, "/");
+      const trigger = page.getByTestId(CALENDAR_TRIGGER).first();
+      await expect(trigger).toBeVisible({ timeout: 30000 });
+      await trigger.scrollIntoViewIfNeeded();
+      await trigger.tap();
+      await expect(page.getByRole("grid").first()).toBeVisible({ timeout: 10000 });
 
       // One month grid only — three stacked months overflowed a phone screen.
       await expect(page.getByRole("grid")).toHaveCount(1);
 
-      // Month navigation must be available and the popover must fit the viewport.
+      // Month navigation must be available and must respond to TOUCH.
       const nextButton = page.locator(".rdp-button_next, [aria-label*='next month' i]").first();
       const prevButton = page
         .locator(".rdp-button_previous, [aria-label*='previous month' i]")
@@ -111,18 +120,31 @@ test.describe("Chart calendar range picker", () => {
       await expect(nextButton).toBeVisible();
       await expect(prevButton).toBeVisible();
 
+      const caption = page.locator("[class*='month_caption']").first();
+      const monthBefore = await caption.textContent();
+      await prevButton.tap();
+      await expect(caption).not.toHaveText(monthBefore ?? "", { timeout: 5000 });
+
       const calendarRoot = page.locator(".rdp-root").first();
       const box = await calendarRoot.boundingBox();
       expect(box).not.toBeNull();
       expect(box!.width).toBeLessThanOrEqual(390);
 
-      // Navigate one month back and select a full range — everything stays mounted.
-      await prevButton.click();
-      await clickDay(page, 5);
+      // Select a full range by touch; nothing commits until Done is tapped.
+      await clickDay(page, 5, { tap: true });
       await expect(page.getByRole("grid").first()).toBeVisible();
-      await clickDay(page, 12);
+      await clickDay(page, 12, { tap: true });
+      await expect(trigger).not.toHaveClass(/bg-background/);
+
+      const applyButton = page.getByTestId("chart-range-picker-apply");
+      await expect(applyButton).toBeEnabled();
+      await applyButton.tap();
+
+      // Sheet closes, the picker becomes the active control, chart UI stays mounted.
+      await expect(page.getByRole("grid")).toHaveCount(0);
+      await expect(trigger).toHaveClass(/bg-background/, { timeout: 10000 });
       await expect(page.locator(".history-brush").first()).toBeVisible();
-      await expect(page.getByTestId(CALENDAR_TRIGGER).first()).toBeVisible();
+      await expect(trigger).toBeVisible();
     });
   });
 });

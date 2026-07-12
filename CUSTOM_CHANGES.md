@@ -74,9 +74,12 @@ A compact calendar icon bubble that sits inline beside the period pills.
 - Icon-only (no date text on the button) — the selected range shows inside the calendar popover.
 - Ghost button variant, `h-8 w-9 rounded-full p-0` — matches the DateRangeSelector trigger style used elsewhere in the app.
 - `isActive?: boolean` prop — when true, applies `bg-background text-foreground shadow-sm` to replicate the same "white bubble" highlight the period pills use.
-- `numberOfMonths={isMobile ? 1 : 3}` via `useIsMobile()` from `@wealthfolio/ui` — 3 stacked months overflow a phone viewport and made the picker unusable on mobile. One month + react-day-picker's default `<` `>` month nav on phones; 3 months on desktop. Same split `DateRangeSelector` (packages/ui) uses.
-- **Draft-range state** — react-day-picker v9 range mode fires `onSelect` with `{from, to: undefined}` on the FIRST tap. Committing that to the parent refetches a degenerate window, the chart empties, and (before the dashboard mount fix, §3.3) the whole controls row incl. the open popover unmounted. The in-progress selection is therefore held in local `draft` state; `onChange` fires only when both `from` and `to` are set. Opening/closing the popover discards the draft and reseeds from `value`.
-- PopoverContent gets `max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] overflow-y-auto` (copied from DateRangeSelector's desktop branch) so the calendar can never overflow the viewport again.
+- **Desktop vs mobile split via `useIsMobile()` (from `@wealthfolio/ui`), mirroring `DateRangeSelector` (packages/ui) exactly:**
+  - **Desktop (≥768px): Popover** with `numberOfMonths={3}`; a complete from+to selection commits immediately.
+  - **Mobile (<768px): bottom Sheet** (`side="bottom"`, `rounded-t-4xl`, max-h 85vh) with a single month (`--cell-size:2.5rem`), Start/End summary boxes, and Clear/Done footer. Nothing commits until Done is tapped (Done disabled until the range is complete). **The Sheet is a functional requirement, not styling** — see §5.14: the calendar's month-nav buttons don't receive taps on iOS Safari inside a Popover.
+- **Draft-range state** — react-day-picker v9 range mode fires `onSelect` with `{from, to: undefined}` on the FIRST tap. Committing that to the parent refetches a degenerate window, the chart empties, and (before the dashboard mount fix, §3.3) the whole controls row incl. the open popover unmounted. The in-progress selection is therefore held in local `draft` state; `onChange` fires only when both `from` and `to` are set (desktop) or when Done is tapped (mobile). Opening/closing discards the draft and reseeds from `value`.
+- PopoverContent gets `max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] overflow-y-auto overscroll-contain` (copied from DateRangeSelector's desktop branch) so the calendar can never overflow the viewport again. Deliberately **without** `[-webkit-overflow-scrolling:touch]` (§5.14).
+- Sheet footer buttons carry `data-testid="chart-range-picker-apply"` / `"chart-range-picker-clear"` for language-independent e2e selectors.
 - Uses existing UI primitives from `@wealthfolio/ui` — no new dependencies.
 - **i18n**: the trigger's aria-label reuses upstream's existing key `ui:dateRange.chooseCustom` (translated in all 5 languages) with an English fallback default — never hardcode user-facing strings; reuse an upstream key when one exists. The trigger also carries `data-testid="chart-range-picker-trigger"` so e2e selectors are language-independent. Visible dates in our code go through the shared `formatDate()` util (not inline `format(d, "MMM d, yyyy")`) so they inherit upstream's formatting/localization choices automatically.
 
@@ -766,6 +769,36 @@ The Argon2 password hash has the format `$argon2id$v=19$m=...$...`. If you put t
 - Use `printf` (not `echo -n`) to generate the hash — avoids trailing newline.
 - Use `--env-file` with Docker (not `-e`) — Docker reads the file literally, no shell expansion.
 - Never single-quote the value in `.env.docker` — Docker doesn't do shell quoting in env files.
+
+### 5.14 iOS Safari: Calendar Month-Nav Dead to Touch Inside a Popover (2026-07-12)
+
+On real iOS Safari (not Chromium touch emulation, which does NOT reproduce it), the
+calendar's `<` `>` month-nav buttons inside a Radix **Popover** ignored taps while
+working fine with a mouse — and while the **day cells kept working by touch**. The
+distinguishing factor: react-day-picker v9 renders the nav absolutely positioned
+(`nav: absolute inset-x-0 top-0`), and our PopoverContent carried
+`[-webkit-overflow-scrolling:touch]` on an `overflow-y-auto` container. Forcing the
+legacy iOS composited-scrolling path is a long-known WebKit bug trigger: absolutely
+positioned children of such containers fail touch hit-testing while normal-flow
+content (the day grid) stays tappable.
+
+Resolution (both parts):
+1. **Mobile now uses a bottom Sheet, not a Popover** — mirroring upstream's
+   `DateRangeSelector`, which splits `isMobile ? Sheet : Popover` for this exact
+   control. In the Sheet the calendar sits in normal document flow inside a plain
+   `overflow-y-auto` div; upstream ships this pattern on real devices.
+2. `[-webkit-overflow-scrolling:touch]` was dropped from the (now desktop-only)
+   PopoverContent — it still mattered for touch iPads ≥768px, which take the desktop
+   branch. The property has been a no-op-at-best since iOS 13; don't reintroduce it
+   on containers that have absolutely-positioned descendants (RDP's nav, badges,
+   sticky overlays…).
+
+Testing lesson: Playwright `.click()` uses the mouse event path even on
+`hasTouch: true` viewports, and even `.tap()` under Chromium did not reproduce this
+WebKit-specific bug. The mobile e2e test now drives the whole flow with `.tap()`
+anyway (it at least exercises touch synthesis), but **real-iOS regressions in this
+area can only be truly confirmed on a device** — treat "e2e passes" as necessary,
+not sufficient, for mobile touch changes.
 
 ---
 
