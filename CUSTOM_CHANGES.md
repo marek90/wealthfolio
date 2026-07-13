@@ -650,6 +650,30 @@ this host reads `./secrets/.env.compose` (same variables; `compose.yml` `env_fil
 
 **Important:** The `WF_AUTH_PASSWORD_HASH` value contains `$` characters. When using `printf` to generate it, no trailing newline is added — unlike `echo` which always adds one.
 
+**Important — `WF_MCP_ENABLED=true` requires Wealthfolio's own auth to be
+configured (`WF_AUTH_PASSWORD_HASH` or OIDC), on top of anything a reverse
+proxy does.** Per the upstream MCP docs (wealthfolio.app/docs/guide/mcp-server)
+and `apps/server/src/config.rs`'s fail-closed checks: if the server is bound to
+a non-loopback address with no `WF_AUTH_PASSWORD_HASH`/OIDC configured, it
+panics at startup — even harder (no `WF_AUTH_REQUIRED=false` escape hatch) when
+`WF_MCP_ENABLED=true`, because PATs are minted through a JWT-protected
+agent-access API that a reverse-proxy-only setup can't stand in for. Both of
+our deployments (this host and the primary server) already set
+`WF_AUTH_PASSWORD_HASH` and never set `WF_AUTH_REQUIRED=false`, so this was
+already satisfied when MCP was turned on (2026-07-12/13) — confirmed via clean
+container logs (no panic) and `/mcp` returning 401, not a startup crash. A
+reverse proxy in front is still fine and recommended for network exposure; it
+just can't replace this app-level auth.
+
+**Getting an MCP token:** there is no CLI/API shortcut — log into the app with
+the Wealthfolio password (the one hashed into `WF_AUTH_PASSWORD_HASH`), go to
+**Settings → AI Agent Access** (`apps/frontend/src/pages/settings/agent-access/`,
+route `/settings/agent-access`), click **Create token**, name it, pick an
+expiry (7d/30d/90d default/1y/no-expiry) and a scope bundle (see
+`scopes.ts` — Read-only, Read+draft, Read+write, Read+write+suggest), then copy
+the token shown — it is not retrievable again. Prefer the narrowest scopes and
+shortest expiry that work; delete tokens once unused.
+
 ### Build and Run
 
 ```bash
