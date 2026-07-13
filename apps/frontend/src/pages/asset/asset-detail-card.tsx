@@ -265,7 +265,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
             <Separator className="my-3" />
             <div>
               <SectionHeader>{t("asset:detailCard.day_range")}</SectionHeader>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-2.5">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2">
                 <div className="flex flex-col">
                   <span className="text-muted-foreground text-xs">
                     {t("asset:detailCard.open")}
