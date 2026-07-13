@@ -21,7 +21,7 @@ interface DailyHoldingPerformanceAmounts {
 
 export interface DailyPortfolioPerformance {
   changeAmount: number;
-  changePct: number;
+  changePct: number | null;
 }
 
 function percentageFromGrossBasis(amount: number, grossBasis: number): number | null {
@@ -61,24 +61,28 @@ export function calculateBasePortfolioPerformance(
 export function calculateDailyPortfolioPerformance(
   holdings: DailyHoldingPerformanceAmounts[],
 ): DailyPortfolioPerformance {
-  const grossExposure = holdings.reduce(
-    (sum, holding) => sum + Math.abs(holding.marketValueBase),
-    0,
-  );
-  const changeAmount = holdings.reduce(
-    (sum, holding) => sum + Math.abs(holding.marketValueBase) * (holding.dayChangePct ?? 0),
-    0,
-  );
+  let grossExposure = 0;
+  let changeAmount = 0;
+  let hasDailyPerformance = false;
+
+  holdings.forEach((holding) => {
+    if (holding.dayChangePct == null) return;
+
+    const exposure = Math.abs(holding.marketValueBase);
+    hasDailyPerformance = true;
+    grossExposure += exposure;
+    changeAmount += exposure * holding.dayChangePct;
+  });
 
   return {
     changeAmount,
-    changePct: grossExposure > 0 ? changeAmount / grossExposure : 0,
+    changePct: grossExposure > 0 ? changeAmount / grossExposure : hasDailyPerformance ? 0 : null,
   };
 }
 
 export function getPortfolioChangePercent(
   returnType: ReturnType,
-  dailyChangePct: number,
+  dailyChangePct: number | null,
   totalPnlPct: number | null,
   totalReturnPct: number | null,
 ): number | null {

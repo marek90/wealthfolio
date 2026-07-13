@@ -103,11 +103,31 @@ describe("calculateDailyPortfolioPerformance", () => {
     expect(performance.changeAmount).toBe(0);
     expect(performance.changePct).toBe(0);
   });
+
+  it("excludes holdings with unavailable daily returns from gross exposure", () => {
+    const performance = calculateDailyPortfolioPerformance([
+      { marketValueBase: 100, dayChangePct: 0.1 },
+      { marketValueBase: 100, dayChangePct: null },
+    ]);
+
+    expect(performance.changeAmount).toBe(10);
+    expect(performance.changePct).toBe(0.1);
+  });
+
+  it("returns an unavailable percentage when every daily return is unavailable", () => {
+    const performance = calculateDailyPortfolioPerformance([
+      { marketValueBase: 100, dayChangePct: null },
+    ]);
+
+    expect(performance.changeAmount).toBe(0);
+    expect(performance.changePct).toBeNull();
+  });
 });
 
 describe("getPortfolioChangePercent", () => {
   it("uses the weighted row value only for daily performance", () => {
     expect(getPortfolioChangePercent("daily", 0.03, 0.4, 0.5)).toBe(0.03);
+    expect(getPortfolioChangePercent("daily", null, 0.4, 0.5)).toBeNull();
   });
 
   it("uses base-currency aggregate returns for pnl and total return", () => {

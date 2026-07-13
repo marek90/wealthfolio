@@ -3,7 +3,7 @@ import { HoldingPerformancePercent } from "@/components/holding-performance-perc
 import { TickerAvatar } from "@/components/ticker-avatar";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { HoldingType, isAlternativeAssetKind } from "@/lib/constants";
-import { getBaseHoldingPerformancePercent } from "@/lib/holding-performance";
+import { getBaseHoldingPerformancePercentForMode } from "@/lib/holding-performance";
 import { parseOccSymbol } from "@/lib/occ-symbol";
 import { Holding } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -62,14 +62,7 @@ function HoldingRow({
       : performanceMode === "pnl"
         ? (holding.totalGain?.base ?? holding.unrealizedGain?.base ?? 0)
         : (holding.dayChange?.base ?? 0);
-  const gainPercent =
-    performanceMode === "return"
-      ? (getBaseHoldingPerformancePercent(holding, "totalReturn") ??
-        getBaseHoldingPerformancePercent(holding, "totalGain"))
-      : performanceMode === "pnl"
-        ? (getBaseHoldingPerformancePercent(holding, "totalGain") ??
-          getBaseHoldingPerformancePercent(holding, "unrealizedGain"))
-        : (holding.dayChangePct ?? 0);
+  const gainPercent = getBaseHoldingPerformancePercentForMode(holding, performanceMode);
 
   return (
     <div

@@ -54,5 +54,8 @@ export function getBaseHoldingPerformancePercentForMode(
       getBaseHoldingPerformancePercent(holding, "totalGain")
     );
   }
-  return getBaseHoldingPerformancePercent(holding, "totalGain");
+  return (
+    getBaseHoldingPerformancePercent(holding, "totalGain") ??
+    getBaseHoldingPerformancePercent(holding, "unrealizedGain")
+  );
 }

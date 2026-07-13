@@ -66,6 +66,21 @@ describe("getBaseHoldingPerformancePercentForMode", () => {
       returnBasis: { local: 100, base: 100 },
     };
 
+    expect(getBaseHoldingPerformancePercentForMode(holding, "daily")).toBeNull();
     expect(getBaseHoldingPerformancePercentForMode(holding, "return")).toBe(0.1);
+  });
+
+  it("falls back to base unrealized gain when total PnL is unavailable", () => {
+    const holding = {
+      costBasis: { local: 100, base: 100 },
+      dayChangePct: null,
+      unrealizedGain: { local: -10, base: 10 },
+      realizedGain: null,
+      totalGain: null,
+      totalReturn: null,
+      returnBasis: { local: 100, base: 100 },
+    };
+
+    expect(getBaseHoldingPerformancePercentForMode(holding, "pnl")).toBe(0.1);
   });
 });
