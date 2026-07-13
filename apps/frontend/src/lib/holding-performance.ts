@@ -6,10 +6,14 @@ export type HoldingPerformanceMetric =
   | "totalGain"
   | "totalReturn";
 
+export type HoldingPerformanceMode = "daily" | "pnl" | "return";
+
 type HoldingPerformanceValues = Pick<
   Holding,
   "costBasis" | "unrealizedGain" | "realizedGain" | "totalGain" | "totalReturn" | "returnBasis"
 >;
+
+type HoldingPerformanceModeValues = HoldingPerformanceValues & Pick<Holding, "dayChangePct">;
 
 function percentFromBasis(amount: number, basis: number): number | null {
   const exposure = Math.abs(basis);
@@ -36,4 +40,19 @@ export function getBaseHoldingPerformancePercent(
   const amount = metric === "totalReturn" ? holding.totalReturn : holding.totalGain;
   if (amount == null || holding.returnBasis == null) return null;
   return percentFromBasis(amount.base, holding.returnBasis.base);
+}
+
+/** Selects the percentage matching base-currency values for a performance mode. */
+export function getBaseHoldingPerformancePercentForMode(
+  holding: HoldingPerformanceModeValues,
+  mode: HoldingPerformanceMode,
+): number | null {
+  if (mode === "daily") return holding.dayChangePct ?? null;
+  if (mode === "return") {
+    return (
+      getBaseHoldingPerformancePercent(holding, "totalReturn") ??
+      getBaseHoldingPerformancePercent(holding, "totalGain")
+    );
+  }
+  return getBaseHoldingPerformancePercent(holding, "totalGain");
 }

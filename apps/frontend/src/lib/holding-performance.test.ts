@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { getBaseHoldingPerformancePercent } from "./holding-performance";
+import {
+  getBaseHoldingPerformancePercent,
+  getBaseHoldingPerformancePercentForMode,
+} from "./holding-performance";
 
 describe("getBaseHoldingPerformancePercent", () => {
   it("derives FX-inclusive percentages independently from local performance", () => {
@@ -32,5 +35,37 @@ describe("getBaseHoldingPerformancePercent", () => {
     expect(getBaseHoldingPerformancePercent(holding, "unrealizedGain")).toBe(0);
     expect(getBaseHoldingPerformancePercent(holding, "totalGain")).toBe(0);
     expect(getBaseHoldingPerformancePercent(holding, "totalReturn")).toBeNull();
+  });
+});
+
+describe("getBaseHoldingPerformancePercentForMode", () => {
+  it("uses base returns for pnl and return modes while preserving daily performance", () => {
+    const holding = {
+      costBasis: { local: 100, base: 100 },
+      dayChangePct: -0.02,
+      unrealizedGain: { local: -10, base: 10 },
+      realizedGain: null,
+      totalGain: { local: -10, base: 10 },
+      totalReturn: { local: -5, base: 12 },
+      returnBasis: { local: 100, base: 100 },
+    };
+
+    expect(getBaseHoldingPerformancePercentForMode(holding, "daily")).toBe(-0.02);
+    expect(getBaseHoldingPerformancePercentForMode(holding, "pnl")).toBe(0.1);
+    expect(getBaseHoldingPerformancePercentForMode(holding, "return")).toBe(0.12);
+  });
+
+  it("falls back to base total gain when total return is unavailable", () => {
+    const holding = {
+      costBasis: { local: 100, base: 100 },
+      dayChangePct: null,
+      unrealizedGain: { local: -10, base: 10 },
+      realizedGain: null,
+      totalGain: { local: -10, base: 10 },
+      totalReturn: null,
+      returnBasis: { local: 100, base: 100 },
+    };
+
+    expect(getBaseHoldingPerformancePercentForMode(holding, "return")).toBe(0.1);
   });
 });
