@@ -115,6 +115,10 @@ Thumbs.db
 .kiro/
 .conductor/
 IMPLEMENTATION_PLAN.md
+# Local customization docs/how-tos (contain infra details, not for the public fork)
+/__CUSTOMIZATION/
+# Claude Code local permission settings (may contain tokens from allowed commands)
+.claude/settings.local.json
 db/
 apps/db/
 apps/tauri/db/

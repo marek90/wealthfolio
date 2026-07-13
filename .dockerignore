@@ -3,6 +3,9 @@
 .gitignore
 .env*
 
+# Local customization docs/how-tos (infra details, must never enter the image)
+__CUSTOMIZATION
+
 # Node workspace artifacts
 node_modules
 **/node_modules
