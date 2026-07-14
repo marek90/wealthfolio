@@ -29,7 +29,8 @@ import {
   isSplitActivity,
   formatSplitRatio,
 } from "@/lib/activity-utils";
-import { ActivityType, SUBTYPE_DISPLAY_NAMES, getExchangeDisplayName } from "@/lib/constants";
+import { localizeActivitySubtypeName } from "@/lib/activity-utils";
+import { ActivityType, getExchangeDisplayName } from "@/lib/constants";
 import { ActivityDetails } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 import { useSettingsContext } from "@/lib/settings-provider";
@@ -43,7 +44,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { Button, EmptyPlaceholder, formatAmount } from "@wealthfolio/ui";
+import { Button, EmptyPlaceholder, formatAmount, formatPrice } from "@wealthfolio/ui";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useActivityMutations } from "../../hooks/use-activity-mutations";
@@ -129,7 +130,7 @@ export const ActivityTable = ({
           const normalizedSubtype = row.original.subtype?.trim().toUpperCase();
           const subtypeLabel =
             normalizedSubtype && normalizedSubtype !== normalizedActivityType
-              ? (SUBTYPE_DISPLAY_NAMES[normalizedSubtype] ?? row.original.subtype)
+              ? localizeActivitySubtypeName(t, normalizedSubtype)
               : undefined;
 
           return (
@@ -358,7 +359,7 @@ export const ActivityTable = ({
             return <div className="text-right">{formatAmount(Number(amount), currency)}</div>;
           }
 
-          return <div className="text-right">{formatAmount(unitPrice, currency)}</div>;
+          return <div className="text-right">{formatPrice(unitPrice, currency)}</div>;
         },
       },
       {

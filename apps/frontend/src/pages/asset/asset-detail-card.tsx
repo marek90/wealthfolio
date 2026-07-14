@@ -6,6 +6,7 @@ import { Separator } from "@wealthfolio/ui/components/ui/separator";
 import { formatPercent } from "@wealthfolio/ui";
 import { GainPercent } from "@wealthfolio/ui";
 import { AmountDisplay } from "@wealthfolio/ui";
+import { PriceDisplay } from "@wealthfolio/ui";
 import { QuantityDisplay } from "@wealthfolio/ui";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 
@@ -99,6 +100,8 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
   const averageCostLabel = isOption
     ? t("asset:detailCard.average_premium")
     : t("asset:detailCard.average_cost");
+  const hasFxEffect =
+    fxEffect !== null && currency.trim().toUpperCase() !== baseCurrency.trim().toUpperCase();
 
   const amountTone = (amount: number | null) => {
     if (amount == null || amount === 0) return "";
@@ -112,7 +115,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
     },
     {
       label: averageCostLabel,
-      value: <AmountDisplay value={averagePrice} currency={currency} isHidden={isBalanceHidden} />,
+      value: <PriceDisplay value={averagePrice} currency={currency} isHidden={isBalanceHidden} />,
     },
     { label: t("asset:detailCard.percent_of_portfolio"), value: formatPercent(portfolioPercent) },
   ];
@@ -156,13 +159,17 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
       percent: null,
       color: amountTone(income),
     },
-    {
-      label: t("asset:detailCard.fx_effect"),
-      amount: fxEffect,
-      currency: baseCurrency,
-      percent: null,
-      color: amountTone(fxEffect),
-    },
+    ...(hasFxEffect
+      ? [
+          {
+            label: t("asset:detailCard.fx_effect"),
+            amount: fxEffect,
+            currency: baseCurrency,
+            percent: null,
+            color: amountTone(fxEffect),
+          },
+        ]
+      : []),
     {
       label: t("asset:detailCard.price_return"),
       amount: null,
@@ -209,7 +216,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
         <Separator className="my-3" />
         <div>
           <SectionHeader>{t("asset:detailCard.position")}</SectionHeader>
-          <div className="space-y-1.5 text-sm">
+          <div className="space-y-2 text-sm">
             {positionRows.map(({ label, value }, idx) => (
               <div key={idx} className="flex justify-between">
                 <span className="text-muted-foreground">{label}</span>
@@ -222,7 +229,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
         <Separator className="my-3" />
         <div>
           <SectionHeader>{t("asset:detailCard.performance")}</SectionHeader>
-          <div className="space-y-1.5 text-sm">
+          <div className="space-y-2 text-sm">
             {performanceRows.map(
               ({ label, amount, currency: rowCurrency, percent, color }, idx) => (
                 <div key={idx} className="flex items-center justify-between">
@@ -264,7 +271,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                     {t("asset:detailCard.open")}
                   </span>
                   <div className="text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={quote.open}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}
@@ -276,7 +283,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                     {t("asset:detailCard.close")}
                   </span>
                   <div className="text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={quote.close}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}
@@ -288,7 +295,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                     {t("asset:detailCard.high")}
                   </span>
                   <div className="text-success text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={quote.high}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}
@@ -298,7 +305,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                 <div className="flex flex-col items-end">
                   <span className="text-muted-foreground text-xs">{t("asset:detailCard.low")}</span>
                   <div className="text-destructive text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={quote.low}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}
@@ -310,7 +317,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                     {t("asset:detailCard.adj_close")}
                   </span>
                   <div className="text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={quote.adjclose}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}
@@ -385,7 +392,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                     {t("asset:detailCard.strike")}
                   </span>
                   <div className="text-sm font-medium">
-                    <AmountDisplay
+                    <PriceDisplay
                       value={optionSpec.strike}
                       currency={quoteCurrency ?? currency}
                       isHidden={isBalanceHidden}

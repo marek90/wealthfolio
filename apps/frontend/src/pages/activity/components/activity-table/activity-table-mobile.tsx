@@ -11,12 +11,20 @@ import {
   isSecuritiesTransfer,
   isSplitActivity,
 } from "@/lib/activity-utils";
-import { ActivityType, ActivityTypeNames } from "@/lib/constants";
+import { localizeActivityTypeName } from "@/lib/activity-utils";
+import { ActivityType } from "@/lib/constants";
 import { parseOccSymbol } from "@/lib/occ-symbol";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { ActivityDetails } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
-import { Button, EmptyPlaceholder, formatAmount, Icons, Separator } from "@wealthfolio/ui";
+import {
+  Button,
+  EmptyPlaceholder,
+  formatAmount,
+  formatPrice,
+  Icons,
+  Separator,
+} from "@wealthfolio/ui";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ActivityOperations } from "../activity-operations";
@@ -119,7 +127,7 @@ export const ActivityTableMobile = ({
 
         // Compact View
         if (isCompactView) {
-          const activityTypeLabel = ActivityTypeNames[activity.activityType];
+          const activityTypeLabel = localizeActivityTypeName(t, activity.activityType);
           return (
             <Card key={activity.id} className="p-3">
               <div className="flex items-center gap-3">
@@ -297,7 +305,7 @@ export const ActivityTableMobile = ({
                             isCashTransfer(activity.activityType, symbol, activity.assetId) ||
                             (isIncomeActivity(activity.activityType) && !isAssetBackedIncome)
                           ? formatAmount(Number(activity.amount), activity.currency)
-                          : formatAmount(Number(activity.unitPrice), activity.currency)}
+                          : formatPrice(Number(activity.unitPrice), activity.currency)}
                   </span>
                 </div>
 

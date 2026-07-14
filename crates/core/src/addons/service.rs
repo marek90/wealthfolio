@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -9,6 +10,7 @@ use serde_json::json;
 use super::addon_traits::AddonServiceTrait;
 use super::models::*;
 use super::network::{perform_addon_network_request, AddonNetworkRequest, AddonNetworkResponse};
+use super::storage_repository::AddonStorageRepositoryTrait;
 
 // Constants
 pub const ADDON_STORE_API_BASE_URL: &str = "https://wealthfolio.app/api/addons";
@@ -16,6 +18,25 @@ const MAX_ADDON_ARCHIVE_ENTRIES: usize = 256;
 const MAX_ADDON_ARCHIVE_FILE_SIZE: u64 = 5 * 1024 * 1024;
 const MAX_ADDON_ARCHIVE_TOTAL_SIZE: u64 = 25 * 1024 * 1024;
 const MAX_ADDON_ARCHIVE_COMPRESSED_SIZE: usize = 50 * 1024 * 1024;
+const MAX_ADDON_STORAGE_KEY_LEN: usize = 128;
+/// Upper bound on the serialized `{addon_id, key, value}` sync payload — NOT the
+/// raw value length. A storage write emits a device-sync outbox event whose
+/// payload is this JSON, encrypted (+40 B XChaCha20-Poly1305 nonce/tag) and
+/// base64-encoded before it hits the sync server. The server caps the encrypted
+/// base64 payload at 350,000 chars (`payload` in wealthfolio-cloud
+/// `apps/api/src/schemas/sync.ts`), i.e. 350_000 * 3/4 - 40 = 262,460 plaintext
+/// bytes. We bound the serialized payload (which is what actually gets encrypted,
+/// so JSON escaping can't sneak past a raw-byte check) at 250_000 to keep
+/// headroom. An oversized write is rejected at `set()` — otherwise it would
+/// succeed locally and later dead-letter its whole sync push batch on the server.
+/// To raise this: bump the cloud cap FIRST, then this constant, as a pair.
+const MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN: usize = 250_000;
+
+/// Implicit baseline capabilities that every addon may use without declaring a
+/// permission or obtaining user consent. Mirrors `BASELINE_PERMISSION_CATEGORIES`
+/// in `packages/addon-sdk/src/permissions.ts`. Legacy manifests that still declare
+/// these keep parsing, but they never count as a permission escalation on update.
+const BASELINE_PERMISSION_CATEGORIES: &[&str] = &["ui", "query", "toast", "logger", "storage"];
 
 #[derive(Clone)]
 struct AddonArchiveFile {
@@ -34,7 +55,6 @@ fn create_request_with_headers(
     client: &reqwest::Client,
     method: reqwest::Method,
     url: &str,
-    instance_id: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut request = client.request(method, url);
 
@@ -50,11 +70,6 @@ fn create_request_with_headers(
     // Add X-App-Version header only if version is available
     if let Some(version) = app_version {
         request = request.header("X-App-Version", version);
-    }
-
-    // Add instance ID header if provided
-    if let Some(instance_id) = instance_id {
-        request = request.header("X-Instance-Id", instance_id);
     }
 
     request
@@ -840,6 +855,109 @@ pub fn extract_addon_zip_internal(zip_data: Vec<u8>) -> Result<ExtractedAddon, S
     })
 }
 
+/// The running Wealthfolio host version. `wealthfolio-core` inherits the workspace
+/// package version (`workspace.package.version`), which is the app version shipped
+/// by both the Tauri desktop app and the server, so `CARGO_PKG_VERSION` is the
+/// authoritative host version here.
+pub const HOST_WEALTHFOLIO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Parse a dot-separated version into its leading numeric `(major, minor, patch)`
+/// components, ignoring any pre-release/build suffix (e.g. `-beta.1`, `+build`).
+/// Missing components default to 0. Returns `None` when any dotted component is
+/// not a bare integer (`"v4.0.0"`, `"4.0.x"`) — callers must treat that as
+/// unsatisfiable rather than silently comparing against `0.0.0`, which would
+/// turn an author typo into a disabled version gate.
+fn parse_version_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.trim().split(['-', '+']).next().unwrap_or("").trim();
+    if core.is_empty() {
+        return None;
+    }
+    let mut components = [0u64; 3];
+    for (i, part) in core.split('.').enumerate() {
+        let value = part.trim().parse::<u64>().ok()?;
+        if let Some(slot) = components.get_mut(i) {
+            *slot = value;
+        }
+    }
+    Some((components[0], components[1], components[2]))
+}
+
+/// Whether `current` satisfies the minimum `required` version (semver-style numeric
+/// comparison of major.minor.patch). Fails closed: an unparseable version on
+/// either side never satisfies the check.
+pub(crate) fn version_meets_minimum(current: &str, required: &str) -> bool {
+    match (
+        parse_version_triple(current),
+        parse_version_triple(required),
+    ) {
+        (Some(current), Some(required)) => current >= required,
+        _ => false,
+    }
+}
+
+/// Hard-fail install/enable when the addon requires a newer host than the one
+/// running. No-op when `minWealthfolioVersion` is absent; a malformed value is
+/// rejected outright so the author sees the typo instead of the gate silently
+/// evaporating.
+fn enforce_min_wealthfolio_version(manifest: &AddonManifest) -> Result<(), String> {
+    if let Some(required) = manifest.min_wealthfolio_version.as_deref() {
+        let required = required.trim();
+        if required.is_empty() {
+            return Ok(());
+        }
+        if parse_version_triple(required).is_none() {
+            return Err(format!(
+                "Invalid 'minWealthfolioVersion' value '{}' in manifest: expected a version like '3.6.1'",
+                required
+            ));
+        }
+        if !version_meets_minimum(HOST_WEALTHFOLIO_VERSION, required) {
+            return Err(format!(
+                "Addon requires Wealthfolio {} or newer, but this version is {}. Update Wealthfolio to use this addon.",
+                required, HOST_WEALTHFOLIO_VERSION
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_contributed_route_path(path: &str) -> Result<(), String> {
+    if path != path.trim() {
+        return Err(
+            "Invalid contributes.routes path: leading or trailing whitespace is not allowed"
+                .to_string(),
+        );
+    }
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.starts_with('/') {
+        return Err(
+            "Invalid contributes.routes path: expected a relative path below the addon mount"
+                .to_string(),
+        );
+    }
+    if path
+        .chars()
+        .any(|character| matches!(character, '\\' | '?' | '#' | '%'))
+    {
+        return Err(
+            "Invalid contributes.routes path: backslashes, escapes, queries, and fragments are not allowed"
+                .to_string(),
+        );
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(
+            "Invalid contributes.routes path: empty and traversal segments are not allowed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn parse_manifest_json_metadata(manifest_content: &str) -> Result<AddonManifest, String> {
     parse_manifest_json_metadata_with_options(manifest_content, true)
 }
@@ -934,6 +1052,71 @@ fn parse_manifest_json_metadata_with_options(
         }
     } else {
         None
+    };
+
+    // Declarative contributions (routes + links). Parse the whole `contributes`
+    // sub-object via serde for brevity, then validate: every route has a
+    // non-empty id with a unique host-relative path, and every link (in any slot,
+    // including unknown future slots, which are accepted and round-tripped
+    // as-is) has a non-empty label and references a declared route id.
+    let contributes = match raw_manifest.get("contributes") {
+        Some(value) if !value.is_null() => {
+            let parsed: AddonContributes = serde_json::from_value(value.clone())
+                .map_err(|e| format!("Invalid 'contributes' field in manifest.json: {}", e))?;
+            let mut route_ids = std::collections::HashSet::new();
+            let mut route_paths = std::collections::HashSet::new();
+            for route in &parsed.routes {
+                if route.id.trim().is_empty() {
+                    return Err("Missing 'id' field in contributes.routes entry".to_string());
+                }
+                if !route_ids.insert(route.id.as_str()) {
+                    return Err(format!(
+                        "Invalid 'contributes' field in manifest.json: duplicate route id '{}'",
+                        route.id
+                    ));
+                }
+                let path = route.path.as_deref().unwrap_or("");
+                validate_contributed_route_path(path)?;
+                if !route_paths.insert(path.to_ascii_lowercase()) {
+                    return Err(format!(
+                        "Invalid 'contributes' field in manifest.json: duplicate route path '{}'",
+                        path
+                    ));
+                }
+            }
+            for (slot, links) in &parsed.links {
+                let mut link_ids = std::collections::HashSet::new();
+                for link in links {
+                    if link.route.trim().is_empty() {
+                        return Err(format!(
+                            "Missing 'route' field in contributes.links['{}'] entry",
+                            slot
+                        ));
+                    }
+                    if link.label.trim().is_empty() {
+                        return Err(format!(
+                            "Missing 'label' field in contributes.links['{}'] entry",
+                            slot
+                        ));
+                    }
+                    if !route_ids.contains(link.route.as_str()) {
+                        return Err(format!(
+                            "Invalid 'contributes' field in manifest.json: link in slot '{}' references undeclared route '{}'",
+                            slot, link.route
+                        ));
+                    }
+                    let effective_id = link.id.as_deref().unwrap_or(link.route.as_str());
+                    if !link_ids.insert(effective_id) {
+                        return Err(format!(
+                            "Invalid 'contributes' field in manifest.json: duplicate link id '{}' in slot '{}'",
+                            effective_id, slot
+                        ));
+                    }
+                }
+            }
+            Some(parsed)
+        }
+        _ => None,
     };
 
     // Validate required fields
@@ -1031,6 +1214,7 @@ fn parse_manifest_json_metadata_with_options(
         icon,
         network,
         host_dependencies,
+        contributes,
         installed_at: None,
         updated_at: None,
         source: None,
@@ -1108,7 +1292,6 @@ pub fn read_addon_files_recursive(
 pub async fn check_addon_update_from_api(
     addon_id: &str,
     current_version: &str,
-    instance_id: Option<&str>,
 ) -> Result<AddonUpdateCheckResult, String> {
     validate_addon_id(addon_id)?;
     let api_url = format!(
@@ -1117,14 +1300,13 @@ pub async fn check_addon_update_from_api(
     );
 
     let client = reqwest::Client::new();
-    let response =
-        create_request_with_headers(&client, reqwest::Method::GET, &api_url, instance_id)
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("Failed to fetch addon info from API: {}", e);
-                format!("Failed to fetch addon info from API: {}", e)
-            })?;
+    let response = create_request_with_headers(&client, reqwest::Method::GET, &api_url)
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("Failed to fetch addon info from API: {}", e);
+            format!("Failed to fetch addon info from API: {}", e)
+        })?;
 
     handle_api_response(response, "Update check").await
 }
@@ -1282,10 +1464,7 @@ pub fn clear_staging_directory(base_dir: impl AsRef<Path>) -> Result<(), String>
 }
 
 /// Download addon from store using GET request
-pub async fn download_addon_from_store(
-    addon_id: &str,
-    instance_id: &str,
-) -> Result<Vec<u8>, String> {
+pub async fn download_addon_from_store(addon_id: &str) -> Result<Vec<u8>, String> {
     validate_addon_id(addon_id)?;
     let download_api_url = format!("{}/{}/download", ADDON_STORE_API_BASE_URL, addon_id);
 
@@ -1294,21 +1473,14 @@ pub async fn download_addon_from_store(
         addon_id,
         download_api_url
     );
-    log::debug!("Using instance ID: {}", instance_id);
-
     let client = reqwest::Client::new();
-    let response = create_request_with_headers(
-        &client,
-        reqwest::Method::GET,
-        &download_api_url,
-        Some(instance_id),
-    )
-    .send()
-    .await
-    .map_err(|e| {
-        log::error!("Failed to call download API for addon {}: {}", addon_id, e);
-        format!("Failed to call download API: {}", e)
-    })?;
+    let response = create_request_with_headers(&client, reqwest::Method::GET, &download_api_url)
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("Failed to call download API for addon {}: {}", addon_id, e);
+            format!("Failed to call download API: {}", e)
+        })?;
 
     let status = response.status();
     log::debug!(
@@ -1587,21 +1759,18 @@ pub fn remove_addon_from_staging(addon_id: &str, base_dir: impl AsRef<Path>) -> 
 }
 
 /// Fetch available addons from the store API
-pub async fn fetch_addon_store_listings(
-    instance_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, String> {
+pub async fn fetch_addon_store_listings() -> Result<Vec<serde_json::Value>, String> {
     // Fetch all addons and let frontend filter by status
     let api_url = ADDON_STORE_API_BASE_URL.to_string();
 
     let client = reqwest::Client::new();
-    let response =
-        create_request_with_headers(&client, reqwest::Method::GET, &api_url, instance_id)
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("Failed to fetch addon store listings: {}", e);
-                format!("Failed to fetch addon store listings: {}", e)
-            })?;
+    let response = create_request_with_headers(&client, reqwest::Method::GET, &api_url)
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("Failed to fetch addon store listings: {}", e);
+            format!("Failed to fetch addon store listings: {}", e)
+        })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1655,7 +1824,7 @@ pub async fn submit_addon_rating(
     addon_id: &str,
     rating: u8,
     review: Option<String>,
-    instance_id: &str,
+    rating_instance_id: &str,
 ) -> Result<serde_json::Value, String> {
     validate_addon_id(addon_id)?;
     if !(1..=5).contains(&rating) {
@@ -1673,15 +1842,15 @@ pub async fn submit_addon_rating(
     }
 
     let client = reqwest::Client::new();
-    let response =
-        create_request_with_headers(&client, reqwest::Method::POST, &api_url, Some(instance_id))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("Failed to submit rating for addon {}: {}", addon_id, e);
-                format!("Failed to submit rating: {}", e)
-            })?;
+    let response = create_request_with_headers(&client, reqwest::Method::POST, &api_url)
+        .header("X-Instance-Id", rating_instance_id)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("Failed to submit rating for addon {}: {}", addon_id, e);
+            format!("Failed to submit rating: {}", e)
+        })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1718,15 +1887,48 @@ pub async fn submit_addon_rating(
 /// Service for addon management operations.
 pub struct AddonService {
     addons_root: PathBuf,
-    instance_id: String,
+    rating_instance_id: String,
+    storage_repo: Arc<dyn AddonStorageRepositoryTrait>,
 }
 
 impl AddonService {
-    pub fn new(addons_root: impl Into<PathBuf>, instance_id: impl Into<String>) -> Self {
+    pub fn new(
+        addons_root: impl Into<PathBuf>,
+        rating_instance_id: impl Into<String>,
+        storage_repo: Arc<dyn AddonStorageRepositoryTrait>,
+    ) -> Self {
         Self {
             addons_root: addons_root.into(),
-            instance_id: instance_id.into(),
+            rating_instance_id: rating_instance_id.into(),
+            storage_repo,
         }
+    }
+
+    fn validate_storage_key(key: &str) -> Result<(), String> {
+        if key.is_empty() {
+            return Err("Invalid storage key: key is empty".to_string());
+        }
+        if key.len() > MAX_ADDON_STORAGE_KEY_LEN {
+            return Err(format!(
+                "Invalid storage key: key must be {} characters or fewer",
+                MAX_ADDON_STORAGE_KEY_LEN
+            ));
+        }
+        // The key is embedded verbatim in the device-sync entity id, which must
+        // match the sync server's allowed charset (letters, digits, and
+        // `_ . : -`). Rejecting anything outside it here guarantees a stored key
+        // can never produce an event the server refuses (which would otherwise
+        // fail the whole push batch).
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        {
+            return Err(
+                "Invalid storage key: only letters, digits, and the characters _ . : - are allowed"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     fn read_manifest_if_exists(&self, addon_dir: &Path) -> Result<Option<AddonManifest>, String> {
@@ -2026,6 +2228,9 @@ impl AddonService {
             .map(|permissions| {
                 permissions
                     .iter()
+                    .filter(|permission| {
+                        !BASELINE_PERMISSION_CATEGORIES.contains(&permission.category.as_str())
+                    })
                     .flat_map(|permission| {
                         permission
                             .functions
@@ -2210,6 +2415,7 @@ impl AddonServiceTrait for AddonService {
         approved_network_hosts: Vec<String>,
     ) -> Result<AddonManifest, String> {
         let extracted = extract_addon_zip_archive(zip_data)?;
+        enforce_min_wealthfolio_version(&extracted.metadata)?;
         let addon_id = extracted.metadata.id.clone();
         let metadata = Self::apply_network_approvals(
             extracted.metadata.to_installed(enable_after_install)?,
@@ -2241,6 +2447,10 @@ impl AddonServiceTrait for AddonService {
                 addon_id, extracted.metadata.id
             ));
         }
+        if let Err(err) = enforce_min_wealthfolio_version(&extracted.metadata) {
+            let _ = remove_addon_from_staging(addon_id, &self.addons_root);
+            return Err(err);
+        }
         let installed_addon_id = extracted.metadata.id.clone();
         let metadata = Self::apply_network_approvals(
             extracted.metadata.to_installed(enable_after_install)?,
@@ -2260,6 +2470,9 @@ impl AddonServiceTrait for AddonService {
             return Err("Addon not found".to_string());
         }
         fs::remove_dir_all(&addon_dir).map_err(|e| format!("Failed to remove addon: {}", e))?;
+        if let Err(error) = self.clear_addon_storage(addon_id).await {
+            log::warn!("Failed to remove storage for addon '{addon_id}': {error}");
+        }
         Ok(())
     }
 
@@ -2349,7 +2562,7 @@ impl AddonServiceTrait for AddonService {
     async fn check_addon_update(&self, addon_id: &str) -> Result<AddonUpdateCheckResult, String> {
         let addon_dir = self.existing_addon_dir(addon_id)?;
         let manifest = self.read_manifest_or_error(&addon_dir)?;
-        check_addon_update_from_api(addon_id, &manifest.version, Some(&self.instance_id)).await
+        check_addon_update_from_api(addon_id, &manifest.version).await
     }
 
     async fn check_all_addon_updates(&self) -> Result<Vec<AddonUpdateCheckResult>, String> {
@@ -2378,13 +2591,7 @@ impl AddonServiceTrait for AddonService {
                     }
                 };
                 let addon_id = manifest.id.clone();
-                match check_addon_update_from_api(
-                    &addon_id,
-                    &manifest.version,
-                    Some(&self.instance_id),
-                )
-                .await
-                {
+                match check_addon_update_from_api(&addon_id, &manifest.version).await {
                     Ok(result) => results.push(result),
                     Err(err) => {
                         log::error!("Failed to check update for addon {}: {}", addon_id, err);
@@ -2420,7 +2627,7 @@ impl AddonServiceTrait for AddonService {
             .and_then(|m| m.enabled)
             .unwrap_or(false);
 
-        let zip_data = download_addon_from_store(addon_id, &self.instance_id).await?;
+        let zip_data = download_addon_from_store(addon_id).await?;
         let extracted = extract_addon_zip_archive(zip_data)?;
         if extracted.metadata.id != addon_id {
             return Err(format!(
@@ -2428,6 +2635,7 @@ impl AddonServiceTrait for AddonService {
                 addon_id, extracted.metadata.id
             ));
         }
+        enforce_min_wealthfolio_version(&extracted.metadata)?;
         Self::ensure_update_does_not_add_permissions(
             previous_manifest.as_ref(),
             &extracted.metadata,
@@ -2467,16 +2675,79 @@ impl AddonServiceTrait for AddonService {
         result
     }
 
+    fn update_addon_network_approvals(
+        &self,
+        addon_id: &str,
+        approved_network_hosts: Vec<String>,
+    ) -> Result<AddonManifest, String> {
+        let addon_dir = self.existing_addon_dir(addon_id)?;
+        let manifest = self.read_manifest_or_error(&addon_dir)?;
+        let manifest = Self::apply_network_approvals(manifest, &approved_network_hosts);
+        self.write_manifest(&addon_dir, &manifest)?;
+        Ok(manifest)
+    }
+
     fn toggle_addon(&self, addon_id: &str, enabled: bool) -> Result<(), String> {
         let addon_dir = self.existing_addon_dir(addon_id)?;
         let mut manifest = self.read_manifest_or_error(&addon_dir)?;
+        if enabled {
+            enforce_min_wealthfolio_version(&manifest)?;
+        }
         manifest.enabled = Some(enabled);
         self.write_manifest(&addon_dir, &manifest)?;
         Ok(())
     }
 
+    async fn get_addon_storage_item(
+        &self,
+        addon_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        validate_addon_id(addon_id)?;
+        Self::validate_storage_key(key)?;
+        self.storage_repo.get(addon_id, key).await
+    }
+
+    async fn set_addon_storage_item(
+        &self,
+        addon_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        validate_addon_id(addon_id)?;
+        Self::validate_storage_key(key)?;
+        // Bound the serialized sync payload, not the raw value: this is the exact
+        // plaintext that gets encrypted and pushed, so it matches what the sync
+        // server validates and JSON escaping can't inflate past the check.
+        let payload_len = serde_json::to_string(&json!({
+            "addon_id": addon_id,
+            "key": key,
+            "value": value,
+        }))
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX);
+        if payload_len > MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN {
+            return Err(format!(
+                "Invalid storage value: too large to sync across devices (max ~{} KB)",
+                MAX_ADDON_STORAGE_SYNC_PAYLOAD_LEN / 1024
+            ));
+        }
+        self.storage_repo.set(addon_id, key, value).await
+    }
+
+    async fn delete_addon_storage_item(&self, addon_id: &str, key: &str) -> Result<(), String> {
+        validate_addon_id(addon_id)?;
+        Self::validate_storage_key(key)?;
+        self.storage_repo.delete(addon_id, key).await
+    }
+
+    async fn clear_addon_storage(&self, addon_id: &str) -> Result<(), String> {
+        validate_addon_id(addon_id)?;
+        self.storage_repo.delete_all(addon_id).await
+    }
+
     async fn download_addon_to_staging(&self, addon_id: &str) -> Result<ExtractedAddon, String> {
-        let zip = download_addon_from_store(addon_id, &self.instance_id).await?;
+        let zip = download_addon_from_store(addon_id).await?;
         let _staged_path = save_addon_to_staging(addon_id, &self.addons_root, &zip)?;
         let extracted = extract_addon_zip_internal(zip)?;
         if extracted.metadata.id != addon_id {
@@ -2499,7 +2770,7 @@ impl AddonServiceTrait for AddonService {
     }
 
     async fn fetch_store_listings(&self) -> Result<Vec<serde_json::Value>, String> {
-        fetch_addon_store_listings(Some(&self.instance_id)).await
+        fetch_addon_store_listings().await
     }
 
     async fn submit_rating(
@@ -2508,7 +2779,7 @@ impl AddonServiceTrait for AddonService {
         rating: u8,
         review: Option<String>,
     ) -> Result<serde_json::Value, String> {
-        submit_addon_rating(addon_id, rating, review, &self.instance_id).await
+        submit_addon_rating(addon_id, rating, review, &self.rating_instance_id).await
     }
 
     fn extract_addon_zip(&self, zip_data: Vec<u8>) -> Result<ExtractedAddon, String> {

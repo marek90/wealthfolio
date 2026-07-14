@@ -774,7 +774,11 @@ export const AssetProfilePage = () => {
     const hasOpenTransactionLotWithBase = assetLots.some(
       (lot) => lot.source === "TRANSACTION_LOT" && !lot.isClosed && lot.costBasisBase != null,
     );
+    const isForeignCurrency =
+      displayCurrency.trim().toUpperCase() !==
+      (holding?.baseCurrency ?? baseCurrency).trim().toUpperCase();
     const fxEffect =
+      isForeignCurrency &&
       hasOpenTransactionLotWithBase &&
       holding?.unrealizedGain?.base != null &&
       holding?.unrealizedGain?.local != null &&
@@ -948,7 +952,6 @@ export const AssetProfilePage = () => {
         data={quoteHistory ?? []}
         assetId={assetId}
         currency={quote?.currency ?? profile?.currency ?? baseCurrency}
-        assetKind={assetProfile?.kind}
         isManualDataSource={isManualPricingMode}
         onSaveQuote={(q: Quote) => saveQuoteMutation.mutate(q)}
         onDeleteQuote={(id: string) => deleteQuoteMutation.mutate(id)}
@@ -1175,7 +1178,6 @@ export const AssetProfilePage = () => {
               data={quoteHistory ?? []}
               assetId={assetId}
               currency={profile?.currency ?? baseCurrency}
-              assetKind={assetProfile?.kind}
               isManualDataSource={isManualPricingMode}
               onSaveQuote={(quote: Quote) => saveQuoteMutation.mutate(quote)}
               onDeleteQuote={(id: string) => deleteQuoteMutation.mutate(id)}
