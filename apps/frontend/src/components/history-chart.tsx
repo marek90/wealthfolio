@@ -4,7 +4,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay, useDateFormatting } from "@wealthfolio/ui";
 import { ChartConfig, ChartContainer } from "@wealthfolio/ui/components/ui/chart";
-import { useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Area, AreaChart, Brush, ReferenceArea, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
@@ -178,6 +178,120 @@ export function HistoryChart({
   const dragRangeRef = useRef<{ start: string; end: string } | null>(null);
   const [dragRange, setDragRange] = useState<{ start: string; end: string } | null>(null);
 
+  // --- Brush geometry, touch handling, and custom edge labels ---
+  // Wrapper element used both to measure chart width (for label placement) and to map
+  // touch clientX -> data index for our own traveller drag handling. A callback ref (not
+  // useEffect) so measurement re-attaches when the chart node mounts — the component can
+  // render null while data is still loading, after which a []-deps effect would never re-run.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const setContainerNode = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    if (!node) return;
+    const measure = () => setContainerWidth(node.getBoundingClientRect().width);
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserverRef.current = new ResizeObserver(measure);
+      resizeObserverRef.current.observe(node);
+    }
+  }, []);
+
+  // Keep the latest brush indices readable from imperative touch handlers without stale closures.
+  const brushIndicesRef = useRef(brushIndices);
+  brushIndicesRef.current = brushIndices;
+
+  // iOS synthesizes mouse events after touch; timestamp touches so the mouse-only
+  // drag-to-select can ignore those phantom events (a source of the mobile crash).
+  const lastTouchAtRef = useRef(0);
+
+  // Brush layout constants — single source of truth for the <AreaChart margin>, the
+  // <Brush> dimensions, and our custom edge-label placement below.
+  const BRUSH_MARGIN = 8;
+  const BRUSH_TRAVELLER_WIDTH = 10;
+  const BRUSH_HEIGHT = 20;
+  const BRUSH_MARGIN_BOTTOM = 28;
+
+  // Vertical center of the brush band, measured from the container's bottom edge (so it is
+  // page-height independent). Defaults to the computed position; corrected by measurement.
+  const [brushCenterFromBottom, setBrushCenterFromBottom] = useState(
+    BRUSH_MARGIN_BOTTOM + BRUSH_HEIGHT / 2,
+  );
+  useLayoutEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const slide = node.querySelector<SVGRectElement>(".recharts-brush-slide");
+    if (!slide) return;
+    const nodeRect = node.getBoundingClientRect();
+    const slideRect = slide.getBoundingClientRect();
+    const center = nodeRect.bottom - (slideRect.top + slideRect.height / 2);
+    setBrushCenterFromBottom((prev) => (Math.abs(prev - center) > 0.5 ? center : prev));
+  }, [containerWidth, data.length]);
+  const lastIndex = Math.max(1, data.length - 1);
+  const brushUsableWidth = Math.max(0, containerWidth - BRUSH_MARGIN * 2 - BRUSH_TRAVELLER_WIDTH);
+
+  // Which traveller the current touch is dragging.
+  const activeTravellerRef = useRef<"start" | "end" | null>(null);
+
+  const indexFromClientX = (clientX: number): number | null => {
+    const el = containerRef.current;
+    if (!el || data.length === 0 || brushUsableWidth <= 0) return null;
+    const rect = el.getBoundingClientRect();
+    const frac = (clientX - rect.left - BRUSH_MARGIN) / brushUsableWidth;
+    const idx = Math.round(frac * (data.length - 1));
+    return Math.max(0, Math.min(data.length - 1, idx));
+  };
+
+  const moveActiveTravellerTo = (idx: number) => {
+    const cur = brushIndicesRef.current;
+    const s = cur?.startIndex ?? 0;
+    const e = cur?.endIndex ?? data.length - 1;
+    let ns = s;
+    let ne = e;
+    if (activeTravellerRef.current === "start") ns = Math.min(idx, e);
+    else ne = Math.max(idx, s);
+    if (ns === s && ne === e) return; // idempotent — avoids redundant re-renders
+    setBrushIndices({ startIndex: ns, endIndex: ne });
+    onVisibleRangeChange?.({ from: data[ns].date, to: data[ne].date });
+  };
+
+  const handleTravellerTouchMove = (e: TouchEvent) => {
+    if (!activeTravellerRef.current) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    lastTouchAtRef.current = Date.now();
+    e.preventDefault(); // stop page scroll and the browser's horizontal back/forward swipe
+    const idx = indexFromClientX(touch.clientX);
+    if (idx != null) moveActiveTravellerTo(idx);
+  };
+
+  const endTravellerTouch = () => {
+    activeTravellerRef.current = null;
+    lastTouchAtRef.current = Date.now();
+    window.removeEventListener("touchmove", handleTravellerTouchMove);
+    window.removeEventListener("touchend", endTravellerTouch);
+    window.removeEventListener("touchcancel", endTravellerTouch);
+  };
+
+  const handleTravellerTouchStart = (e: React.TouchEvent<SVGRectElement>) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    // Take over from Recharts' own (mouse-only, touch-broken) traveller handling.
+    e.stopPropagation();
+    lastTouchAtRef.current = Date.now();
+    const idx = indexFromClientX(touch.clientX);
+    if (idx == null) return;
+    const cur = brushIndicesRef.current;
+    const s = cur?.startIndex ?? 0;
+    const en = cur?.endIndex ?? data.length - 1;
+    activeTravellerRef.current = Math.abs(idx - s) <= Math.abs(idx - en) ? "start" : "end";
+    window.addEventListener("touchmove", handleTravellerTouchMove, { passive: false });
+    window.addEventListener("touchend", endTravellerTouch);
+    window.addEventListener("touchcancel", endTravellerTouch);
+  };
+
   const scaleConfig = useMemo(
     () =>
       getAutomaticHistoryChartScale(visibleData, {
@@ -302,11 +416,12 @@ export function HistoryChart({
   };
 
   return (
-    <ChartContainer
-      config={chartConfig}
-      className="history-brush h-full w-full"
-      data-no-swipe-drag
-    >
+    <div ref={setContainerNode} data-testid="history-chart-root" className="relative h-full w-full">
+      <ChartContainer
+        config={chartConfig}
+        className="history-brush h-full w-full"
+        data-no-swipe-drag
+      >
       <AreaChart
         data={data}
         stackOffset="sign"
@@ -319,9 +434,9 @@ export function HistoryChart({
         }}
         margin={{
           top: 0,
-          right: 8,
-          left: 8,
-          bottom: 28,
+          right: BRUSH_MARGIN,
+          left: BRUSH_MARGIN,
+          bottom: BRUSH_MARGIN_BOTTOM,
         }}
         onDoubleClick={() => {
           if (brushIndices) {
@@ -342,6 +457,9 @@ export function HistoryChart({
         }}
         onMouseMove={handleChartMove}
         onMouseDown={(chartState) => {
+          // Ignore mouse events synthesized right after a touch — otherwise a phantom
+          // drag-to-select fires on mobile (the chart-body zoom is a mouse-only affordance).
+          if (Date.now() - lastTouchAtRef.current < 700) return;
           const label = (chartState as unknown as MouseHandlerDataParam).activeLabel;
           if (label == null) return;
           const s = String(label);
@@ -378,12 +496,17 @@ export function HistoryChart({
           }
         }}
         onTouchStart={(chartState) => {
+          lastTouchAtRef.current = Date.now();
           isTouchScrubbingRef.current = true;
           setIsChartHovered(true);
           handleChartMove(chartState);
         }}
-        onTouchMove={handleChartMove}
+        onTouchMove={(chartState) => {
+          lastTouchAtRef.current = Date.now();
+          handleChartMove(chartState);
+        }}
         onTouchEnd={() => {
+          lastTouchAtRef.current = Date.now();
           setIsChartHovered(false);
           setHoveredMarker(false);
           resetTouchScrubState();
@@ -519,41 +642,108 @@ export function HistoryChart({
         {data.length > 1 && (
           <Brush
             dataKey="date"
-            height={20}
-            travellerWidth={10}
+            height={BRUSH_HEIGHT}
+            travellerWidth={BRUSH_TRAVELLER_WIDTH}
             gap={1}
             stroke="#667F0A"
             tickFormatter={(value) => formatDate(value as string, dateFormatting)}
             fill="transparent"
             traveller={(props) => {
               // Rounded "pill" handles in place of the default square ones, to match the
-              // app's soft fully-rounded UI. Inset vertically for a lighter look.
+              // app's soft fully-rounded UI. Inset vertically for a lighter look. A larger
+              // transparent hit rect makes the handle easy to grab on touch, and carries our
+              // own touch-drag handling (Recharts moves travellers via mouse events only).
               const { x, y, width, height } = props;
+              const HIT_WIDTH = 32;
               return (
-                <rect
-                  x={x}
-                  y={y + 1}
-                  width={width}
-                  height={Math.max(0, height - 2)}
-                  rx={width / 2}
-                  ry={width / 2}
-                  fill="#667F0A"
-                />
+                <g>
+                  <rect
+                    x={x + width / 2 - HIT_WIDTH / 2}
+                    y={y - 6}
+                    width={HIT_WIDTH}
+                    height={height + 12}
+                    fill="transparent"
+                    style={{ touchAction: "none", cursor: "col-resize" }}
+                    onTouchStart={handleTravellerTouchStart}
+                  />
+                  <rect
+                    x={x}
+                    y={y + 1}
+                    width={width}
+                    height={Math.max(0, height - 2)}
+                    rx={width / 2}
+                    ry={width / 2}
+                    fill="#667F0A"
+                    pointerEvents="none"
+                  />
+                </g>
               );
             }}
             startIndex={startIndex}
             endIndex={endIndex}
             onChange={(range) => {
-              if (range?.startIndex != null && range?.endIndex != null) {
-                const si = range.startIndex;
-                const ei = range.endIndex;
-                setBrushIndices({ startIndex: si, endIndex: ei });
-                onVisibleRangeChange?.({ from: data[si].date, to: data[ei].date });
-              }
+              if (range?.startIndex == null || range?.endIndex == null) return;
+              const si = range.startIndex;
+              const ei = range.endIndex;
+              const cur = brushIndicesRef.current;
+              // Idempotent: skip redundant updates that would otherwise re-render in a loop.
+              if (cur && cur.startIndex === si && cur.endIndex === ei) return;
+              setBrushIndices({ startIndex: si, endIndex: ei });
+              onVisibleRangeChange?.({ from: data[si].date, to: data[ei].date });
             }}
           />
         )}
       </AreaChart>
-    </ChartContainer>
+      </ChartContainer>
+      {data.length > 1 &&
+        containerWidth > 0 &&
+        (() => {
+          // Custom brush edge date labels (Recharts' own are hidden via globals.css).
+          // Default to the outer side of each traveller; flip to the inner side when the
+          // outer label would clip off-screen at the extremes. Olive to match the brush.
+          const startTravellerX = BRUSH_MARGIN + (startIndex / lastIndex) * brushUsableWidth;
+          const endTravellerRightX =
+            BRUSH_MARGIN + (endIndex / lastIndex) * brushUsableWidth + BRUSH_TRAVELLER_WIDTH;
+          const GAP = 5;
+          const EST_LABEL_WIDTH = 78; // approx width of a formatted date at this size
+          const startOuterFits = startTravellerX - GAP - EST_LABEL_WIDTH >= 0;
+          const endOuterFits = endTravellerRightX + GAP + EST_LABEL_WIDTH <= containerWidth;
+          const LABEL_COLOR = "#667F0A"; // olive, matching the brush regardless of side
+          // Vertically center each label on the brush band (translateY(50%) offsets the box
+          // so its middle — not its bottom edge — sits on the measured center line).
+          const vCenter = {
+            bottom: brushCenterFromBottom,
+            transform: "translateY(50%)",
+            color: LABEL_COLOR,
+          } as const;
+          return (
+            <div className="pointer-events-none absolute inset-0 select-none">
+              <span
+                className="absolute whitespace-nowrap text-[10px] font-medium"
+                style={
+                  startOuterFits
+                    ? { ...vCenter, right: containerWidth - startTravellerX + GAP }
+                    : { ...vCenter, left: startTravellerX + BRUSH_TRAVELLER_WIDTH + GAP }
+                }
+              >
+                {formatDate(data[startIndex].date, dateFormatting)}
+              </span>
+              <span
+                className="absolute whitespace-nowrap text-[10px] font-medium"
+                style={
+                  endOuterFits
+                    ? { ...vCenter, left: endTravellerRightX + GAP }
+                    : {
+                        ...vCenter,
+                        right: containerWidth - (endTravellerRightX - BRUSH_TRAVELLER_WIDTH) + GAP,
+                      }
+                }
+              >
+                {formatDate(data[endIndex].date, dateFormatting)}
+              </span>
+            </div>
+          );
+        })()}
+    </div>
   );
 }
