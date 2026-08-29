@@ -673,6 +673,14 @@ body.qr-scan-active .scan-hide-target {
     padding-bottom: var(--mobile-nav-total-offset) !important;
   }
 
+  /* Add-on routes scroll inside their sandbox iframe, so host page padding
+     cannot create bottom-nav clearance. Keep the entire sandbox viewport,
+     including its loading/error states, above the floating navigation. */
+  [data-page-scroll-container][data-with-mobile-nav-offset="true"]
+    [data-addon-route-viewport="true"] {
+    height: calc(100% - var(--mobile-nav-total-offset));
+  }
+
   .touch-manipulation {
     touch-action: manipulation;
   }

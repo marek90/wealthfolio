@@ -20,7 +20,7 @@ use super::auto_classification::{
     AutoClassificationService, ClassificationInput, ProviderProfileClassification,
 };
 use super::{
-    asset_provider_alias_symbols, parse_crypto_pair_symbol, parse_symbol_with_exchange_suffix,
+    asset_provider_alias_symbols, parse_crypto_pair_symbol, parse_symbol_with_known_exchange,
     AssetResolutionInput, AssetResolutionOutput,
 };
 use crate::errors::{DatabaseError, Error, Result};
@@ -367,6 +367,11 @@ pub struct AssetService {
     asset_repository: Arc<dyn AssetRepositoryTrait>,
     taxonomy_service: Option<Arc<dyn TaxonomyServiceTrait>>,
     event_sink: Arc<dyn DomainEventSink>,
+}
+
+struct AssetEnrichmentOutcome {
+    asset: Asset,
+    multiplier_changed: bool,
 }
 
 impl AssetService {
@@ -1141,6 +1146,242 @@ impl AssetService {
     }
 }
 
+impl AssetService {
+    async fn enrich_asset_profile_silent(&self, asset_id: &str) -> Result<AssetEnrichmentOutcome> {
+        // Get the existing asset
+        let existing_asset = self.asset_repository.get_by_id(asset_id)?;
+        let old_multiplier = existing_asset.contract_multiplier();
+
+        // Skip enrichment for assets that don't need market data
+        if existing_asset.quote_mode != QuoteMode::Market {
+            debug!(
+                "Skipping enrichment for asset {} - quote mode is {:?}",
+                asset_id, existing_asset.quote_mode
+            );
+            return Ok(AssetEnrichmentOutcome {
+                asset: existing_asset,
+                multiplier_changed: false,
+            });
+        }
+
+        // Fetch profile from provider using the asset (resolver handles exchange suffix)
+        debug!(
+            "Fetching profile for asset {} (display_code: {:?}, exchange: {:?})",
+            asset_id, existing_asset.display_code, existing_asset.instrument_exchange_mic
+        );
+
+        let provider_profile = match self.quote_service.get_asset_profile(&existing_asset).await {
+            Ok(profile) => profile,
+            Err(e) => {
+                return Err(Error::MarketData(
+                    crate::quotes::MarketDataError::ProviderError(format!(
+                        "Could not fetch profile for asset {} (display_code: {:?}): {}",
+                        asset_id, existing_asset.display_code, e
+                    )),
+                ));
+            }
+        };
+
+        // Derive instrument_type from provider's asset_type if not already set
+        let updated_instrument_type = if existing_asset.instrument_type.is_none() {
+            provider_profile
+                .asset_type
+                .as_ref()
+                .and_then(|t| parse_instrument_type_from_provider(t))
+        } else {
+            None
+        };
+
+        // Build provider profile metadata for storage
+        let mut profile_metadata = serde_json::Map::new();
+        if let Some(ref sectors) = provider_profile.sectors {
+            profile_metadata.insert(
+                "sectors".to_string(),
+                serde_json::Value::String(sectors.clone()),
+            );
+        }
+        if let Some(ref industry) = provider_profile.industry {
+            profile_metadata.insert(
+                "industry".to_string(),
+                serde_json::Value::String(industry.clone()),
+            );
+        }
+        if let Some(ref countries) = provider_profile.countries {
+            profile_metadata.insert(
+                "countries".to_string(),
+                serde_json::Value::String(countries.clone()),
+            );
+        }
+        if let Some(ref asset_type) = provider_profile.asset_type {
+            profile_metadata.insert(
+                "quoteType".to_string(),
+                serde_json::Value::String(asset_type.clone()),
+            );
+        }
+        if let Some(ref url) = provider_profile.url {
+            profile_metadata.insert(
+                "website".to_string(),
+                serde_json::Value::String(url.clone()),
+            );
+        }
+        if let Some(market_cap) = provider_profile.market_cap {
+            profile_metadata.insert("marketCap".to_string(), serde_json::json!(market_cap));
+        }
+        if let Some(pe_ratio) = provider_profile.pe_ratio {
+            profile_metadata.insert("peRatio".to_string(), serde_json::json!(pe_ratio));
+        }
+        if let Some(dividend_yield) = provider_profile.dividend_yield {
+            profile_metadata.insert(
+                "dividendYield".to_string(),
+                serde_json::json!(dividend_yield),
+            );
+        }
+        if let Some(week_52_high) = provider_profile.week_52_high {
+            profile_metadata.insert("week52High".to_string(), serde_json::json!(week_52_high));
+        }
+        if let Some(week_52_low) = provider_profile.week_52_low {
+            profile_metadata.insert("week52Low".to_string(), serde_json::json!(week_52_low));
+        }
+
+        // Merge with existing metadata (preserving any non-profile fields like OptionSpec)
+        let mut updated_metadata = if profile_metadata.is_empty() {
+            existing_asset.metadata.clone()
+        } else {
+            let mut merged = match &existing_asset.metadata {
+                Some(existing) => match existing.as_object() {
+                    Some(obj) => obj.clone(),
+                    None => serde_json::Map::new(),
+                },
+                None => serde_json::Map::new(),
+            };
+            merged.insert(
+                "profile".to_string(),
+                serde_json::Value::Object(profile_metadata),
+            );
+            Some(serde_json::Value::Object(merged))
+        };
+
+        // Enrich US Treasury bonds with maturity/coupon data from TreasuryDirect
+        // when the bond spec is missing this data (needed for yield-curve pricing).
+        if existing_asset.is_bond() {
+            let needs_bond_enrichment = existing_asset
+                .bond_spec()
+                .is_none_or(|s| s.maturity_date.is_none());
+
+            if needs_bond_enrichment {
+                if let Some(isin) = existing_asset.instrument_symbol.as_deref() {
+                    if isin.starts_with("US912") {
+                        let http = reqwest::Client::new();
+                        match wealthfolio_market_data::provider::us_treasury_calc::UsTreasuryCalcProvider::fetch_bond_details(&http, isin).await {
+                            Some(details) => {
+                                let spec = super::assets_model::BondSpec {
+                                    isin: Some(isin.to_string()),
+                                    coupon_rate: Some(details.coupon_rate),
+                                    maturity_date: Some(details.maturity_date),
+                                    face_value: Some(details.face_value),
+                                    coupon_frequency: Some(details.coupon_frequency),
+                                };
+                                let meta = updated_metadata.get_or_insert_with(|| serde_json::json!({}));
+                                if let Some(obj) = meta.as_object_mut() {
+                                    obj.insert("bond".to_string(), serde_json::json!(spec));
+                                }
+                                info!("Enriched bond {} with Treasury details: maturity={}, coupon={}", asset_id, details.maturity_date, details.coupon_rate);
+                            }
+                            None => {
+                                debug!("Could not fetch Treasury bond details for {}", isin);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let effective_instrument_type = updated_instrument_type
+            .clone()
+            .or(existing_asset.instrument_type.clone());
+        let canonical = canonicalize_market_identity(
+            effective_instrument_type,
+            existing_asset
+                .instrument_symbol
+                .as_deref()
+                .or(existing_asset.display_code.as_deref()),
+            existing_asset.instrument_exchange_mic.as_deref(),
+            Some(provider_profile.currency.as_str()),
+        );
+        let resolved_quote_ccy = canonical
+            .quote_ccy
+            .unwrap_or_else(|| existing_asset.quote_ccy.clone());
+
+        // Build profile update from provider data
+        let mut update = UpdateAssetProfile {
+            display_code: existing_asset.display_code.clone(),
+            name: provider_profile.name.or(existing_asset.name.clone()),
+            notes: existing_asset.notes.clone().unwrap_or_default(),
+            kind: None,
+            quote_mode: Some(existing_asset.quote_mode),
+            quote_ccy: Some(resolved_quote_ccy),
+            instrument_type: updated_instrument_type,
+            instrument_symbol: None,
+            instrument_exchange_mic: None,
+            provider_config: existing_asset.provider_config.clone(),
+            metadata: updated_metadata,
+        };
+
+        // Update notes with description if notes is empty and provider has notes
+        if update.notes.is_empty() {
+            if let Some(ref notes) = provider_profile.notes {
+                update.notes = notes.clone();
+            }
+        }
+
+        debug!(
+            "Enriching asset {} with provider profile: instrument_type={:?}, name={:?}, sectors={:?}, industry={:?}, countries={:?}, asset_type={:?}",
+            asset_id, update.instrument_type, update.name, provider_profile.sectors, provider_profile.industry, provider_profile.countries, provider_profile.asset_type
+        );
+
+        let updated_asset = self
+            .asset_repository
+            .update_profile(asset_id, update)
+            .await?;
+
+        // Auto-classify asset based on provider profile data
+        if let Some(taxonomy_service) = &self.taxonomy_service {
+            let classification_input =
+                ClassificationInput::from_provider_profile(ProviderProfileClassification {
+                    quote_type: provider_profile.asset_type.as_deref(),
+                    name: updated_asset.name.as_deref(),
+                    sectors_json: provider_profile.sectors.as_deref(),
+                    classes_json: provider_profile.classes.as_deref(),
+                    countries_json: provider_profile.countries.as_deref(),
+                    exchange_mic: existing_asset.instrument_exchange_mic.as_deref(),
+                    ..Default::default()
+                });
+
+            let auto_classifier = AutoClassificationService::new(Arc::clone(taxonomy_service));
+            match auto_classifier
+                .classify_asset(asset_id, &classification_input)
+                .await
+            {
+                Ok(result) => {
+                    info!(
+                        "Auto-classified asset {}: type={:?}, sectors={:?}, region={:?}",
+                        asset_id, result.security_type, result.sectors, result.region
+                    );
+                }
+                Err(e) => {
+                    debug!("Auto-classification failed for {}: {}", asset_id, e);
+                }
+            }
+        }
+
+        let multiplier_changed = old_multiplier != updated_asset.contract_multiplier();
+        Ok(AssetEnrichmentOutcome {
+            asset: updated_asset,
+            multiplier_changed,
+        })
+    }
+}
+
 // Implement the service trait
 #[async_trait::async_trait]
 impl AssetServiceTrait for AssetService {
@@ -1189,7 +1430,12 @@ impl AssetServiceTrait for AssetService {
                 continue;
             }
 
-            let (base_symbol, suffix_mic) = parse_symbol_with_exchange_suffix(&resolution_symbol);
+            // The venue the caller supplied decides whether a trailing `.X` is an
+            // exchange suffix or part of the ticker. A broker sending `ZAAA.F` with
+            // Cboe Canada means the hedged unit class, not a Frankfurt listing, and
+            // stripping the class resolves quotes for a different fund entirely.
+            let (base_symbol, suffix_mic) =
+                parse_symbol_with_known_exchange(&resolution_symbol, input.exchange_mic.as_deref());
             let has_import_market_hint = input
                 .exchange_mic
                 .as_deref()
@@ -1658,6 +1904,22 @@ impl AssetServiceTrait for AssetService {
         Ok(asset)
     }
 
+    async fn update_asset_metadata(
+        &self,
+        asset_id: &str,
+        metadata: serde_json::Value,
+    ) -> Result<Asset> {
+        let asset = self
+            .asset_repository
+            .update_metadata(asset_id, metadata)
+            .await?;
+
+        self.event_sink
+            .emit(DomainEvent::assets_updated(vec![asset.id.clone()]));
+
+        Ok(asset)
+    }
+
     /// Creates a new asset directly without network lookups.
     async fn create_asset(&self, mut new_asset: NewAsset) -> Result<Asset> {
         let canonical = canonicalize_market_identity(
@@ -2000,229 +2262,12 @@ impl AssetServiceTrait for AssetService {
     /// Enriches an existing asset's profile with data from market data provider.
     /// Updates the profile JSON (sectors, countries, website) and notes fields.
     async fn enrich_asset_profile(&self, asset_id: &str) -> Result<Asset> {
-        // Get the existing asset
-        let existing_asset = self.asset_repository.get_by_id(asset_id)?;
-
-        // Skip enrichment for assets that don't need market data
-        if existing_asset.quote_mode != QuoteMode::Market {
-            debug!(
-                "Skipping enrichment for asset {} - quote mode is {:?}",
-                asset_id, existing_asset.quote_mode
-            );
-            return Ok(existing_asset);
+        let outcome = self.enrich_asset_profile_silent(asset_id).await?;
+        if outcome.multiplier_changed {
+            self.event_sink
+                .emit(DomainEvent::assets_updated(vec![outcome.asset.id.clone()]));
         }
-
-        // Fetch profile from provider using the asset (resolver handles exchange suffix)
-        debug!(
-            "Fetching profile for asset {} (display_code: {:?}, exchange: {:?})",
-            asset_id, existing_asset.display_code, existing_asset.instrument_exchange_mic
-        );
-
-        let provider_profile = match self.quote_service.get_asset_profile(&existing_asset).await {
-            Ok(profile) => profile,
-            Err(e) => {
-                return Err(Error::MarketData(
-                    crate::quotes::MarketDataError::ProviderError(format!(
-                        "Could not fetch profile for asset {} (display_code: {:?}): {}",
-                        asset_id, existing_asset.display_code, e
-                    )),
-                ));
-            }
-        };
-
-        // Derive instrument_type from provider's asset_type if not already set
-        let updated_instrument_type = if existing_asset.instrument_type.is_none() {
-            provider_profile
-                .asset_type
-                .as_ref()
-                .and_then(|t| parse_instrument_type_from_provider(t))
-        } else {
-            None
-        };
-
-        // Build provider profile metadata for storage
-        let mut profile_metadata = serde_json::Map::new();
-        if let Some(ref sectors) = provider_profile.sectors {
-            profile_metadata.insert(
-                "sectors".to_string(),
-                serde_json::Value::String(sectors.clone()),
-            );
-        }
-        if let Some(ref industry) = provider_profile.industry {
-            profile_metadata.insert(
-                "industry".to_string(),
-                serde_json::Value::String(industry.clone()),
-            );
-        }
-        if let Some(ref countries) = provider_profile.countries {
-            profile_metadata.insert(
-                "countries".to_string(),
-                serde_json::Value::String(countries.clone()),
-            );
-        }
-        if let Some(ref asset_type) = provider_profile.asset_type {
-            profile_metadata.insert(
-                "quoteType".to_string(),
-                serde_json::Value::String(asset_type.clone()),
-            );
-        }
-        if let Some(ref url) = provider_profile.url {
-            profile_metadata.insert(
-                "website".to_string(),
-                serde_json::Value::String(url.clone()),
-            );
-        }
-        if let Some(market_cap) = provider_profile.market_cap {
-            profile_metadata.insert("marketCap".to_string(), serde_json::json!(market_cap));
-        }
-        if let Some(pe_ratio) = provider_profile.pe_ratio {
-            profile_metadata.insert("peRatio".to_string(), serde_json::json!(pe_ratio));
-        }
-        if let Some(dividend_yield) = provider_profile.dividend_yield {
-            profile_metadata.insert(
-                "dividendYield".to_string(),
-                serde_json::json!(dividend_yield),
-            );
-        }
-        if let Some(week_52_high) = provider_profile.week_52_high {
-            profile_metadata.insert("week52High".to_string(), serde_json::json!(week_52_high));
-        }
-        if let Some(week_52_low) = provider_profile.week_52_low {
-            profile_metadata.insert("week52Low".to_string(), serde_json::json!(week_52_low));
-        }
-
-        // Merge with existing metadata (preserving any non-profile fields like OptionSpec)
-        let mut updated_metadata = if profile_metadata.is_empty() {
-            existing_asset.metadata.clone()
-        } else {
-            let mut merged = match &existing_asset.metadata {
-                Some(existing) => match existing.as_object() {
-                    Some(obj) => obj.clone(),
-                    None => serde_json::Map::new(),
-                },
-                None => serde_json::Map::new(),
-            };
-            merged.insert(
-                "profile".to_string(),
-                serde_json::Value::Object(profile_metadata),
-            );
-            Some(serde_json::Value::Object(merged))
-        };
-
-        // Enrich US Treasury bonds with maturity/coupon data from TreasuryDirect
-        // when the bond spec is missing this data (needed for yield-curve pricing).
-        if existing_asset.is_bond() {
-            let needs_bond_enrichment = existing_asset
-                .bond_spec()
-                .is_none_or(|s| s.maturity_date.is_none());
-
-            if needs_bond_enrichment {
-                if let Some(isin) = existing_asset.instrument_symbol.as_deref() {
-                    if isin.starts_with("US912") {
-                        let http = reqwest::Client::new();
-                        match wealthfolio_market_data::provider::us_treasury_calc::UsTreasuryCalcProvider::fetch_bond_details(&http, isin).await {
-                            Some(details) => {
-                                let spec = super::assets_model::BondSpec {
-                                    isin: Some(isin.to_string()),
-                                    coupon_rate: Some(details.coupon_rate),
-                                    maturity_date: Some(details.maturity_date),
-                                    face_value: Some(details.face_value),
-                                    coupon_frequency: Some(details.coupon_frequency),
-                                };
-                                let meta = updated_metadata.get_or_insert_with(|| serde_json::json!({}));
-                                if let Some(obj) = meta.as_object_mut() {
-                                    obj.insert("bond".to_string(), serde_json::json!(spec));
-                                }
-                                info!("Enriched bond {} with Treasury details: maturity={}, coupon={}", asset_id, details.maturity_date, details.coupon_rate);
-                            }
-                            None => {
-                                debug!("Could not fetch Treasury bond details for {}", isin);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let effective_instrument_type = updated_instrument_type
-            .clone()
-            .or(existing_asset.instrument_type.clone());
-        let canonical = canonicalize_market_identity(
-            effective_instrument_type,
-            existing_asset
-                .instrument_symbol
-                .as_deref()
-                .or(existing_asset.display_code.as_deref()),
-            existing_asset.instrument_exchange_mic.as_deref(),
-            Some(provider_profile.currency.as_str()),
-        );
-        let resolved_quote_ccy = canonical
-            .quote_ccy
-            .unwrap_or_else(|| existing_asset.quote_ccy.clone());
-
-        // Build profile update from provider data
-        let mut update = UpdateAssetProfile {
-            display_code: existing_asset.display_code.clone(),
-            name: provider_profile.name.or(existing_asset.name.clone()),
-            notes: existing_asset.notes.clone().unwrap_or_default(),
-            kind: None,
-            quote_mode: Some(existing_asset.quote_mode),
-            quote_ccy: Some(resolved_quote_ccy),
-            instrument_type: updated_instrument_type,
-            instrument_symbol: None,
-            instrument_exchange_mic: None,
-            provider_config: existing_asset.provider_config.clone(),
-            metadata: updated_metadata,
-        };
-
-        // Update notes with description if notes is empty and provider has notes
-        if update.notes.is_empty() {
-            if let Some(ref notes) = provider_profile.notes {
-                update.notes = notes.clone();
-            }
-        }
-
-        debug!(
-            "Enriching asset {} with provider profile: instrument_type={:?}, name={:?}, sectors={:?}, industry={:?}, countries={:?}, asset_type={:?}",
-            asset_id, update.instrument_type, update.name, provider_profile.sectors, provider_profile.industry, provider_profile.countries, provider_profile.asset_type
-        );
-
-        let updated_asset = self
-            .asset_repository
-            .update_profile(asset_id, update)
-            .await?;
-
-        // Auto-classify asset based on provider profile data
-        if let Some(taxonomy_service) = &self.taxonomy_service {
-            let classification_input =
-                ClassificationInput::from_provider_profile(ProviderProfileClassification {
-                    quote_type: provider_profile.asset_type.as_deref(),
-                    name: updated_asset.name.as_deref(),
-                    sectors_json: provider_profile.sectors.as_deref(),
-                    classes_json: provider_profile.classes.as_deref(),
-                    countries_json: provider_profile.countries.as_deref(),
-                    exchange_mic: existing_asset.instrument_exchange_mic.as_deref(),
-                    ..Default::default()
-                });
-
-            let auto_classifier = AutoClassificationService::new(Arc::clone(taxonomy_service));
-            match auto_classifier
-                .classify_asset(asset_id, &classification_input)
-                .await
-            {
-                Ok(result) => {
-                    info!(
-                        "Auto-classified asset {}: type={:?}, sectors={:?}, region={:?}",
-                        asset_id, result.security_type, result.sectors, result.region
-                    );
-                }
-                Err(e) => {
-                    debug!("Auto-classification failed for {}: {}", asset_id, e);
-                }
-            }
-        }
-
-        Ok(updated_asset)
+        Ok(outcome.asset)
     }
 
     /// Enriches multiple assets in batch, with deduplication and sync state tracking.
@@ -2264,9 +2309,9 @@ impl AssetServiceTrait for AssetService {
         let skipped_count = unique_ids_len - ids_to_enrich.len();
 
         // Enrich assets concurrently (up to 5 at a time)
-        let results: Vec<(String, Result<Asset>)> = stream::iter(ids_to_enrich)
+        let results: Vec<(String, Result<AssetEnrichmentOutcome>)> = stream::iter(ids_to_enrich)
             .map(|asset_id| async move {
-                let result = self.enrich_asset_profile(&asset_id).await;
+                let result = self.enrich_asset_profile_silent(&asset_id).await;
                 if result.is_ok() {
                     if let Err(e) = self.quote_service.mark_profile_enriched(&asset_id).await {
                         warn!("Failed to mark profile enriched for {}: {}", asset_id, e);
@@ -2280,10 +2325,14 @@ impl AssetServiceTrait for AssetService {
 
         let mut enriched_count = 0;
         let mut failed_count = 0;
+        let mut multiplier_changed_asset_ids = Vec::new();
         for (asset_id, result) in &results {
             match result {
-                Ok(_) => {
+                Ok(outcome) => {
                     enriched_count += 1;
+                    if outcome.multiplier_changed {
+                        multiplier_changed_asset_ids.push(outcome.asset.id.clone());
+                    }
                     info!("Successfully enriched asset profile: {}", asset_id);
                 }
                 Err(e) => {
@@ -2291,6 +2340,13 @@ impl AssetServiceTrait for AssetService {
                     failed_count += 1;
                 }
             }
+        }
+
+        if !multiplier_changed_asset_ids.is_empty() {
+            multiplier_changed_asset_ids.sort();
+            multiplier_changed_asset_ids.dedup();
+            self.event_sink
+                .emit(DomainEvent::assets_updated(multiplier_changed_asset_ids));
         }
 
         Ok((enriched_count, skipped_count, failed_count))
@@ -2661,6 +2717,7 @@ mod tests {
     use super::{AssetRepositoryTrait, AssetService, AssetServiceTrait, QuoteMode};
     use crate::assets::AssetResolutionInput;
     use crate::errors::{DatabaseError, Error, Result};
+    use crate::events::{DomainEvent, MockDomainEventSink};
     use crate::quotes::{
         LatestQuotePair, LatestQuoteSnapshot, ProviderInfo, Quote, QuoteImport, QuoteServiceTrait,
         QuoteSyncState, SymbolSearchResult, SymbolSyncPlan, SyncMode, SyncResult,
@@ -2695,10 +2752,41 @@ mod tests {
 
         async fn update_profile(
             &self,
-            _asset_id: &str,
-            _payload: UpdateAssetProfile,
+            asset_id: &str,
+            payload: UpdateAssetProfile,
         ) -> Result<Asset> {
-            unimplemented!()
+            let mut assets = self.assets.lock().unwrap();
+            let asset = assets
+                .iter_mut()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| Error::Asset(format!("Asset not found: {asset_id}")))?;
+            asset.name = payload.name;
+            asset.display_code = payload.display_code;
+            asset.notes = (!payload.notes.is_empty()).then_some(payload.notes);
+            if let Some(kind) = payload.kind {
+                asset.kind = kind;
+            }
+            if let Some(quote_mode) = payload.quote_mode {
+                asset.quote_mode = quote_mode;
+            }
+            if let Some(quote_ccy) = payload.quote_ccy {
+                asset.quote_ccy = quote_ccy;
+            }
+            if let Some(instrument_type) = payload.instrument_type {
+                asset.instrument_type = Some(instrument_type);
+            }
+            if payload.instrument_symbol.is_some() {
+                asset.instrument_symbol = payload.instrument_symbol;
+            }
+            if payload.instrument_exchange_mic.is_some() {
+                asset.instrument_exchange_mic = payload.instrument_exchange_mic;
+            }
+            asset.provider_config = payload.provider_config;
+            if payload.metadata.is_some() {
+                asset.metadata = payload.metadata;
+            }
+            asset.updated_at = Utc::now().naive_utc();
+            Ok(asset.clone())
         }
 
         async fn update_quote_mode(&self, _asset_id: &str, _quote_mode: &str) -> Result<Asset> {
@@ -2833,6 +2921,15 @@ mod tests {
             _as_of: chrono::NaiveDate,
         ) -> Result<HashMap<String, Quote>> {
             Ok(HashMap::new())
+        }
+
+        fn get_sparse_asset_market_facts(
+            &self,
+            _requests: &[(String, chrono::NaiveDate)],
+        ) -> Result<crate::quotes::SparseAssetMarketFacts> {
+            Err(Error::Unexpected(
+                "TestQuoteService::get_sparse_asset_market_facts should not be called".to_string(),
+            ))
         }
 
         fn get_latest_quotes_snapshot(
@@ -3382,6 +3479,49 @@ mod tests {
             output.quote_ccy_source,
             Some(QuoteCcyResolutionSource::ProviderQuote)
         );
+    }
+
+    #[tokio::test]
+    async fn resolution_keeps_a_share_class_the_venue_contradicts() {
+        // A broker sending `ZAAA.F` on Cboe Canada means BMO's currency-hedged unit
+        // class. `.F` is Yahoo's Frankfurt suffix, so stripping it resolved `ZAAA` —
+        // the unhedged listing, a different fund quoting ~4% away. Observed live in 33
+        // activity records on 2026-07-30. The venue we were handed is the evidence that
+        // `.F` is not a venue.
+        let service = test_asset_service(Vec::new(), TestQuoteService::default());
+        let mut input = import_input("ZAAA.F", "CAD");
+        input.exchange_mic = Some("NEOE".to_string());
+
+        let output = service
+            .resolve_import_asset_inputs(vec![input])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(output.canonical_symbol.as_deref(), Some("ZAAA.F"));
+        assert_eq!(output.exchange_mic.as_deref(), Some("NEOE"));
+        let draft = output.draft.expect("draft for an unseen instrument");
+        assert_eq!(draft.instrument_symbol.as_deref(), Some("ZAAA.F"));
+        assert_eq!(draft.instrument_exchange_mic.as_deref(), Some("NEOE"));
+    }
+
+    #[tokio::test]
+    async fn resolution_still_strips_a_suffix_the_venue_agrees_with() {
+        // The ordinary case, unchanged: the venue and the suffix say the same thing.
+        let service = test_asset_service(Vec::new(), TestQuoteService::default());
+        let mut input = import_input("SHOP.TO", "CAD");
+        input.exchange_mic = Some("XTSE".to_string());
+
+        let output = service
+            .resolve_import_asset_inputs(vec![input])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(output.canonical_symbol.as_deref(), Some("SHOP"));
+        assert_eq!(output.exchange_mic.as_deref(), Some("XTSE"));
     }
 
     #[tokio::test]
@@ -4360,6 +4500,81 @@ mod tests {
         assert!(AssetService::should_reset_sync_state_after_profile_change(
             &before, &after
         ));
+    }
+
+    #[tokio::test]
+    async fn bulk_enrichment_emits_one_event_for_all_multiplier_changes() {
+        let option_a = Asset {
+            id: "option-a".to_string(),
+            instrument_symbol: Some("OPTION-A".to_string()),
+            instrument_type: None,
+            ..test_market_asset()
+        };
+        let option_b = Asset {
+            id: "option-b".to_string(),
+            instrument_symbol: Some("OPTION-B".to_string()),
+            instrument_type: None,
+            ..test_market_asset()
+        };
+        let equity = Asset {
+            id: "equity".to_string(),
+            instrument_symbol: Some("EQUITY".to_string()),
+            ..test_market_asset()
+        };
+        let quote_service = TestQuoteService::default();
+        for symbol in ["OPTION-A", "OPTION-B"] {
+            quote_service.profiles.lock().unwrap().insert(
+                symbol.to_string(),
+                ProviderProfile {
+                    symbol: symbol.to_string(),
+                    asset_type: Some("OPTION".to_string()),
+                    currency: "USD".to_string(),
+                    data_source: "TEST".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        quote_service.profiles.lock().unwrap().insert(
+            "EQUITY".to_string(),
+            ProviderProfile {
+                symbol: "EQUITY".to_string(),
+                asset_type: Some("EQUITY".to_string()),
+                currency: "USD".to_string(),
+                data_source: "TEST".to_string(),
+                ..Default::default()
+            },
+        );
+        let event_sink = Arc::new(MockDomainEventSink::new());
+        let service = AssetService::new(
+            Arc::new(TestAssetRepository::with_assets(vec![
+                option_a, option_b, equity,
+            ])),
+            Arc::new(quote_service),
+        )
+        .unwrap()
+        .with_event_sink(event_sink.clone());
+
+        assert_eq!(
+            service
+                .enrich_assets(vec![
+                    "option-a".to_string(),
+                    "equity".to_string(),
+                    "option-b".to_string(),
+                ])
+                .await
+                .unwrap(),
+            (3, 0, 0),
+        );
+
+        let events = event_sink.events();
+        assert_eq!(events.len(), 1);
+        let DomainEvent::AssetsUpdated { asset_ids } = &events[0] else {
+            panic!("expected one AssetsUpdated event");
+        };
+        assert_eq!(
+            asset_ids,
+            &vec!["option-a".to_string(), "option-b".to_string()]
+        );
     }
 
     fn test_market_asset() -> Asset {

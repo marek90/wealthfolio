@@ -15,19 +15,104 @@ mod tests {
         NewExchangeRate,
     };
     use crate::lots::{LotClosure, LotDisposal, LotRecord};
+    use crate::portfolio::economic_events::BasisStatus;
+    use crate::portfolio::performance::PerformanceService;
     use crate::portfolio::snapshot::holdings_calculator::{HoldingsCalculator, ProjectionRun};
     use crate::portfolio::snapshot::{
         AccountStateSnapshot, HoldingsCalculationResult, Lot, Position, SnapshotSource,
     };
+    use crate::portfolio::valuation::{DailyAccountValuation, ExternalFlowSource, ValuationStatus};
     use async_trait;
-    use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+    use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+    use proptest::prelude::*;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use serde::Deserialize;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::str::FromStr;
     use std::sync::Arc;
     use std::sync::RwLock;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AccountingContract {
+        cases: Vec<AccountingContractCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AccountingContractCase {
+        name: String,
+        account_type: String,
+        activity_type: String,
+        subtype: Option<String>,
+        is_external: Option<bool>,
+        amount: String,
+        expected: AccountingContractExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AccountingContractExpected {
+        cash_delta: String,
+        net_contribution_delta: String,
+        gain_delta: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LedgerContract {
+        scenarios: Vec<LedgerScenario>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LedgerScenario {
+        name: String,
+        account_type: String,
+        activities: Vec<LedgerActivity>,
+        expected: LedgerExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LedgerActivity {
+        day: i64,
+        activity_type: String,
+        subtype: Option<String>,
+        is_external: Option<bool>,
+        amount: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LedgerExpected {
+        ending_cash: String,
+        net_contribution: String,
+        gain: String,
+    }
+
+    fn accounting_contract() -> AccountingContract {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/accounting/activity_semantics.json"
+        )))
+        .expect("accounting activity contract should be valid JSON")
+    }
+
+    fn ledger_contract() -> LedgerContract {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/accounting/ledger_scenarios.json"
+        )))
+        .expect("accounting ledger contract should be valid JSON")
+    }
+
+    fn contract_decimal(value: &str) -> Decimal {
+        Decimal::from_str(value).expect("accounting contract decimal should be valid")
+    }
 
     // --- Mock AssetRepository ---
     #[derive(Clone)]
@@ -261,13 +346,15 @@ mod tests {
         }
         fn get_exchange_rate_for_date(
             &self,
-            _from_currency: &str,
-            _to_currency: &str,
-            _date: NaiveDate,
+            from_currency: &str,
+            to_currency: &str,
+            date: NaiveDate,
         ) -> Result<Decimal> {
-            Err(crate::errors::Error::Unexpected(
-                "MockFxService::get_exchange_rate_for_date not implemented".to_string(),
-            ))
+            // Mirror the real FxService invariant: convert_currency_for_date =
+            // amount * get_exchange_rate_for_date. Return the per-unit rate from
+            // the same conversion map so precompute_position_cost_basis resolves
+            // the same value valuation would prefetch.
+            self.convert_currency_for_date(Decimal::ONE, from_currency, to_currency, date)
         }
         fn convert_currency(
             &self,
@@ -508,6 +595,87 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn create_contract_activity(
+        id: &str,
+        activity_type: &str,
+        subtype: Option<&str>,
+        is_external: Option<bool>,
+        amount: Decimal,
+        date: NaiveDate,
+    ) -> Activity {
+        let mut activity = create_cash_activity(
+            id,
+            ActivityType::from_str(activity_type)
+                .expect("accounting contract activity type should be valid"),
+            amount,
+            Decimal::ZERO,
+            "USD",
+            &date.to_string(),
+        );
+        activity.subtype = subtype.map(str::to_string);
+        activity.metadata =
+            is_external.map(|is_external| json!({ "flow": { "is_external": is_external } }));
+        activity
+    }
+
+    fn apply_contract_activity(
+        calculator: &mut CalcHarness,
+        previous_snapshot: &AccountStateSnapshot,
+        account_type: &str,
+        activity: Activity,
+        date: NaiveDate,
+    ) -> AccountStateSnapshot {
+        calculator
+            .calculate_next_holdings_for_account_type(
+                previous_snapshot,
+                &[activity],
+                date,
+                Some(account_type),
+            )
+            .expect("accounting contract activity should calculate")
+            .snapshot
+    }
+
+    fn valuation_from_snapshot(snapshot: &AccountStateSnapshot) -> DailyAccountValuation {
+        DailyAccountValuation {
+            id: format!("valuation-{}", snapshot.snapshot_date),
+            account_id: snapshot.account_id.clone(),
+            valuation_date: snapshot.snapshot_date,
+            account_currency: snapshot.currency.clone(),
+            base_currency: snapshot.currency.clone(),
+            fx_rate_to_base: Decimal::ONE,
+            cash_balance: snapshot.cash_total_account_currency,
+            investment_market_value: Decimal::ZERO,
+            total_value: snapshot.cash_total_account_currency,
+            cost_basis: snapshot.cost_basis,
+            book_basis: snapshot.cost_basis,
+            net_contribution: snapshot.net_contribution,
+            cash_balance_base: snapshot.cash_total_account_currency,
+            investment_market_value_base: Decimal::ZERO,
+            total_value_base: snapshot.cash_total_account_currency,
+            cost_basis_base: snapshot.cost_basis,
+            book_basis_base: snapshot.cost_basis,
+            net_contribution_base: snapshot.net_contribution_base,
+            external_inflow_base: Decimal::ZERO,
+            external_outflow_base: Decimal::ZERO,
+            external_flow_source: ExternalFlowSource::NoFlow,
+            performance_eligible_value_base: snapshot.cash_total_account_currency,
+            value_status: ValuationStatus::Complete,
+            basis_status: BasisStatus::NotApplicable,
+            calculated_at: Utc::now(),
+        }
+    }
+
+    fn simple_gain(snapshot: &AccountStateSnapshot) -> Decimal {
+        PerformanceService::calculate_simple_performance(
+            &valuation_from_snapshot(snapshot),
+            None,
+            None,
+        )
+        .total_gain_loss_amount
+        .expect("simple gain should be available")
     }
 
     fn create_initial_snapshot(
@@ -1025,6 +1193,8 @@ mod tests {
             last_updated: Utc::now(),
             is_alternative: false,
             contract_multiplier: Decimal::ONE,
+            cost_basis_account: None,
+            cost_basis_base: None,
         };
         previous_snapshot
             .positions
@@ -1137,6 +1307,8 @@ mod tests {
                 last_updated: Utc::now(),
                 is_alternative: false,
                 contract_multiplier: Decimal::ONE,
+                cost_basis_account: None,
+                cost_basis_base: None,
             },
         );
         previous_snapshot
@@ -4302,6 +4474,8 @@ mod tests {
             last_updated: Utc::now(),
             is_alternative: false,
             contract_multiplier: Decimal::ONE,
+            cost_basis_account: None,
+            cost_basis_base: None,
         };
         previous_snapshot
             .positions
@@ -5643,6 +5817,8 @@ mod tests {
                 last_updated: Utc::now(),
                 is_alternative: false,
                 contract_multiplier: Decimal::ONE,
+                cost_basis_account: None,
+                cost_basis_base: None,
             },
         );
 
@@ -9006,5 +9182,320 @@ mod tests {
             !result.snapshot.positions.contains_key("AAPL"),
             "no position should be created"
         );
+    }
+
+    /// STEP 1 parity (same currency): a multi-lot position that lives through a
+    /// split and a partial sell must have its precomputed cost-basis scalars
+    /// equal the sum of the remaining lots' cost basis (== total_cost_basis when
+    /// account == base == position currency). This exercises the FIFO + split +
+    /// partial-sell path that produces the lots the scalar is derived from.
+    #[test]
+    fn precomputed_cost_basis_same_currency_multilot_split_and_partial_sell() {
+        let base_currency = Arc::new(RwLock::new("USD".to_string()));
+        let mut calculator = create_calculator(Arc::new(MockFxService::new()), base_currency);
+
+        let mut snapshot = create_initial_snapshot("acc_1", "USD", "2023-01-01");
+
+        // Lot 1: 10 @ 100 = 1000
+        let buy1 = create_default_activity(
+            "buy1",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(10),
+            dec!(100),
+            dec!(0),
+            "USD",
+            "2023-01-02",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(
+                &snapshot,
+                &[buy1],
+                NaiveDate::from_str("2023-01-02").unwrap(),
+            )
+            .unwrap()
+            .snapshot;
+
+        // Lot 2: 10 @ 200 = 2000
+        let buy2 = create_default_activity(
+            "buy2",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(10),
+            dec!(200),
+            dec!(0),
+            "USD",
+            "2023-01-03",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(
+                &snapshot,
+                &[buy2],
+                NaiveDate::from_str("2023-01-03").unwrap(),
+            )
+            .unwrap()
+            .snapshot;
+
+        // 2:1 split on 2023-01-04 (both lots opened earlier are split).
+        let split = create_default_activity(
+            "split",
+            ActivityType::Split,
+            "AAPL",
+            dec!(2),
+            dec!(0),
+            dec!(0),
+            "USD",
+            "2023-01-04",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(
+                &snapshot,
+                &[split],
+                NaiveDate::from_str("2023-01-04").unwrap(),
+            )
+            .unwrap()
+            .snapshot;
+
+        // Sell 10 effective shares (FIFO from lot 1, which is 20 effective after
+        // the split). Removes as-acquired 5 shares → 500 cost basis from lot 1.
+        let sell = create_default_activity(
+            "sell",
+            ActivityType::Sell,
+            "AAPL",
+            dec!(10),
+            dec!(250),
+            dec!(0),
+            "USD",
+            "2023-01-05",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(
+                &snapshot,
+                &[sell],
+                NaiveDate::from_str("2023-01-05").unwrap(),
+            )
+            .unwrap()
+            .snapshot;
+
+        let position = snapshot.positions.get("AAPL").unwrap();
+        // Remaining: lot1 500 + lot2 2000 = 2500 (split-invariant cost basis).
+        assert_eq!(position.total_cost_basis, dec!(2500));
+        // Same currency everywhere → scalar equals the lot cost-basis sum.
+        assert_eq!(position.cost_basis_account, Some(dec!(2500)));
+        assert_eq!(position.cost_basis_base, Some(dec!(2500)));
+        assert_eq!(position.cost_basis_account, Some(position.total_cost_basis));
+    }
+
+    /// STEP 1 parity (cross currency): position in EUR, account in USD, base in
+    /// GBP, with two lots acquired on dates whose EUR->USD / EUR->GBP rates
+    /// differ. The precomputed scalars must use each lot's ACQUISITION-date FX
+    /// (summed per lot), not a single valuation-date rate applied to the total.
+    #[test]
+    fn precomputed_cost_basis_cross_currency_uses_per_lot_acquisition_fx() {
+        let mut fx = MockFxService::new();
+        let d1 = NaiveDate::from_str("2023-01-02").unwrap();
+        let d2 = NaiveDate::from_str("2023-01-03").unwrap();
+        // Acquisition-date rates differ between the two lots.
+        fx.add_bidirectional_rate("EUR", "USD", d1, dec!(1.10));
+        fx.add_bidirectional_rate("EUR", "GBP", d1, dec!(0.90));
+        fx.add_bidirectional_rate("EUR", "USD", d2, dec!(1.20));
+        fx.add_bidirectional_rate("EUR", "GBP", d2, dec!(0.95));
+
+        let base_currency = Arc::new(RwLock::new("GBP".to_string()));
+        let mut calculator = create_calculator(Arc::new(fx), base_currency);
+
+        // Account currency is USD; asset ADS.DE is listed in EUR.
+        let mut snapshot = create_initial_snapshot("acc_1", "USD", "2023-01-01");
+
+        // Lot 1: 10 @ 100 EUR = 1000 EUR on d1.
+        let buy1 = create_default_activity(
+            "buy1",
+            ActivityType::Buy,
+            "ADS.DE",
+            dec!(10),
+            dec!(100),
+            dec!(0),
+            "EUR",
+            "2023-01-02",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(&snapshot, &[buy1], d1)
+            .unwrap()
+            .snapshot;
+
+        // Lot 2: 5 @ 200 EUR = 1000 EUR on d2.
+        let buy2 = create_default_activity(
+            "buy2",
+            ActivityType::Buy,
+            "ADS.DE",
+            dec!(5),
+            dec!(200),
+            dec!(0),
+            "EUR",
+            "2023-01-03",
+        );
+        snapshot = calculator
+            .calculate_next_holdings(&snapshot, &[buy2], d2)
+            .unwrap()
+            .snapshot;
+
+        let position = snapshot.positions.get("ADS.DE").unwrap();
+        assert_eq!(position.currency, "EUR");
+        assert_eq!(position.total_cost_basis, dec!(2000)); // EUR
+
+        // Account (USD): 1000*1.10 + 1000*1.20 = 2300.
+        assert_eq!(position.cost_basis_account, Some(dec!(2300)));
+        // Base (GBP): 1000*0.90 + 1000*0.95 = 1850.
+        assert_eq!(position.cost_basis_base, Some(dec!(1850)));
+
+        // Must NOT collapse to a single (e.g. latest) valuation-date rate.
+        assert_ne!(position.cost_basis_account, Some(dec!(2000) * dec!(1.20)));
+        assert_ne!(position.cost_basis_account, Some(dec!(2000) * dec!(1.10)));
+        assert_ne!(position.cost_basis_base, Some(dec!(2000) * dec!(0.95)));
+        assert_ne!(position.cost_basis_base, Some(dec!(2000) * dec!(0.90)));
+
+        // The account-currency scalar matches the snapshot's own account cost
+        // basis field (both anchored to acquisition-date FX).
+        assert_eq!(snapshot.cost_basis, dec!(2300));
+    }
+
+    #[test]
+    fn accounting_contract_reconciles_cash_contributions_and_performance() {
+        let date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+
+        for case in accounting_contract().cases {
+            let base_currency = Arc::new(RwLock::new("USD".to_string()));
+            let mut calculator = create_calculator(Arc::new(MockFxService::new()), base_currency);
+            let initial = create_initial_snapshot("acc_1", "USD", "2025-01-01");
+            let activity = create_contract_activity(
+                &format!("contract-{}", case.name),
+                &case.activity_type,
+                case.subtype.as_deref(),
+                case.is_external,
+                contract_decimal(&case.amount),
+                date,
+            );
+            let snapshot = apply_contract_activity(
+                &mut calculator,
+                &initial,
+                &case.account_type,
+                activity,
+                date,
+            );
+
+            assert_eq!(
+                snapshot.cash_total_account_currency,
+                contract_decimal(&case.expected.cash_delta),
+                "accounting contract cash case: {}",
+                case.name
+            );
+            assert_eq!(
+                snapshot.net_contribution,
+                contract_decimal(&case.expected.net_contribution_delta),
+                "accounting contract contribution case: {}",
+                case.name
+            );
+            assert_eq!(
+                simple_gain(&snapshot),
+                contract_decimal(&case.expected.gain_delta),
+                "accounting contract gain case: {}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_contract_reconciles_cash_contributions_and_performance() {
+        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+
+        for scenario in ledger_contract().scenarios {
+            let base_currency = Arc::new(RwLock::new("USD".to_string()));
+            let mut calculator = create_calculator(Arc::new(MockFxService::new()), base_currency);
+            let mut snapshot = create_initial_snapshot("acc_1", "USD", "2025-01-01");
+
+            for (index, entry) in scenario.activities.into_iter().enumerate() {
+                let date = start + Duration::days(entry.day);
+                let activity = create_contract_activity(
+                    &format!("ledger-{index}"),
+                    &entry.activity_type,
+                    entry.subtype.as_deref(),
+                    entry.is_external,
+                    contract_decimal(&entry.amount),
+                    date,
+                );
+                snapshot = apply_contract_activity(
+                    &mut calculator,
+                    &snapshot,
+                    &scenario.account_type,
+                    activity,
+                    date,
+                );
+            }
+
+            assert_eq!(
+                snapshot.cash_total_account_currency,
+                contract_decimal(&scenario.expected.ending_cash),
+                "accounting ledger cash scenario: {}",
+                scenario.name
+            );
+            assert_eq!(
+                snapshot.net_contribution,
+                contract_decimal(&scenario.expected.net_contribution),
+                "accounting ledger contribution scenario: {}",
+                scenario.name
+            );
+            assert_eq!(
+                simple_gain(&snapshot),
+                contract_decimal(&scenario.expected.gain),
+                "accounting ledger gain scenario: {}",
+                scenario.name
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn external_purchase_refunds_never_create_performance_gain(
+            purchase_minor in 1i64..10_000_000,
+            refund_seed in 0i64..10_000_000,
+        ) {
+            let refund_minor = refund_seed % (purchase_minor + 1);
+            let purchase = Decimal::new(purchase_minor, 2);
+            let refund = Decimal::new(refund_minor, 2);
+            let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+            let base_currency = Arc::new(RwLock::new("USD".to_string()));
+            let mut calculator =
+                create_calculator(Arc::new(MockFxService::new()), base_currency);
+            let mut snapshot = create_initial_snapshot("acc_1", "USD", "2025-01-01");
+
+            for (day, activity_type, subtype, is_external, amount) in [
+                (1, "DEPOSIT", None, None, purchase),
+                (2, "WITHDRAWAL", None, None, purchase),
+                (3, "CREDIT", Some("REFUND"), Some(true), refund),
+            ] {
+                let date = start + Duration::days(day);
+                let activity = create_contract_activity(
+                    &format!("property-{day}"),
+                    activity_type,
+                    subtype,
+                    is_external,
+                    amount,
+                    date,
+                );
+                snapshot = apply_contract_activity(
+                    &mut calculator,
+                    &snapshot,
+                    account_types::CASH,
+                    activity,
+                    date,
+                );
+            }
+
+            prop_assert_eq!(snapshot.cash_total_account_currency, refund);
+            prop_assert_eq!(snapshot.net_contribution, refund);
+            prop_assert_eq!(simple_gain(&snapshot), Decimal::ZERO);
+        }
     }
 }

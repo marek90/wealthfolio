@@ -67,6 +67,14 @@ describe("AddonIframeRoute self-healing", () => {
     activationEpochStore.reset();
   });
 
+  it("marks the sandbox viewport for bottom-navigation clearance", () => {
+    const { container } = render(<AddonIframeRoute addonId="test-addon" routeId="test" />);
+
+    const viewport = container.querySelector('[data-addon-route-viewport="true"]');
+    const frameContainer = container.querySelector('[data-addon-route-id="test"]');
+    expect(viewport?.contains(frameContainer)).toBe(true);
+  });
+
   it("activates once and renders the route on mount", async () => {
     render(<AddonIframeRoute addonId="test-addon" routeId="test" />);
 
