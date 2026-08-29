@@ -4,7 +4,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay, useDateFormatting } from "@wealthfolio/ui";
 import { ChartConfig, ChartContainer } from "@wealthfolio/ui/components/ui/chart";
-import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Area, AreaChart, Brush, ReferenceArea, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
@@ -164,8 +164,9 @@ export function HistoryChart({
     setPrevData(data);
     setBrushIndices(null);
   }
-  const startIndex = brushIndices?.startIndex ?? 0;
-  const endIndex = brushIndices?.endIndex ?? Math.max(0, data.length - 1);
+  const lastDataIndex = Math.max(0, data.length - 1);
+  const startIndex = Math.min(brushIndices?.startIndex ?? 0, lastDataIndex);
+  const endIndex = Math.min(brushIndices?.endIndex ?? lastDataIndex, lastDataIndex);
   const visibleData = useMemo(
     () => (brushIndices ? data.slice(startIndex, endIndex + 1) : data),
     [data, brushIndices, startIndex, endIndex],
@@ -199,9 +200,16 @@ export function HistoryChart({
     }
   }, []);
 
-  // Keep the latest brush indices readable from imperative touch handlers without stale closures.
+  // Keep the latest brush indices and data array readable from imperative touch handlers
+  // without stale closures. The window-level touchmove/touchend listeners below are attached
+  // once per gesture and must not capture the render's `data`/`brushIndices` by value — if the
+  // dataset changes identity mid-drag (a refetch, a period switch), a listener holding the old
+  // array would compute an index against its length but store/consume it against the new,
+  // shorter array, producing `data[i] === undefined` and crashing on `.date`.
   const brushIndicesRef = useRef(brushIndices);
   brushIndicesRef.current = brushIndices;
+  const dataRef = useRef(data);
+  dataRef.current = data;
 
   // iOS synthesizes mouse events after touch; timestamp touches so the mouse-only
   // drag-to-select can ignore those phantom events (a source of the mobile crash).
@@ -214,51 +222,58 @@ export function HistoryChart({
   const BRUSH_HEIGHT = 20;
   const BRUSH_MARGIN_BOTTOM = 28;
 
-  // Vertical center of the brush band, measured from the container's bottom edge (so it is
-  // page-height independent). Defaults to the computed position; corrected by measurement.
-  const [brushCenterFromBottom, setBrushCenterFromBottom] = useState(
-    BRUSH_MARGIN_BOTTOM + BRUSH_HEIGHT / 2,
-  );
-  useLayoutEffect(() => {
-    const node = containerRef.current;
-    if (!node) return;
-    const slide = node.querySelector<SVGRectElement>(".recharts-brush-slide");
-    if (!slide) return;
-    const nodeRect = node.getBoundingClientRect();
-    const slideRect = slide.getBoundingClientRect();
-    const center = nodeRect.bottom - (slideRect.top + slideRect.height / 2);
-    setBrushCenterFromBottom((prev) => (Math.abs(prev - center) > 0.5 ? center : prev));
-  }, [containerWidth, data.length]);
   const lastIndex = Math.max(1, data.length - 1);
   const brushUsableWidth = Math.max(0, containerWidth - BRUSH_MARGIN * 2 - BRUSH_TRAVELLER_WIDTH);
+  // Approximate pixel x of a given data index along the brush track. Used only to tell which of
+  // the two <Brush traveller> render-prop calls is the start vs. end handle — Recharts passes no
+  // id/side info to that callback. Close enough to Recharts' own internal scale to disambiguate
+  // two distinct indices; a rare mismatch would at worst swap which label reads outer vs inner,
+  // never crash.
+  const approxTravellerX = (index: number) => BRUSH_MARGIN + (index / lastIndex) * brushUsableWidth;
 
   // Which traveller the current touch is dragging.
   const activeTravellerRef = useRef<"start" | "end" | null>(null);
+  // The data array captured when the current touch-drag started. If `dataRef.current` no longer
+  // matches it (the dataset was swapped mid-gesture), the drag is aborted instead of continuing
+  // against indices that no longer describe the same points.
+  const dragDataRef = useRef<HistoryChartData[] | null>(null);
 
   const indexFromClientX = (clientX: number): number | null => {
     const el = containerRef.current;
-    if (!el || data.length === 0 || brushUsableWidth <= 0) return null;
+    const currentData = dataRef.current;
+    if (!el || currentData.length === 0 || brushUsableWidth <= 0) return null;
     const rect = el.getBoundingClientRect();
     const frac = (clientX - rect.left - BRUSH_MARGIN) / brushUsableWidth;
-    const idx = Math.round(frac * (data.length - 1));
-    return Math.max(0, Math.min(data.length - 1, idx));
+    const idx = Math.round(frac * (currentData.length - 1));
+    return Math.max(0, Math.min(currentData.length - 1, idx));
   };
 
   const moveActiveTravellerTo = (idx: number) => {
+    const currentData = dataRef.current;
+    const lastIdx = currentData.length - 1;
     const cur = brushIndicesRef.current;
-    const s = cur?.startIndex ?? 0;
-    const e = cur?.endIndex ?? data.length - 1;
+    const s = Math.min(cur?.startIndex ?? 0, lastIdx);
+    const e = Math.min(cur?.endIndex ?? lastIdx, lastIdx);
+    const clampedIdx = Math.max(0, Math.min(idx, lastIdx));
     let ns = s;
     let ne = e;
-    if (activeTravellerRef.current === "start") ns = Math.min(idx, e);
-    else ne = Math.max(idx, s);
+    if (activeTravellerRef.current === "start") ns = Math.min(clampedIdx, e);
+    else ne = Math.max(clampedIdx, s);
     if (ns === s && ne === e) return; // idempotent — avoids redundant re-renders
+    const fromDate = currentData[ns]?.date;
+    const toDate = currentData[ne]?.date;
+    if (fromDate == null || toDate == null) return;
     setBrushIndices({ startIndex: ns, endIndex: ne });
-    onVisibleRangeChange?.({ from: data[ns].date, to: data[ne].date });
+    onVisibleRangeChange?.({ from: fromDate, to: toDate });
   };
 
   const handleTravellerTouchMove = (e: TouchEvent) => {
     if (!activeTravellerRef.current) return;
+    if (dataRef.current !== dragDataRef.current) {
+      // Dataset swapped mid-gesture — abort rather than drag against stale indices.
+      endTravellerTouch();
+      return;
+    }
     const touch = e.touches[0];
     if (!touch) return;
     lastTouchAtRef.current = Date.now();
@@ -269,6 +284,7 @@ export function HistoryChart({
 
   const endTravellerTouch = () => {
     activeTravellerRef.current = null;
+    dragDataRef.current = null;
     lastTouchAtRef.current = Date.now();
     window.removeEventListener("touchmove", handleTravellerTouchMove);
     window.removeEventListener("touchend", endTravellerTouch);
@@ -281,11 +297,14 @@ export function HistoryChart({
     // Take over from Recharts' own (mouse-only, touch-broken) traveller handling.
     e.stopPropagation();
     lastTouchAtRef.current = Date.now();
+    dragDataRef.current = dataRef.current;
     const idx = indexFromClientX(touch.clientX);
     if (idx == null) return;
+    const currentData = dataRef.current;
+    const lastIdx = currentData.length - 1;
     const cur = brushIndicesRef.current;
-    const s = cur?.startIndex ?? 0;
-    const en = cur?.endIndex ?? data.length - 1;
+    const s = Math.min(cur?.startIndex ?? 0, lastIdx);
+    const en = Math.min(cur?.endIndex ?? lastIdx, lastIdx);
     activeTravellerRef.current = Math.abs(idx - s) <= Math.abs(idx - en) ? "start" : "end";
     window.addEventListener("touchmove", handleTravellerTouchMove, { passive: false });
     window.addEventListener("touchend", endTravellerTouch);
@@ -365,7 +384,7 @@ export function HistoryChart({
     [markerDataPoints],
   );
   const singleDataPoint =
-    data.length === 1 && !markerDateSet.has(data[0].date) ? data[0] : undefined;
+    data.length === 1 && data[0] && !markerDateSet.has(data[0].date) ? data[0] : undefined;
 
   if (isLoading && data.length === 0) {
     return null;
@@ -655,6 +674,30 @@ export function HistoryChart({
               // own touch-drag handling (Recharts moves travellers via mouse events only).
               const { x, y, width, height } = props;
               const HIT_WIDTH = 32;
+              // Custom brush edge date label, rendered as SVG text using this exact traveller's
+              // own layout (x/y/width/height come straight from Recharts' own layout pass for
+              // this handle) — vertically centered on the real brush band with no separate
+              // measurement step. An earlier HTML-overlay version measured the band's position
+              // asynchronously via useLayoutEffect, which could run before Recharts finished
+              // laying out a newly-switched period's brush and render the labels off-chart.
+              const isStart =
+                Math.abs(x - approxTravellerX(startIndex)) <= Math.abs(x - approxTravellerX(endIndex));
+              const labelDate = isStart ? data[startIndex]?.date : data[endIndex]?.date;
+              const GAP = 5;
+              const EST_LABEL_WIDTH = 78; // approx width of a formatted date at this size
+              // Default to the outer side of the traveller; flip to the inner side when the
+              // outer position would clip past the chart edge (at the range extremes).
+              const outerFits = isStart
+                ? x - GAP - EST_LABEL_WIDTH >= 0
+                : x + width + GAP + EST_LABEL_WIDTH <= containerWidth;
+              const textX = isStart
+                ? outerFits
+                  ? x - GAP
+                  : x + width + GAP
+                : outerFits
+                  ? x + width + GAP
+                  : x - GAP;
+              const textAnchor = isStart === outerFits ? "end" : "start";
               return (
                 <g>
                   <rect
@@ -676,6 +719,20 @@ export function HistoryChart({
                     fill="#667F0A"
                     pointerEvents="none"
                   />
+                  {labelDate && containerWidth > 0 && (
+                    <text
+                      x={textX}
+                      y={y + height / 2}
+                      textAnchor={textAnchor}
+                      dominantBaseline="central"
+                      fontSize={10}
+                      fontWeight={500}
+                      fill="#667F0A"
+                      pointerEvents="none"
+                    >
+                      {formatDate(labelDate, dateFormatting)}
+                    </text>
+                  )}
                 </g>
               );
             }}
@@ -688,62 +745,16 @@ export function HistoryChart({
               const cur = brushIndicesRef.current;
               // Idempotent: skip redundant updates that would otherwise re-render in a loop.
               if (cur && cur.startIndex === si && cur.endIndex === ei) return;
+              const fromDate = data[si]?.date;
+              const toDate = data[ei]?.date;
+              if (fromDate == null || toDate == null) return;
               setBrushIndices({ startIndex: si, endIndex: ei });
-              onVisibleRangeChange?.({ from: data[si].date, to: data[ei].date });
+              onVisibleRangeChange?.({ from: fromDate, to: toDate });
             }}
           />
         )}
       </AreaChart>
       </ChartContainer>
-      {data.length > 1 &&
-        containerWidth > 0 &&
-        (() => {
-          // Custom brush edge date labels (Recharts' own are hidden via globals.css).
-          // Default to the outer side of each traveller; flip to the inner side when the
-          // outer label would clip off-screen at the extremes. Olive to match the brush.
-          const startTravellerX = BRUSH_MARGIN + (startIndex / lastIndex) * brushUsableWidth;
-          const endTravellerRightX =
-            BRUSH_MARGIN + (endIndex / lastIndex) * brushUsableWidth + BRUSH_TRAVELLER_WIDTH;
-          const GAP = 5;
-          const EST_LABEL_WIDTH = 78; // approx width of a formatted date at this size
-          const startOuterFits = startTravellerX - GAP - EST_LABEL_WIDTH >= 0;
-          const endOuterFits = endTravellerRightX + GAP + EST_LABEL_WIDTH <= containerWidth;
-          const LABEL_COLOR = "#667F0A"; // olive, matching the brush regardless of side
-          // Vertically center each label on the brush band (translateY(50%) offsets the box
-          // so its middle — not its bottom edge — sits on the measured center line).
-          const vCenter = {
-            bottom: brushCenterFromBottom,
-            transform: "translateY(50%)",
-            color: LABEL_COLOR,
-          } as const;
-          return (
-            <div className="pointer-events-none absolute inset-0 select-none">
-              <span
-                className="absolute whitespace-nowrap text-[10px] font-medium"
-                style={
-                  startOuterFits
-                    ? { ...vCenter, right: containerWidth - startTravellerX + GAP }
-                    : { ...vCenter, left: startTravellerX + BRUSH_TRAVELLER_WIDTH + GAP }
-                }
-              >
-                {formatDate(data[startIndex].date, dateFormatting)}
-              </span>
-              <span
-                className="absolute whitespace-nowrap text-[10px] font-medium"
-                style={
-                  endOuterFits
-                    ? { ...vCenter, left: endTravellerRightX + GAP }
-                    : {
-                        ...vCenter,
-                        right: containerWidth - (endTravellerRightX - BRUSH_TRAVELLER_WIDTH) + GAP,
-                      }
-                }
-              >
-                {formatDate(data[endIndex].date, dateFormatting)}
-              </span>
-            </div>
-          );
-        })()}
     </div>
   );
 }
