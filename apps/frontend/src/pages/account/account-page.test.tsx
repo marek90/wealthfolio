@@ -200,6 +200,10 @@ vi.mock("@wealthfolio/ui", () => {
     },
     IntervalSelector: () => <div>interval-selector</div>,
     Page: Passthrough,
+    useDateFormatting: () => ({
+      formatDate: (d: unknown) => String(d),
+      formatCalendarDate: (d: unknown) => String(d),
+    }),
     useIsMobile: () => false,
     PageContent: Passthrough,
     PageHeader: ({ children }: { children?: React.ReactNode }) => <header>{children}</header>,

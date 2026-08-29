@@ -12,7 +12,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@wealthfolio/ui/components/ui/sheet";
-import { useIsMobile } from "@wealthfolio/ui";
+import { useDateFormatting, useIsMobile } from "@wealthfolio/ui";
 import type { DateRange as DayPickerDateRange } from "react-day-picker";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -37,6 +37,7 @@ interface ChartRangePickerProps {
  */
 export function ChartRangePicker({ value, onChange, isActive, className }: ChartRangePickerProps) {
   const { t } = useTranslation();
+  const dateFormatting = useDateFormatting();
   const isMobile = useIsMobile();
   // Selection in progress lives here, NOT in the parent: react-day-picker fires
   // onSelect with {from, to: undefined} on the first tap of a range, and committing
@@ -87,7 +88,7 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
                   {t("ui:dateRange.start", "Start")}
                 </div>
                 <div className="text-foreground mt-1 truncate text-sm font-medium">
-                  {draft?.from ? formatDate(draft.from) : t("ui:dateRange.notSet", "Not set")}
+                  {draft?.from ? formatDate(draft.from, dateFormatting) : t("ui:dateRange.notSet", "Not set")}
                 </div>
               </div>
               <div className="border-border/70 bg-muted/30 rounded-lg border px-3 py-2">
@@ -95,7 +96,7 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
                   {t("ui:dateRange.end", "End")}
                 </div>
                 <div className="text-foreground mt-1 truncate text-sm font-medium">
-                  {draft?.to ? formatDate(draft.to) : t("ui:dateRange.notSet", "Not set")}
+                  {draft?.to ? formatDate(draft.to, dateFormatting) : t("ui:dateRange.notSet", "Not set")}
                 </div>
               </div>
             </div>

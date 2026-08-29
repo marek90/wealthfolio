@@ -59,6 +59,10 @@ vi.mock("@wealthfolio/ui", () => ({
           description: "3M",
         },
   IntervalSelector: () => <div>interval-selector</div>,
+  useDateFormatting: () => ({
+    formatDate: (d: unknown) => String(d),
+    formatCalendarDate: (d: unknown) => String(d),
+  }),
   useIsMobile: () => false,
   usePersistentState: () => [uiMocks.intervalCode, vi.fn()],
 }));

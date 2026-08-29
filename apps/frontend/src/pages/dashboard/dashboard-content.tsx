@@ -18,6 +18,7 @@ import {
   GainPercent,
   getInitialIntervalData,
   IntervalSelector,
+  useDateFormatting,
   usePersistentState,
 } from "@wealthfolio/ui";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
@@ -75,6 +76,7 @@ function getDashboardNetContributionMaxDomainSpanRatio(period: UITimePeriod): nu
 
 export function DashboardContent() {
   const { t } = useTranslation();
+  const dateFormatting = useDateFormatting();
   // Use the same persisted state as IntervalSelector for the interval code
   const [intervalCode] = usePersistentState<UITimePeriod>(INTERVAL_STORAGE_KEY, DEFAULT_INTERVAL);
 
@@ -267,9 +269,9 @@ export function DashboardContent() {
                 {(selectedInterval || brushDisplayRange) && (
                   <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
                     {brushDisplayRange?.from && brushDisplayRange?.to
-                      ? `${formatDate(brushDisplayRange.from)} – ${formatDate(brushDisplayRange.to)}`
+                      ? `${formatDate(brushDisplayRange.from, dateFormatting)} – ${formatDate(brushDisplayRange.to, dateFormatting)}`
                       : isCustomRangeActive && dateRange?.from && dateRange?.to
-                        ? `${formatDate(dateRange.from)} – ${formatDate(dateRange.to)}`
+                        ? `${formatDate(dateRange.from, dateFormatting)} – ${formatDate(dateRange.to, dateFormatting)}`
                         : t(`ui:interval.${selectedInterval}`)}
                   </span>
                 )}

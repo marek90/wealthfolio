@@ -145,6 +145,7 @@ export function HistoryChart({
   onVisibleRangeChange,
 }: HistoryChartProps) {
   const { t } = useTranslation();
+  const dateFormatting = useDateFormatting();
   const { triggerHaptic } = useHapticFeedback();
   const { isBalanceHidden } = useBalancePrivacy();
   const [isChartHovered, setIsChartHovered] = useState(false);
@@ -522,7 +523,7 @@ export function HistoryChart({
             travellerWidth={10}
             gap={1}
             stroke="#667F0A"
-            tickFormatter={(value) => formatDate(value as string)}
+            tickFormatter={(value) => formatDate(value as string, dateFormatting)}
             fill="transparent"
             traveller={(props) => {
               // Rounded "pill" handles in place of the default square ones, to match the
