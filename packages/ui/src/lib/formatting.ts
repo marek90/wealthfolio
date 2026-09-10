@@ -21,6 +21,7 @@ const STANDARD_PRICE_DECIMAL_PRECISION = 4;
 
 export const FORMATTING_REGIONS = [
   "system",
+  "SK",
   "CA",
   "US",
   "GB",
@@ -40,6 +41,7 @@ export const FORMATTING_REGIONS = [
 export type FormattingRegionSetting = (typeof FORMATTING_REGIONS)[number];
 
 const FORMATTING_REGION_LOCALES: Record<Exclude<FormattingRegionSetting, "system">, string> = {
+  SK: "sk-SK",
   CA: "en-CA",
   US: "en-US",
   GB: "en-GB",

@@ -23,6 +23,7 @@ import {
 
 const FORMATTING_REGION_OPTIONS = [
   ["system", "system"],
+  ["SK", "marekTCustom"],
   ["CA", "canada"],
   ["US", "unitedStates"],
   ["GB", "unitedKingdom"],

@@ -77,6 +77,7 @@ const popularCurrencies = ["USD", "CAD", "EUR", "GBP"];
 
 const formattingRegions = [
   ["system", "system"],
+  ["SK", "marekTCustom"],
   ["CA", "canada"],
   ["US", "unitedStates"],
   ["GB", "unitedKingdom"],

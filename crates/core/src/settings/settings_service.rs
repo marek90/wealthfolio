@@ -8,7 +8,8 @@ use log::{debug, error};
 use std::sync::Arc;
 
 const SUPPORTED_FORMATTING_REGIONS: &[&str] = &[
-    "system", "CA", "US", "GB", "FR", "DE", "ES", "MX", "BR", "PT", "CN", "TW", "JP", "KR", "IT",
+    "system", "SK", "CA", "US", "GB", "FR", "DE", "ES", "MX", "BR", "PT", "CN", "TW", "JP", "KR",
+    "IT",
 ];
 const SUPPORTED_UI_LANGUAGES: &[&str] = &[
     "en", "fr", "de", "es", "pt", "zh", "zh-Hant", "ja", "ko", "it",
@@ -343,6 +344,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_formatting_region_updates() {
+        assert!(validate_formatting_region("SK").is_ok());
         assert!(validate_formatting_region("DE").is_ok());
         assert!(validate_formatting_region("JP").is_ok());
         assert!(validate_formatting_region("KR").is_ok());

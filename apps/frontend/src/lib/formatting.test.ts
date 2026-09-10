@@ -33,6 +33,29 @@ describe("locale formatting", () => {
     expect(resolveFormattingLocale("en-US", "fr")).toBe("en-US");
   });
 
+  it("formats the custom MarekT_custom (SK) region", () => {
+    expect(resolveFormattingLocale("SK")).toBe("sk-SK");
+
+    const formatter = createFormatter("SK");
+    expect(formatter.formatDate(new Date(2026, 8, 10))).toBe("10. 9. 2026");
+    expect(
+      formatter.formatDecimal(1234567.89, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }),
+    ).toBe("1 234 567,89");
+    expect(formatter.formatAmount(1234.56, "EUR")).toBe("1 234,56 €");
+    expect(formatter.formatPercent(0.1234)).toBe("12,34 %");
+    expect(formatter.formatTime(new Date(2026, 8, 10, 14, 30), { timeStyle: "short" })).toBe(
+      "14:30",
+    );
+    expect(formatter.parseNumber("1 234,56")).toBe(1234.56);
+
+    const dateFnsLocale = dateFnsLocaleFor("sk-SK");
+    expect(dateFnsLocale.options?.weekStartsOn).toBe(1);
+    expect(dateFnsLocale.localize.month(8)).toBe("September");
+  });
+
   it("preserves a language-only system locale", () => {
     const languages = vi.spyOn(window.navigator, "languages", "get").mockReturnValue(["en"]);
 

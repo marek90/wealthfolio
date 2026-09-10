@@ -1453,6 +1453,7 @@
     "description": "控制日期、時間、數字分隔符、百分比與幣別的顯示格式。",
     "options": {
       "system": "系統地區",
+      "marekTCustom": "MarekT_custom",
       "canada": "加拿大",
       "unitedStates": "美國",
       "unitedKingdom": "英國",

@@ -17,6 +17,7 @@ import {
 import { useLocalizationSettings } from "../components/formatting-provider";
 
 const DATE_FNS_LOCALES: Record<string, Locale> = {
+  "sk-SK": enGB,
   "en-CA": enCA,
   "en-US": enUS,
   "en-GB": enGB,
