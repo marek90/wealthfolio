@@ -985,6 +985,41 @@ export function createNumberFormatting(
   };
 }
 
+// sk-SK (the MarekT_custom "SK" region) renders numeric dates without leading zeros
+// ("1. 1. 2026"); pad day and month to two digits ("01. 01. 2026") instead. Intl can't
+// combine dateStyle with day/month fields, so short/medium dateStyle is expanded into
+// explicit fields (dropping the date/time comma: "01. 01. 2026 9:05").
+function padNumericDateOptions(
+  locale: string,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormatOptions {
+  if (locale !== "sk-SK") return options;
+  const { dateStyle, timeStyle, ...rest } = options;
+  if (dateStyle === "short" || dateStyle === "medium") {
+    return {
+      ...rest,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      ...(timeStyle
+        ? {
+            hour: "numeric",
+            minute: "2-digit",
+            ...(timeStyle === "short" ? {} : { second: "2-digit" }),
+          }
+        : {}),
+    };
+  }
+  if (dateStyle || (options.month !== "numeric" && options.month !== "2-digit")) {
+    return options;
+  }
+  return {
+    ...options,
+    month: "2-digit",
+    ...(options.day === "numeric" ? { day: "2-digit" } : {}),
+  };
+}
+
 export function createDateFormatting(
   locale: string,
   timezone?: string,
@@ -993,23 +1028,32 @@ export function createDateFormatting(
   const resolvedLocale = resolveFormattingLocale(locale);
   const defaultDateFormatter =
     prepared?.date ??
-    new Intl.DateTimeFormat(resolvedLocale, {
-      dateStyle: "medium",
-      ...(timezone ? { timeZone: timezone } : {}),
-    });
+    new Intl.DateTimeFormat(
+      resolvedLocale,
+      padNumericDateOptions(resolvedLocale, {
+        dateStyle: "medium",
+        ...(timezone ? { timeZone: timezone } : {}),
+      }),
+    );
   const defaultCalendarDateFormatter =
     prepared?.calendarDate ??
-    new Intl.DateTimeFormat(resolvedLocale, {
-      dateStyle: "medium",
-      timeZone: "UTC",
-    });
+    new Intl.DateTimeFormat(
+      resolvedLocale,
+      padNumericDateOptions(resolvedLocale, {
+        dateStyle: "medium",
+        timeZone: "UTC",
+      }),
+    );
   const defaultCalendarDateTimeFormatter =
     prepared?.calendarDateTime ??
-    new Intl.DateTimeFormat(resolvedLocale, {
-      dateStyle: "medium",
-      timeStyle: "short",
-      timeZone: "UTC",
-    });
+    new Intl.DateTimeFormat(
+      resolvedLocale,
+      padNumericDateOptions(resolvedLocale, {
+        dateStyle: "medium",
+        timeStyle: "short",
+        timeZone: "UTC",
+      }),
+    );
   const defaultTimeOfDayFormatter =
     prepared?.timeOfDay ??
     new Intl.DateTimeFormat(resolvedLocale, { timeStyle: "short", timeZone: "UTC" });
@@ -1021,11 +1065,14 @@ export function createDateFormatting(
     });
   const defaultDateTimeFormatter =
     prepared?.dateTime ??
-    new Intl.DateTimeFormat(resolvedLocale, {
-      dateStyle: "medium",
-      timeStyle: "short",
-      ...(timezone ? { timeZone: timezone } : {}),
-    });
+    new Intl.DateTimeFormat(
+      resolvedLocale,
+      padNumericDateOptions(resolvedLocale, {
+        dateStyle: "medium",
+        timeStyle: "short",
+        ...(timezone ? { timeZone: timezone } : {}),
+      }),
+    );
   const dateFormatters = new Map<string, Intl.DateTimeFormat>();
   const dateFormatter = (options: DateDisplayOptions, applyTimezone: boolean) => {
     const effectiveTimezone = options.timeZone ?? (applyTimezone ? timezone : undefined);
@@ -1048,10 +1095,13 @@ export function createDateFormatting(
     ].join(":");
     let formatter = dateFormatters.get(key);
     if (!formatter) {
-      formatter = new Intl.DateTimeFormat(resolvedLocale, {
-        ...options,
-        ...(effectiveTimezone ? { timeZone: effectiveTimezone } : {}),
-      });
+      formatter = new Intl.DateTimeFormat(
+        resolvedLocale,
+        padNumericDateOptions(resolvedLocale, {
+          ...options,
+          ...(effectiveTimezone ? { timeZone: effectiveTimezone } : {}),
+        }),
+      );
       dateFormatters.set(key, formatter);
     }
     return formatter;
@@ -1081,6 +1131,12 @@ export function createDateFormatting(
       const formatter = Object.keys(options).length
         ? dateFormatter({ ...options, timeZone: "UTC" }, false)
         : dateFormatter({ dateStyle: "medium", timeZone: "UTC" }, false);
+      // ICU's formatRange drops the two-digit padding added by padNumericDateOptions.
+      if (formatter.resolvedOptions().month === "2-digit" && resolvedLocale === "sk-SK") {
+        const from = formatter.format(parsedStart.toDate("UTC"));
+        const to = formatter.format(parsedEnd.toDate("UTC"));
+        return from === to ? from : `${from} – ${to}`;
+      }
       return formatter.formatRange(parsedStart.toDate("UTC"), parsedEnd.toDate("UTC"));
     },
     formatCalendarDateTime(value, options = {}) {

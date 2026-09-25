@@ -37,7 +37,22 @@ describe("locale formatting", () => {
     expect(resolveFormattingLocale("SK")).toBe("sk-SK");
 
     const formatter = createFormatter("SK");
-    expect(formatter.formatDate(new Date(2026, 8, 10))).toBe("10. 9. 2026");
+    expect(formatter.formatDate(new Date(2026, 8, 10))).toBe("10. 09. 2026");
+    expect(formatter.formatDate(new Date(2026, 0, 1))).toBe("01. 01. 2026");
+    expect(formatter.formatDate(new Date(2026, 8, 21), { dateStyle: "short" })).toBe(
+      "21. 09. 2026",
+    );
+    expect(formatter.formatCalendarDate("2026-01-01")).toBe("01. 01. 2026");
+    expect(formatter.formatCalendarDate("2026-01-05", { day: "numeric", month: "numeric" })).toBe(
+      "05. 01.",
+    );
+    expect(formatter.formatCalendarDateRange("2026-01-01", "2026-09-21")).toBe(
+      "01. 01. 2026 – 21. 09. 2026",
+    );
+    expect(formatter.formatCalendarDateTime("2026-01-01T09:05:00")).toBe("01. 01. 2026 9:05");
+    expect(formatter.formatCalendarDate("2026-01-01", { dateStyle: "long" })).toBe(
+      "1. januára 2026",
+    );
     expect(
       formatter.formatDecimal(1234567.89, {
         minimumFractionDigits: 2,
