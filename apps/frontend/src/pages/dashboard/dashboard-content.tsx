@@ -1,3 +1,5 @@
+import { formatZonedDateKey } from "@/features/spending/lib/timezone";
+import { parseLocalDate } from "@/lib/utils";
 import { calculatePerformanceSummary } from "@/adapters";
 import { ChartRangePicker } from "@/components/chart-range-picker";
 import { HistoryChart } from "@/components/history-chart";
@@ -9,7 +11,7 @@ import { HoldingType, isAlternativeAssetKind } from "@/lib/constants";
 import { performancePeriodPnl, performanceSummaryReturn } from "@/lib/performance";
 import { QueryKeys } from "@/lib/query-keys";
 import { useSettingsContext } from "@/lib/settings-provider";
-import { DateRange, TimePeriod } from "@/lib/types";
+import type { DateRange } from "@/lib/types";
 import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigger";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TimePeriod as UITimePeriod } from "@wealthfolio/ui";
@@ -19,8 +21,8 @@ import {
   getInitialIntervalData,
   IntervalSelector,
   useDateFormatting,
-  usePersistentState,
 } from "@wealthfolio/ui";
+import { usePersistentState } from "@/hooks/use-persistent-state";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { formatDate } from "@/lib/utils";
 import { format } from "date-fns";
@@ -77,18 +79,22 @@ function getDashboardNetContributionMaxDomainSpanRatio(period: UITimePeriod): nu
 export function DashboardContent() {
   const { t } = useTranslation();
   const dateFormatting = useDateFormatting();
-  // Use the same persisted state as IntervalSelector for the interval code
-  const [intervalCode] = usePersistentState<UITimePeriod>(INTERVAL_STORAGE_KEY, DEFAULT_INTERVAL);
-
-  // Derive initial values from the persisted interval code
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(
-    () => getInitialIntervalData(intervalCode).range,
+  const { settings } = useSettingsContext();
+  const todayISO = formatZonedDateKey(new Date(), settings?.timezone);
+  const [selectedInterval, setSelectedInterval] = usePersistentState<UITimePeriod>(
+    INTERVAL_STORAGE_KEY,
+    DEFAULT_INTERVAL,
   );
-  const [selectedInterval, setSelectedInterval] = useState<UITimePeriod>(() => intervalCode);
-  const [isAllTime, setIsAllTime] = useState<boolean>(() => intervalCode === "ALL");
+  const intervalDateRange = useMemo(
+    () => getInitialIntervalData(selectedInterval, parseLocalDate(todayISO)).range,
+    [selectedInterval, todayISO],
+  );
+  // A custom calendar range (not a period preset) overrides the interval-derived range.
+  const [customRange, setCustomRange] = useState<DateRange | undefined>(undefined);
+  const isCustomRangeActive = customRange !== undefined;
+  const dateRange = customRange ?? intervalDateRange;
+  const isAllTime = selectedInterval === "ALL" && !isCustomRangeActive;
   const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
-  // True when a custom calendar range (not a period preset) is the active selection.
-  const [isCustomRangeActive, setIsCustomRangeActive] = useState<boolean>(false);
 
   const { holdings: allHoldings, isLoading: isHoldingsLoading } = useHoldings({ type: "all" });
   const {
@@ -116,7 +122,6 @@ export function DashboardContent() {
   const { valuationHistory, isLoading: isValuationHistoryLoading } =
     useValuationHistory(valuationHistoryRange);
 
-  const { settings } = useSettingsContext();
   const baseCurrency = settings?.baseCurrency ?? "USD";
 
   // When a brush selection is active, use the brushed window for the performance
@@ -190,29 +195,21 @@ export function DashboardContent() {
   const isNegative = totalValue < 0;
 
   // Callback for IntervalSelector
-  const handleIntervalSelect = (
-    code: TimePeriod,
-    _description: string,
-    range: DateRange | undefined,
-  ) => {
+  const handleIntervalSelect = (code: UITimePeriod) => {
     setSelectedInterval(code);
-    setDateRange(range);
-    setIsAllTime(code === "ALL");
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(false);
+    setCustomRange(undefined);
   };
 
-  // Callback for the custom date range picker (sets the same dateRange the
-  // period buttons use, so the existing useValuationHistory hook refetches it).
+  // Callback for the custom date range picker (overrides the interval-derived dateRange,
+  // so the existing useValuationHistory hook refetches it).
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
     // Only a complete range may reach dateRange: a half-open one ({from, to: undefined})
     // would refetch a degenerate window and blank the chart. The picker already filters
     // partial selections; this guard keeps the invariant local.
     if (!range?.from || !range?.to) return;
-    setDateRange({ from: range.from, to: range.to });
-    setIsAllTime(false);
+    setCustomRange({ from: range.from, to: range.to });
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(true);
   };
 
   return (
@@ -312,8 +309,7 @@ export function DashboardContent() {
                 onIntervalSelect={handleIntervalSelect}
                 onHaptic={triggerHaptic}
                 isLoading={isValuationHistoryLoading}
-                storageKey={INTERVAL_STORAGE_KEY}
-                defaultValue={DEFAULT_INTERVAL}
+                value={selectedInterval}
               />
               <ChartRangePicker
                 className="pointer-events-auto relative z-20 shrink-0"

@@ -1,3 +1,5 @@
+import { parseLocalDate } from "@/lib/utils";
+import { formatZonedDateKey } from "@/features/spending/lib/timezone";
 import { getContributionLimit, getSnapshots, searchActivities } from "@/adapters";
 import { ChartRangePicker } from "@/components/chart-range-picker";
 import { HistoryChart } from "@/components/history-chart";
@@ -11,6 +13,7 @@ import {
   GainPercent,
   AnimatedToggleGroup,
   IntervalSelector,
+  getInitialIntervalData,
   Page,
   PageContent,
   PageHeader,
@@ -94,7 +97,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@wealthfolio/ui/components/ui/sheet";
-import { format, subMonths } from "date-fns";
+import { format } from "date-fns";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { AccountContributionLimit } from "./account-contribution-limit";
 import AccountHoldings from "./account-holdings";
@@ -127,12 +130,6 @@ const accountTypeIcons: Record<AccountType, Icon> = {
   CREDIT_CARD: Icons.CreditCard,
   CRYPTOCURRENCY: Icons.Bitcoin,
 };
-
-// Helper function to get the initial date range (copied from dashboard)
-const getInitialDateRange = (): DateRange => ({
-  from: subMonths(new Date(), 3),
-  to: new Date(),
-});
 
 // Define the initial interval code (consistent with other pages)
 const INITIAL_INTERVAL_CODE: TimePeriod = "3M";
@@ -183,12 +180,19 @@ const AccountPage = () => {
   const requestedAccountDetailTab = parseAccountDetailTab(searchParams.get("tab"));
   const navigate = useNavigate();
   const isMobile = useIsMobileViewport();
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(getInitialDateRange());
   const [selectedIntervalCode, setSelectedIntervalCode] =
     useState<TimePeriod>(INITIAL_INTERVAL_CODE);
+  const todayISO = formatZonedDateKey(new Date(), appTimezone);
+  const today = useMemo(() => parseLocalDate(todayISO), [todayISO]);
+  const intervalDateRange = useMemo(
+    () => getInitialIntervalData(selectedIntervalCode, today).range,
+    [selectedIntervalCode, today],
+  );
+  // A custom calendar range (not a period preset) overrides the interval-derived range.
+  const [customRange, setCustomRange] = useState<DateRange | undefined>(undefined);
+  const isCustomRangeActive = customRange !== undefined;
+  const dateRange = customRange ?? intervalDateRange;
   const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
-  // True when a custom calendar range (not a period preset) is the active selection.
-  const [isCustomRangeActive, setIsCustomRangeActive] = useState<boolean>(false);
   const [desktopSelectorOpen, setDesktopSelectorOpen] = useState(false);
   const [mobileSelectorOpen, setMobileSelectorOpen] = useState(false);
   const [actionPaletteOpen, setActionPaletteOpen] = useState(false);
@@ -224,7 +228,7 @@ const AccountPage = () => {
     account,
     AccountPurpose.CONTRIBUTION_LIMITS,
   );
-  const currentContributionYear = new Date().getFullYear();
+  const currentContributionYear = today.getFullYear();
 
   const { data: contributionLimits, isLoading: isContributionLimitsLoading } = useQuery<
     ContributionLimit[],
@@ -647,27 +651,21 @@ const AccountPage = () => {
   }, [dateRange, firstDataDate]);
 
   // Callback for IntervalSelector
-  const handleIntervalSelect = (
-    code: TimePeriod,
-    _description: string,
-    range: DateRange | undefined,
-  ) => {
+  const handleIntervalSelect = (code: TimePeriod) => {
     setSelectedIntervalCode(code);
-    setDateRange(range);
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(false);
+    setCustomRange(undefined);
   };
 
-  // Callback for the custom date range picker (sets the same dateRange the
-  // period buttons use, so the existing useValuationHistory hook refetches it).
+  // Callback for the custom date range picker (overrides the interval-derived dateRange,
+  // so the existing useValuationHistory hook refetches it).
   const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
     // Only a complete range may reach dateRange: a half-open one ({from, to: undefined})
     // would refetch a degenerate window and blank the chart. The picker already filters
     // partial selections; this guard keeps the invariant local.
     if (!range?.from || !range?.to) return;
-    setDateRange({ from: range.from, to: range.to });
+    setCustomRange({ from: range.from, to: range.to });
     setBrushDisplayRange(undefined);
-    setIsCustomRangeActive(true);
   };
 
   const percentageToDisplay = useMemo(() => {

@@ -83,6 +83,7 @@ const formattingRegions = [
   ["GB", "unitedKingdom"],
   ["FR", "france"],
   ["DE", "germany"],
+  ["CH", "switzerland"],
   ["ES", "spain"],
   ["MX", "mexico"],
   ["BR", "brazil"],

@@ -120,7 +120,9 @@ IMPLEMENTATION_PLAN.md
 /__CUSTOMIZATION/
 # Claude Code local permission settings (may contain tokens from allowed commands)
 .claude/settings.local.json
-db/
+# Anchored: an unanchored `db/` also matches source directories such as
+# crates/storage-sqlite/src/db/.
+/db/
 apps/db/
 apps/tauri/db/
 tasks
