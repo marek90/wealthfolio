@@ -581,6 +581,23 @@ impl std::fmt::Display for ProviderApiError {
 
 impl std::error::Error for ProviderApiError {}
 
+impl ProviderApiError {
+    pub fn public_error(&self) -> wealthfolio_core::errors::PublicError {
+        use wealthfolio_core::errors::PublicError;
+        match self {
+            Self::MissingApiKey { .. } => PublicError::new(
+                "provider_key_missing",
+                "Add an API key for this provider in Settings.",
+            ),
+            Self::UnknownProvider { .. } => {
+                PublicError::new("provider_unknown", "Select a supported provider.")
+            }
+            Self::InvalidInput { .. } => PublicError::invalid_input(),
+            Self::ProviderError { .. } => PublicError::provider_unavailable(),
+        }
+    }
+}
+
 // ============================================================================
 // Provider Configuration Types (for chat/model listing)
 // ============================================================================
@@ -608,6 +625,10 @@ pub struct FetchedModel {
     /// Optional display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Capabilities from the provider's model metadata, or the provider's
+    /// defaults. `None` when neither says anything about the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
 }
 
 /// Response from model listing.

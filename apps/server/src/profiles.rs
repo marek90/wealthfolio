@@ -80,7 +80,7 @@ pub struct WebProfiles {
     pub(crate) oidc: Option<Arc<crate::oidc::OidcManager>>,
     runtimes: Mutex<HashMap<Uuid, Arc<AppState>>>,
     // Keep slow startup serialized without blocking cached runtime lookups.
-    initialization: Mutex<()>,
+    initialization: Arc<Mutex<()>>,
     mcp: Mutex<HashMap<Uuid, Router>>,
     visited: std::sync::Mutex<std::collections::HashSet<String>>,
 }
@@ -145,7 +145,7 @@ impl WebProfiles {
             oidc: auth.oidc,
             deletion: Mutex::new(()),
             runtimes: Mutex::new(HashMap::new()),
-            initialization: Mutex::new(()),
+            initialization: Arc::new(Mutex::new(())),
             mcp: Mutex::new(HashMap::new()),
             visited: std::sync::Mutex::new(Default::default()),
         }))
@@ -258,7 +258,7 @@ impl WebProfiles {
             config: config.clone(),
             deletion: Mutex::new(()),
             runtimes: Mutex::new(runtimes),
-            initialization: Mutex::new(()),
+            initialization: Arc::new(Mutex::new(())),
             mcp: Mutex::new(HashMap::new()),
             visited: std::sync::Mutex::new(Default::default()),
         }))
@@ -294,7 +294,7 @@ impl WebProfiles {
         }
     }
 
-    pub async fn runtime(&self, id: Uuid) -> Result<Arc<AppState>> {
+    pub async fn runtime(self: &Arc<Self>, id: Uuid) -> Result<Arc<AppState>> {
         {
             let runtimes = self.runtimes.lock().await;
             self.registry.profile(id).map_err(failure)?;
@@ -302,12 +302,29 @@ impl WebProfiles {
                 return Ok(runtime.clone());
             }
         }
-        let _initialization = self.initialization.lock().await;
+        let initialization = self.initialization.clone().lock_owned().await;
         // A waiting open may have been initialized or marked for deletion.
         let profile = self.registry.profile(id).map_err(failure)?;
         if let Some(runtime) = self.runtimes.lock().await.get(&id) {
             return Ok(runtime.clone());
         }
+        // A disconnected client drops this future. Startup runs in its own task,
+        // keeping the lock, so the next open waits for it instead of finding the
+        // database lock held.
+        let root = self.clone();
+        tokio::spawn(async move {
+            let _initialization = initialization;
+            root.start_runtime(id, profile).await
+        })
+        .await
+        .map_err(|error| startup_failure("runtime_initialization", error.into()))?
+    }
+
+    async fn start_runtime(
+        &self,
+        id: Uuid,
+        profile: wealthfolio_core::profiles::Profile,
+    ) -> Result<Arc<AppState>> {
         let paths = self.registry.paths(&profile);
         if profile.legacy_database.is_some() && !paths.database.is_file() {
             return Err(startup_failure("legacy_database", anyhow::anyhow!("The legacy profile database is missing. Restore its file before opening this profile; existing credentials were preserved.")));
@@ -722,6 +739,11 @@ pub async fn admit(
 
 pub async fn mcp(State(root): State<Arc<WebProfiles>>, request: Request<Body>) -> Response {
     use tower::ServiceExt;
+    // The PAT lives in the profile's database, so a cold profile starts before
+    // the router verifies it. Skip that work for requests that cannot match.
+    if crate::mcp::auth::bearer_pat(request.headers()).is_none() {
+        return crate::mcp::auth::unauthorized();
+    }
     let id = match request
         .headers()
         .get(wealthfolio_core::profiles::PROFILE_ID_HEADER)
@@ -744,6 +766,15 @@ pub async fn mcp(State(root): State<Arc<WebProfiles>>, request: Request<Body>) -
     } else {
         let state = match root.runtime(id).await {
             Ok(state) => state,
+            // The caller is not authenticated yet: keep startup details in the
+            // server log, which `startup_failure` already wrote.
+            Err((StatusCode::INTERNAL_SERVER_ERROR, _)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "PROFILE_STARTUP_FAILED: The profile could not start. See the server log.",
+                )
+                    .into_response()
+            }
             Err(e) => return e.into_response(),
         };
         let router = crate::mcp::router(state, &root.config);
@@ -770,7 +801,7 @@ pub async fn instance_logout(
                 if let Ok(claims) = auth.validate_token(&token) {
                     use sha2::Digest;
                     let owner = if claims.sid.is_empty() {
-                        format!("{:x}", sha2::Sha256::digest(token.as_bytes()))
+                        hex::encode(sha2::Sha256::digest(token.as_bytes()))
                     } else {
                         claims.sid
                     };

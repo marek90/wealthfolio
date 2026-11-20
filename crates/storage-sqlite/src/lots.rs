@@ -97,6 +97,8 @@ pub(crate) struct LotDisposalDB {
     fx_rate_to_base: String,
     cost_basis_method: String,
     created_at: String,
+    proceeds_base_known: Option<bool>,
+    cost_basis_base_known: Option<bool>,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -201,6 +203,8 @@ impl From<&LotDisposal> for LotDisposalDB {
             proceeds_base: d.proceeds_base.clone(),
             cost_basis_base: d.cost_basis_base.clone(),
             realized_pnl_base: d.realized_pnl_base.clone(),
+            proceeds_base_known: d.proceeds_base_known,
+            cost_basis_base_known: d.cost_basis_base_known,
             currency: d.currency.clone(),
             base_currency: d.base_currency.clone(),
             fx_rate_to_base: d.fx_rate_to_base.clone(),
@@ -226,6 +230,8 @@ impl From<LotDisposalDB> for LotDisposal {
             proceeds_base: d.proceeds_base,
             cost_basis_base: d.cost_basis_base,
             realized_pnl_base: d.realized_pnl_base,
+            proceeds_base_known: d.proceeds_base_known,
+            cost_basis_base_known: d.cost_basis_base_known,
             currency: d.currency,
             base_currency: d.base_currency,
             fx_rate_to_base: d.fx_rate_to_base,
@@ -948,12 +954,16 @@ where
         return Ok(HashSet::new());
     }
     let needles: Vec<String> = unique.iter().cloned().collect();
-    let found: Vec<String> = a::assets
-        .select(a::id)
-        .filter(a::id.eq_any(&needles))
-        .load(conn)
-        .map_err(StorageError::from)?;
-    Ok(found.into_iter().collect())
+    let mut found = HashSet::new();
+    for chunk in chunk_for_sqlite(&needles) {
+        let rows: Vec<String> = a::assets
+            .select(a::id)
+            .filter(a::id.eq_any(chunk))
+            .load(conn)
+            .map_err(StorageError::from)?;
+        found.extend(rows);
+    }
+    Ok(found)
 }
 
 /// Mirror of `existing_asset_ids` for the `activities` table. Used to validate
@@ -962,7 +972,7 @@ where
 /// real IDs but don't have rows in `activities`, and a user can delete an
 /// activity at any time. Storing such an ID would violate the FK constraint
 /// and abort the whole batch.
-fn existing_activity_ids<'a, I>(
+pub(crate) fn existing_activity_ids<'a, I>(
     conn: &mut SqliteConnection,
     candidate_ids: I,
 ) -> std::result::Result<HashSet<String>, StorageError>
@@ -976,12 +986,16 @@ where
         return Ok(HashSet::new());
     }
     let needles: Vec<String> = unique.iter().cloned().collect();
-    let found: Vec<String> = ac::activities
-        .select(ac::id)
-        .filter(ac::id.eq_any(&needles))
-        .load(conn)
-        .map_err(StorageError::from)?;
-    Ok(found.into_iter().collect())
+    let mut found = HashSet::new();
+    for chunk in chunk_for_sqlite(&needles) {
+        let rows: Vec<String> = ac::activities
+            .select(ac::id)
+            .filter(ac::id.eq_any(chunk))
+            .load(conn)
+            .map_err(StorageError::from)?;
+        found.extend(rows);
+    }
+    Ok(found)
 }
 
 /// Pre-write normalization for a batch of `LotRecordDB`:
@@ -1047,8 +1061,7 @@ pub(crate) fn filter_and_normalize_lots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{create_pool, run_migrations, write_actor::spawn_writer};
-    use tempfile::tempdir;
+    use crate::db::{create_pool, run_migrations, write_actor::spawn_writer, TestDir};
 
     fn dec(value: &str) -> Decimal {
         value.parse::<Decimal>().unwrap()
@@ -1057,10 +1070,10 @@ mod tests {
     async fn setup() -> (
         LotsRepository,
         Arc<Pool<ConnectionManager<SqliteConnection>>>,
-        tempfile::TempDir,
+        TestDir,
     ) {
         std::env::set_var("CONNECT_API_URL", "http://test.local");
-        let dir = tempdir().unwrap();
+        let dir = TestDir::new();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         run_migrations(&db_path).unwrap();
         let pool = create_pool(&db_path).unwrap();
@@ -1149,6 +1162,37 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn large_lot_asset_reference_lookup_keeps_only_existing_ids() {
+        let (_repo, pool, _dir) = setup().await;
+        insert_asset(&pool, "first");
+        insert_asset(&pool, "last");
+        let mut ids: Vec<String> = (0..32_767).map(|i| format!("missing-{i}")).collect();
+        ids.extend(["first".to_string(), "last".to_string(), "first".to_string()]);
+        let mut conn = get_connection(&pool).unwrap();
+        let found = existing_asset_ids(&mut conn, ids.iter().map(String::as_str)).unwrap();
+        assert_eq!(
+            found,
+            HashSet::from(["first".to_string(), "last".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn large_lot_activity_reference_lookup_keeps_only_existing_ids() {
+        let (_repo, pool, _dir) = setup().await;
+        insert_account(&pool, "acc1");
+        insert_activity(&pool, "open");
+        insert_activity(&pool, "close");
+        let mut ids: Vec<String> = (0..32_767).map(|i| format!("missing-{i}")).collect();
+        ids.extend(["open".to_string(), "close".to_string(), "open".to_string()]);
+        let mut conn = get_connection(&pool).unwrap();
+        let found = existing_activity_ids(&mut conn, ids.iter().map(String::as_str)).unwrap();
+        assert_eq!(
+            found,
+            HashSet::from(["open".to_string(), "close".to_string()])
+        );
+    }
+
     /// Account-FX round trip: an open lot persisted with a non-identity account
     /// FX (position EUR, account USD @ 1.1, base EUR) reads back with its
     /// `fx_rate_to_account` / `account_currency` intact and hydrates onto the
@@ -1205,6 +1249,8 @@ mod tests {
             realized_pnl: "10".to_string(),
             proceeds_base: "160".to_string(),
             cost_basis_base: "150".to_string(),
+            proceeds_base_known: Some(true),
+            cost_basis_base_known: Some(true),
             realized_pnl_base: "10".to_string(),
             currency: "USD".to_string(),
             base_currency: "USD".to_string(),
@@ -1521,7 +1567,7 @@ mod tests {
         use wealthfolio_core::portfolio::snapshot::{SnapshotService, SnapshotServiceTrait};
 
         std::env::set_var("CONNECT_API_URL", "http://test.local");
-        let dir = tempdir().unwrap();
+        let dir = TestDir::new();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         run_migrations(&db_path).unwrap();
         let pool = create_pool(&db_path).unwrap();

@@ -27,7 +27,9 @@ fn transport_err_from_sync(e: wealthfolio_device_sync::DeviceSyncError) -> Trans
         retry_class: e.retry_class(),
         error_code: e.error_code().map(|s| s.to_string()),
         details: match &e {
-            wealthfolio_device_sync::DeviceSyncError::Api { details, .. } => details.clone(),
+            wealthfolio_device_sync::DeviceSyncError::Api { details, .. } => {
+                details.as_deref().cloned()
+            }
             _ => None,
         },
     }
@@ -289,6 +291,10 @@ impl OutboxStore for ServerEnginePorts {
     async fn has_pending_outbox(&self) -> Result<bool, String> {
         self.db.has_pending_outbox().await
     }
+
+    async fn next_outbox_retry_at(&self) -> Result<Option<String>, String> {
+        self.db.next_outbox_retry_at().await
+    }
 }
 
 #[async_trait]
@@ -435,10 +441,6 @@ impl CredentialStore for ServerEnginePorts {
             .token_lifecycle
             .is_session_configured(self.state.secret_store.as_ref())
             .map_err(|err| err.to_string())
-    }
-
-    async fn is_sync_allowed(&self) -> Result<bool, String> {
-        crate::api::connect::has_device_sync(&self.state).await
     }
 
     fn get_sync_identity(&self) -> Option<SyncIdentity> {
@@ -701,7 +703,6 @@ fn sync_source_restore_required_error() -> String {
 pub async fn generate_snapshot_now(
     state: Arc<AppState>,
 ) -> Result<SyncSnapshotUploadResult, String> {
-    crate::api::connect::ensure_device_sync_subscription(&state).await?;
     ensure_device_sync_enabled()?;
     state
         .device_sync_runtime

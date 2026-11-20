@@ -4,8 +4,11 @@
 //! All business logic lives in the core service - these commands only handle:
 //! - String ↔ typed value conversion
 //! - Error formatting for the frontend
+//! - Health Center cache clearing
+//!
+//! No write here starts a portfolio job: stored account values leave
+//! alternative assets out, and net worth reads their values directly.
 
-use crate::events::{emit_portfolio_trigger_recalculate, PortfolioRequestPayload};
 use crate::profiles::ProfileAccess;
 use chrono::NaiveDate;
 use log::error;
@@ -18,7 +21,8 @@ use wealthfolio_core::assets::{
     LinkLiabilityRequest as CoreLinkRequest, UpdateAssetDetailsRequest as CoreUpdateDetailsRequest,
     UpdateValuationRequest as CoreValuationRequest,
 };
-use wealthfolio_core::quotes::MarketSyncMode;
+use wealthfolio_core::health::HealthServiceTrait;
+use wealthfolio_core::portfolio::net_worth::{NetWorthHistoryPoint, NetWorthResponse};
 use wealthfolio_core::utils::time_utils::{parse_user_timezone_or_default, user_today};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,84 +121,6 @@ pub struct AlternativeHoldingResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Net Worth Response DTOs (used by get_net_worth command)
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BreakdownItem {
-    pub category: String,
-    pub name: String,
-    pub value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asset_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<BreakdownItem>,
-}
-
-/// Map a core breakdown item (Decimal values) to its string DTO, recursively.
-fn map_breakdown_item(
-    item: wealthfolio_core::portfolio::net_worth::BreakdownItem,
-) -> BreakdownItem {
-    BreakdownItem {
-        category: item.category,
-        name: item.name,
-        value: item.value.to_string(),
-        asset_id: item.asset_id,
-        children: item.children.into_iter().map(map_breakdown_item).collect(),
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetsSection {
-    pub total: String,
-    pub breakdown: Vec<BreakdownItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct LiabilitiesSection {
-    pub total: String,
-    pub breakdown: Vec<BreakdownItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StaleAssetInfo {
-    pub asset_id: String,
-    pub name: Option<String>,
-    pub valuation_date: String,
-    pub days_stale: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetWorthResponse {
-    pub date: String,
-    pub assets: AssetsSection,
-    pub liabilities: LiabilitiesSection,
-    pub net_worth: String,
-    pub currency: String,
-    pub oldest_valuation_date: Option<String>,
-    pub stale_assets: Vec<StaleAssetInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetWorthHistoryPoint {
-    pub date: String,
-    pub portfolio_value: String,
-    pub alternative_assets_value: String,
-    pub total_liabilities: String,
-    pub total_assets: String,
-    pub net_worth: String,
-    pub net_contribution: String,
-    pub breakdown: std::collections::BTreeMap<String, String>,
-    pub currency: String,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Tauri Commands - Thin wrappers delegating to core service
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -248,6 +174,8 @@ pub async fn create_alternative_asset(
             error!("Failed to create alternative asset: {}", e);
             format!("Failed to create asset: {}", e)
         })?;
+    // A value dated long ago shows as stale in Health Center.
+    context.health_service().clear_cache().await;
 
     Ok(CreateAlternativeAssetResponse {
         asset_id: response.asset_id,
@@ -288,6 +216,8 @@ pub async fn update_alternative_asset_valuation(
             error!("Failed to update valuation: {}", e);
             format!("Failed to update valuation: {}", e)
         })?;
+    // A new value can end a stale valuation in Health Center.
+    context.health_service().clear_cache().await;
 
     Ok(UpdateValuationResponse {
         quote_id: response.quote_id,
@@ -357,7 +287,10 @@ pub async fn delete_alternative_asset(
         .map_err(|e| {
             error!("Failed to delete alternative asset: {}", e);
             format!("Failed to delete asset: {}", e)
-        })
+        })?;
+    // The asset's issues in Health Center go with it.
+    context.health_service().clear_cache().await;
+    Ok(())
 }
 
 /// Links a liability to a target asset.
@@ -463,51 +396,16 @@ pub async fn get_net_worth(
         None => user_today(parse_user_timezone_or_default(&context.get_timezone())),
     };
 
-    let core_response = context
+    context
         .net_worth_service()
         .get_net_worth(as_of_date)
         .await
-        .map_err(|e| format!("Failed to calculate net worth: {}", e))?;
-
-    Ok(NetWorthResponse {
-        date: core_response.date.to_string(),
-        assets: AssetsSection {
-            total: core_response.assets.total.to_string(),
-            breakdown: core_response
-                .assets
-                .breakdown
-                .into_iter()
-                .map(map_breakdown_item)
-                .collect(),
-        },
-        liabilities: LiabilitiesSection {
-            total: core_response.liabilities.total.to_string(),
-            breakdown: core_response
-                .liabilities
-                .breakdown
-                .into_iter()
-                .map(map_breakdown_item)
-                .collect(),
-        },
-        net_worth: core_response.net_worth.to_string(),
-        currency: core_response.currency,
-        oldest_valuation_date: core_response.oldest_valuation_date.map(|d| d.to_string()),
-        stale_assets: core_response
-            .stale_assets
-            .into_iter()
-            .map(|s| StaleAssetInfo {
-                asset_id: s.asset_id,
-                name: s.name,
-                valuation_date: s.valuation_date.to_string(),
-                days_stale: s.days_stale,
-            })
-            .collect(),
-    })
+        .map_err(|e| format!("Failed to calculate net worth: {}", e))
 }
 
 /// Gets net worth history over a date range.
 #[tauri::command]
-pub fn get_net_worth_history(
+pub async fn get_net_worth_history(
     start_date: String,
     end_date: String,
     state: ProfileAccess,
@@ -518,31 +416,11 @@ pub fn get_net_worth_history(
     let end = NaiveDate::parse_from_str(&end_date, "%Y-%m-%d")
         .map_err(|e| format!("Invalid end date: {}", e))?;
 
-    let history = context
+    context
         .net_worth_service()
         .get_net_worth_history(start, end)
-        .map_err(|e| format!("Failed to get net worth history: {}", e))?;
-
-    let response: Vec<NetWorthHistoryPoint> = history
-        .into_iter()
-        .map(|point| NetWorthHistoryPoint {
-            date: point.date.to_string(),
-            portfolio_value: point.portfolio_value.to_string(),
-            alternative_assets_value: point.alternative_assets_value.to_string(),
-            total_liabilities: point.total_liabilities.to_string(),
-            total_assets: point.total_assets.to_string(),
-            net_worth: point.net_worth.to_string(),
-            net_contribution: point.net_contribution.to_string(),
-            breakdown: point
-                .breakdown
-                .into_iter()
-                .map(|(key, value)| (key, value.to_string()))
-                .collect(),
-            currency: point.currency,
-        })
-        .collect();
-
-    Ok(response)
+        .await
+        .map_err(|e| format!("Failed to get net worth history: {}", e))
 }
 
 #[tauri::command]
@@ -559,7 +437,6 @@ pub async fn apply_loan_action(
     asset_id: String,
     action: wealthfolio_core::assets::loan::LoanAction,
     state: ProfileAccess,
-    handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let context = state.context()?;
     let result = context
@@ -567,15 +444,10 @@ pub async fn apply_loan_action(
         .apply_loan_action(&asset_id, action)
         .await
         .map_err(|e| e.to_string())?;
-    // Recorded balances change valuations, as a manual quote save does.
+    // Recorded balances are the loan's values: a new one can end a stale
+    // valuation in Health Center, and removing one can start it.
     if result.balances_changed {
-        tauri::async_runtime::spawn(async move {
-            let payload = PortfolioRequestPayload::builder()
-                .account_ids(None)
-                .market_sync_mode(MarketSyncMode::None)
-                .build();
-            emit_portfolio_trigger_recalculate(&handle, payload, &context);
-        });
+        context.health_service().clear_cache().await;
     }
     Ok(())
 }

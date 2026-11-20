@@ -37,8 +37,8 @@ function ErrorFallback({ error, variant, onGoHome }: Omit<Props, "children"> & {
     <FallbackFrame variant={variant}>
       <div className="flex w-full max-w-md flex-col items-center">
         {/* Icon with subtle background */}
-        <div className="bg-destructive/10 mb-6 flex h-20 w-20 items-center justify-center rounded-full">
-          <Icons.AlertTriangle className="text-destructive h-10 w-10" strokeWidth={1.5} />
+        <div className="text-destructive-subtle-foreground mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-current/15">
+          <Icons.AlertTriangle className="h-10 w-10" strokeWidth={1.5} />
         </div>
 
         {/* Content */}
@@ -57,13 +57,13 @@ function ErrorFallback({ error, variant, onGoHome }: Omit<Props, "children"> & {
         {/* Actions */}
         <div className="flex w-full flex-col gap-3">
           <Button onClick={() => window.location.reload()} className="w-full">
-            <Icons.RefreshCw className="mr-2 h-4 w-4" />
+            <Icons.RefreshCw className="me-2 h-4 w-4" />
             {t("ui:errorBoundary.refresh", "Refresh page")}
           </Button>
 
           {onGoHome && (
             <Button variant="outline" onClick={onGoHome} className="w-full">
-              <Icons.Home className="mr-2 h-4 w-4" />
+              <Icons.Home className="me-2 h-4 w-4" />
               {t("ui:errorBoundary.goHome", "Go to Dashboard")}
             </Button>
           )}
@@ -75,7 +75,7 @@ function ErrorFallback({ error, variant, onGoHome }: Omit<Props, "children"> & {
               onClick={() => setShowDetails(!showDetails)}
               className="text-muted-foreground hover:text-foreground"
             >
-              <Icons.ChevronDown className={`mr-1.5 h-4 w-4 transition-transform ${showDetails ? "rotate-180" : ""}`} />
+              <Icons.ChevronDown className={`me-1.5 h-4 w-4 transition-transform ${showDetails ? "rotate-180" : ""}`} />
               {showDetails
                 ? t("ui:errorBoundary.hideDetails", "Hide error details")
                 : t("ui:errorBoundary.showDetails", "Show error details")}
@@ -87,7 +87,7 @@ function ErrorFallback({ error, variant, onGoHome }: Omit<Props, "children"> & {
         {showDetails && error && (
           <div className="bg-muted/50 mt-4 w-full overflow-hidden rounded-lg border">
             <div className="border-b px-3 py-2">
-              <span className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+              <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
                 {t("ui:errorBoundary.errorDetails", "Error details")}
               </span>
             </div>

@@ -3,8 +3,11 @@ import { profileFetch } from "@/features/profiles/session";
 // This module exports invoke, logger, and platform constants for shared modules
 
 import { notifyUnauthorized } from "@/lib/auth-token";
+import { BackendError, backendError } from "@/lib/backend-error";
+import type { ExportOptions } from "@/lib/types";
 import type { Logger } from "../types";
 import { invokeTimeoutMs } from "../invoke-timeout";
+import { exportOptionsQuery } from "./export-options";
 
 /** True in every Tauri build (desktop and mobile); use getPlatform() for the OS */
 export const isTauri = false;
@@ -104,13 +107,25 @@ export const COMMANDS: CommandMap = {
   // Activities
   search_activities: { method: "POST", path: "/activities/search" },
   create_activity: { method: "POST", path: "/activities" },
+  review_internal_transfer_pair_split_effects: {
+    method: "POST",
+    path: "/activities/transfer-pair/split-effects",
+  },
+  review_activity_split_effects: { method: "POST", path: "/activities/split-effects" },
   update_activity: { method: "PUT", path: "/activities" },
   save_activities: { method: "POST", path: "/activities/bulk" },
   delete_activity: { method: "DELETE", path: "/activities" },
   get_transfer_pair_for_activity: { method: "GET", path: "/activities" },
   find_transfer_match_candidates: { method: "POST", path: "/activities/transfer-match-candidates" },
   save_internal_transfer_pair: { method: "POST", path: "/activities/transfer-pair" },
+  convert_to_internal_transfer: { method: "POST", path: "/activities/convert-to-transfer" },
+  review_convert_to_transfer_split_effects: {
+    method: "POST",
+    path: "/activities/convert-to-transfer/split-effects",
+  },
   link_transfer_activities: { method: "POST", path: "/activities/link" },
+  link_transfer_pairs: { method: "POST", path: "/activities/link-pairs" },
+  review_transfer_matches: { method: "GET", path: "/activities/transfer-review" },
   unlink_transfer_activities: { method: "POST", path: "/activities/unlink" },
   // Activity import
   check_activities_import: { method: "POST", path: "/activities/import/check" },
@@ -140,6 +155,8 @@ export const COMMANDS: CommandMap = {
   update_contribution_limit: { method: "PUT", path: "/limits" },
   delete_contribution_limit: { method: "DELETE", path: "/limits" },
   calculate_deposits_for_contribution_limit: { method: "GET", path: "/limits" },
+  get_contribution_limit_details: { method: "GET", path: "/limits" },
+  set_contribution_activity_excluded: { method: "PUT", path: "/limits" },
   // Asset profile
   get_assets: { method: "GET", path: "/assets" },
   create_asset: { method: "POST", path: "/assets" },
@@ -186,6 +203,8 @@ export const COMMANDS: CommandMap = {
   create_category: { method: "POST", path: "/taxonomies/categories" },
   update_category: { method: "PUT", path: "/taxonomies/categories" },
   delete_category: { method: "DELETE", path: "/taxonomies" },
+  review_category_merge: { method: "POST", path: "/spending/categories/merge/review" },
+  merge_category: { method: "POST", path: "/spending/categories/merge" },
   move_category: { method: "POST", path: "/taxonomies/categories/move" },
   import_taxonomy_json: { method: "POST", path: "/taxonomies/import" },
   export_taxonomy_json: { method: "GET", path: "/taxonomies" },
@@ -197,6 +216,8 @@ export const COMMANDS: CommandMap = {
   migrate_legacy_classifications: { method: "POST", path: "/taxonomies/migration/run" },
   // Spending budget
   get_budget: { method: "GET", path: "/spending/budget" },
+  get_budget_readonly: { method: "GET", path: "/spending/budget/snapshot" },
+  get_spending_context: { method: "GET", path: "/spending/context" },
   upsert_budget_target: { method: "POST", path: "/spending/budget/targets" },
   delete_budget_target: { method: "DELETE", path: "/spending/budget/targets" },
   upsert_budget_rollover_setting: { method: "POST", path: "/spending/budget/rollovers" },
@@ -228,6 +249,7 @@ export const COMMANDS: CommandMap = {
   upsert_categorization_rule: { method: "POST", path: "/spending/rules/upsert" },
   delete_categorization_rule: { method: "DELETE", path: "/spending/rules" },
   rerun_categorization_rules: { method: "POST", path: "/spending/rules/rerun" },
+  rerun_categorization_rules_detailed: { method: "POST", path: "/spending/rules/rerun/detailed" },
   list_rule_presets: { method: "GET", path: "/spending/rule-presets" },
   import_rule_preset: { method: "POST", path: "/spending/rule-presets" },
   remove_rule_preset: { method: "DELETE", path: "/spending/rule-presets" },
@@ -360,6 +382,7 @@ export const COMMANDS: CommandMap = {
   // Net Worth
   get_net_worth: { method: "GET", path: "/net-worth" },
   get_net_worth_history: { method: "GET", path: "/net-worth/history" },
+  get_data_export_summary: { method: "GET", path: "/utilities/export/summary" },
   // AI Providers
   get_ai_providers: { method: "GET", path: "/ai/providers" },
   update_ai_provider_settings: { method: "PUT", path: "/ai/providers/settings" },
@@ -391,7 +414,14 @@ export const COMMANDS: CommandMap = {
   get_allocation_target_drift: { method: "POST", path: "/allocation-targets" },
   list_target_constraints: { method: "GET", path: "/allocation-targets" },
   save_target_constraints: { method: "POST", path: "/allocation-targets" },
-  calculate_rebalance_plan: { method: "POST", path: "/allocation-targets/rebalance/calculate" },
+  generate_calculated_adjustments: {
+    method: "POST",
+    path: "/allocation-targets/worksheet/generate",
+  },
+  calculate_allocation_worksheet: {
+    method: "POST",
+    path: "/allocation-targets/worksheet/calculate",
+  },
   // Alternative Assets
   create_alternative_asset: { method: "POST", path: "/alternative-assets" },
   update_alternative_asset_valuation: { method: "PUT", path: "/alternative-assets" },
@@ -410,6 +440,7 @@ export const COMMANDS: CommandMap = {
   get_agent_access_status: { method: "GET", path: "/agent-access/status" },
   list_agent_access_tokens: { method: "GET", path: "/agent-access/tokens" },
   create_agent_access_token: { method: "POST", path: "/agent-access/tokens" },
+  update_agent_access_token_scopes: { method: "PATCH", path: "/agent-access/tokens" },
   delete_agent_access_token: { method: "DELETE", path: "/agent-access/tokens" },
   list_agent_audit_log: { method: "GET", path: "/agent-access/audit" },
   purge_agent_audit_log: { method: "POST", path: "/agent-access/audit/purge" },
@@ -431,14 +462,14 @@ export const logger: Logger = {
  */
 export function toBase64(data: Uint8Array | number[]): string {
   const bytes = Array.isArray(data) ? new Uint8Array(data) : data;
-  // Fast base64 encoding without TextEncoder for binary
-  let binary = "";
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  // Bound each call to avoid argument limits and per-byte string concatenation.
+  const chunkSize = 32 * 1024;
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
   }
   // btoa expects binary string
-  return btoa(binary);
+  return btoa(chunks.join(""));
 }
 
 /**
@@ -535,8 +566,14 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     case "get_asset_holdings": {
-      const p = payload as { assetId: string };
-      url += `?assetId=${encodeURIComponent(p.assetId)}`;
+      const p = payload as { assetId: string; filter?: unknown };
+      if (p.filter) {
+        url = `${API_PREFIX}/holdings/by-asset/query`;
+        method = "POST";
+        body = JSON.stringify({ assetId: p.assetId, filter: p.filter });
+      } else {
+        url += `?assetId=${encodeURIComponent(p.assetId)}`;
+      }
       break;
     }
     case "get_asset_lots": {
@@ -861,6 +898,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify(activity);
       break;
     }
+    case "review_activity_split_effects": {
+      const { activities } = payload as { activities: Record<string, unknown>[] };
+      body = JSON.stringify(activities);
+      break;
+    }
     case "update_activity": {
       const { activity } = payload as { activity: Record<string, unknown> };
       body = JSON.stringify(activity);
@@ -886,7 +928,10 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify(request);
       break;
     }
-    case "save_internal_transfer_pair": {
+    case "review_internal_transfer_pair_split_effects":
+    case "save_internal_transfer_pair":
+    case "convert_to_internal_transfer":
+    case "review_convert_to_transfer_split_effects": {
       const { request } = payload as { request: Record<string, unknown> };
       body = JSON.stringify(request);
       break;
@@ -897,6 +942,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
         activityBId: string;
       };
       body = JSON.stringify({ activityAId, activityBId });
+      break;
+    }
+    case "link_transfer_pairs": {
+      const { pairs } = payload as { pairs: unknown[] };
+      body = JSON.stringify({ pairs });
       break;
     }
     case "unlink_transfer_activities": {
@@ -1005,6 +1055,21 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     case "calculate_deposits_for_contribution_limit": {
       const { limitId } = payload as { limitId: string };
       url += `/${encodeURIComponent(limitId)}/deposits`;
+      break;
+    }
+    case "get_contribution_limit_details": {
+      const { limitId } = payload as { limitId: string };
+      url += `/${encodeURIComponent(limitId)}/details`;
+      break;
+    }
+    case "set_contribution_activity_excluded": {
+      const { limitId, activityId, excluded } = payload as {
+        limitId: string;
+        activityId: string;
+        excluded: boolean;
+      };
+      url += `/${encodeURIComponent(limitId)}/activities/${encodeURIComponent(activityId)}`;
+      body = JSON.stringify({ excluded });
       break;
     }
     case "get_asset_profile": {
@@ -1222,6 +1287,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       url += `/${encodeURIComponent(taxonomyId)}/categories/${encodeURIComponent(categoryId)}`;
       break;
     }
+    case "review_category_merge":
+    case "merge_category": {
+      body = JSON.stringify(payload?.request);
+      break;
+    }
     case "move_category": {
       const { taxonomyId, categoryId, newParentId, position } = payload as {
         taxonomyId: string;
@@ -1272,7 +1342,8 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     case "migrate_legacy_classifications":
       break;
     // Spending budget commands
-    case "get_budget": {
+    case "get_budget":
+    case "get_budget_readonly": {
       const { periodKey } = (payload ?? {}) as { periodKey?: string };
       addPeriodKey(periodKey);
       break;
@@ -1339,13 +1410,14 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     case "assign_category_to_group": {
-      const { categoryId, groupId, periodKey } = payload as {
+      const { taxonomyId, categoryId, groupId, periodKey } = payload as {
+        taxonomyId: string;
         categoryId: string;
         groupId: string;
         periodKey?: string;
       };
       addPeriodKey(periodKey);
-      body = JSON.stringify({ categoryId, groupId });
+      body = JSON.stringify({ taxonomyId, categoryId, groupId });
       break;
     }
     case "reset_budget_groups": {
@@ -1363,6 +1435,7 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     // Spending settings
+    case "get_spending_context":
     case "get_spending_settings":
       break;
     case "update_spending_settings": {
@@ -1487,7 +1560,8 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       url += `/${encodeURIComponent(id)}`;
       break;
     }
-    case "rerun_categorization_rules": {
+    case "rerun_categorization_rules":
+    case "rerun_categorization_rules_detailed": {
       const { onlyUncategorized } = payload as { onlyUncategorized: boolean };
       body = JSON.stringify({ onlyUncategorized });
       break;
@@ -1811,7 +1885,7 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     case "get_broker_sync_states":
     case "get_broker_ingest_states":
     // Device Sync / Enrollment (falls through)
-    // eslint-disable-next-line no-fallthrough
+    // oxlint-disable-next-line no-fallthrough
     case "get_device_sync_state":
     case "enable_device_sync":
     case "clear_device_sync_data":
@@ -1853,6 +1927,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
         params.set("date", date);
         url += `?${params.toString()}`;
       }
+      break;
+    }
+    case "get_data_export_summary": {
+      const { options } = (payload ?? {}) as { options?: ExportOptions };
+      url += exportOptionsQuery(options);
       break;
     }
     case "get_net_worth_history": {
@@ -2003,21 +2082,47 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify(constraints);
       break;
     }
-    case "calculate_rebalance_plan": {
-      const { targetId, availableCash, filter, scenarioMode, eligibleAssetIds } = payload as {
+    case "generate_calculated_adjustments": {
+      const {
+        targetId,
+        mode,
+        rule,
+        cash,
+        selectedAccountIds,
+        filter,
+        eligibleAssetIds,
+        sellableAssetIds,
+      } = payload as {
         targetId: string;
-        availableCash: number;
+        mode: string;
+        rule: string;
+        cash: unknown;
+        selectedAccountIds: string[];
         filter: unknown;
-        scenarioMode: string;
         eligibleAssetIds?: string[];
+        sellableAssetIds?: string[];
       };
       body = JSON.stringify({
         targetId,
-        availableCash,
+        mode,
+        rule,
+        cash,
+        selectedAccountIds,
         filter,
-        scenarioMode,
         ...(eligibleAssetIds === undefined ? {} : { eligibleAssetIds }),
+        ...(sellableAssetIds === undefined ? {} : { sellableAssetIds }),
       });
+      break;
+    }
+    case "calculate_allocation_worksheet": {
+      const { targetId, cash, lines, selectedAccountIds, filter } = payload as {
+        targetId: string;
+        cash: unknown;
+        lines: unknown[];
+        selectedAccountIds: string[];
+        filter: unknown;
+      };
+      body = JSON.stringify({ targetId, cash, lines, selectedAccountIds, filter });
       break;
     }
     // AI Providers
@@ -2113,6 +2218,12 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify({ name, expiresAt, scopes });
       break;
     }
+    case "update_agent_access_token_scopes": {
+      const { id, scopes } = payload as { id: string; scopes: string[] };
+      url += `/${encodeURIComponent(id)}`;
+      body = JSON.stringify({ scopes });
+      break;
+    }
     case "delete_agent_access_token": {
       const { id } = payload as { id: string };
       url += `/${encodeURIComponent(id)}`;
@@ -2160,6 +2271,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     body,
     credentials: "same-origin",
     signal: AbortSignal.timeout(invokeTimeoutMs(command)),
+  }).catch((error: unknown) => {
+    if (command === "preview_import_assets" && error instanceof TypeError) {
+      throw new DOMException("Could not reach the application server.", "NetworkError");
+    }
+    throw error;
   });
 
   // 401 = app auth failure (JWT expired/invalid). Cloud auth failures return 403.
@@ -2167,25 +2283,28 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     notifyUnauthorized();
   }
   if (!res.ok) {
-    let msg = res.statusText;
+    let publicError = new BackendError("internal_error");
     try {
       const err = (await res.json()) as unknown;
+      publicError = backendError(err) ?? publicError;
       if (
         typeof err === "object" &&
         err !== null &&
         "message" in err &&
         typeof err.message === "string"
       ) {
-        msg = err.message;
+        // Compatibility for legacy code-only errors, never arbitrary messages.
+        publicError = backendError(err) ?? backendError(err.message) ?? publicError;
       }
     } catch (_e) {
       // ignore JSON parse error from non-JSON error bodies
       void 0;
     }
-    console.error(`[Invoke] Command "${command}" failed: ${msg}`);
+    console.error(`[Invoke] Command "${command}" failed (HTTP ${res.status})`);
     // The server's 408 timeout leaves owned reset tasks running; 5xx responses
     // can also follow a committed reset whose completion failed.
-    throw Object.assign(new Error(msg), {
+    throw Object.assign(publicError, {
+      httpStatus: res.status,
       outcomeUnknown: res.status === 408 || res.status >= 500,
     });
   }

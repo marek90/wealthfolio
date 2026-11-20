@@ -7,6 +7,7 @@ import {
   computeVelocity,
   deriveChange,
   formatChangePercent,
+  hadBalanceBefore,
   investmentAllocation,
   isPlainPercent,
   parseHistory,
@@ -16,12 +17,12 @@ import {
 function rawPoint(overrides: Partial<NetWorthHistoryPoint>): NetWorthHistoryPoint {
   return {
     date: "2024-01-01",
-    portfolioValue: "0",
-    alternativeAssetsValue: "0",
-    totalLiabilities: "0",
-    totalAssets: "0",
-    netWorth: "0",
-    netContribution: "0",
+    portfolioValue: 0,
+    alternativeAssetsValue: 0,
+    totalLiabilities: 0,
+    totalAssets: 0,
+    netWorth: 0,
+    netContribution: 0,
     breakdown: {},
     currency: "USD",
     ...overrides,
@@ -43,16 +44,26 @@ function point(overrides: Partial<ParsedHistoryPoint>): ParsedHistoryPoint {
 }
 
 describe("net worth utils", () => {
-  it("parses decimal strings and breakdown values into finite numbers", () => {
+  it("does not derive growth by bridging incomplete history", () => {
+    expect(
+      parseHistory([
+        rawPoint({ netWorth: 100 }),
+        rawPoint({ date: "2024-01-02", valueStatus: "unavailable", netWorth: 100000 }),
+        rawPoint({ date: "2024-01-03", netWorth: 120 }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("parses history and breakdown values into finite numbers", () => {
     const parsed = parseHistory([
       rawPoint({
-        portfolioValue: "100.25",
-        alternativeAssetsValue: "50",
-        totalLiabilities: "25",
-        totalAssets: "150.25",
-        netWorth: "125.25",
-        netContribution: "80",
-        breakdown: { cash: "10.5", investments: "bad-value" },
+        portfolioValue: 100.25,
+        alternativeAssetsValue: 50,
+        totalLiabilities: 25,
+        totalAssets: 150.25,
+        netWorth: 125.25,
+        netContribution: 80,
+        breakdown: { cash: 10.5, investments: Number.NaN },
       }),
     ]);
 
@@ -128,6 +139,22 @@ describe("net worth utils", () => {
     const dustCleared = deriveChange([0.5, 0], true);
     expect(dustCleared.amount).toBe(0.5);
     expect(formatChangePercent(dustCleared, "New", formatting)).toBe("—");
+  });
+
+  it("does not label a paid-off card that is used again as new", () => {
+    const formatting = createFormatter("en-US");
+    const history = [point({ date: "2025-06-01" }), point({ date: "2026-06-01" })];
+    // The card owed a balance before the range, was paid to zero, and was charged
+    // again: the same 0 -> balance series as a new card, but it is not new.
+    const reused = deriveChange([0, 300], true, hadBalanceBefore(history, "2024-01-10"));
+    expect(reused).toEqual({ amount: -300, percent: null, isNew: false });
+    expect(formatChangePercent(reused, "New", formatting)).toBe("—");
+
+    // A first balance inside the range is still new, as is a row the backend
+    // does not date.
+    expect(deriveChange([0, 300], true, hadBalanceBefore(history, "2025-09-01")).isNew).toBe(true);
+    expect(deriveChange([0, 300], true, hadBalanceBefore(history, undefined)).isNew).toBe(true);
+    expect(hadBalanceBefore([], "2024-01-10")).toBe(false);
   });
 
   it("keeps the plain-percent range in step with the multiple threshold", () => {
@@ -237,6 +264,22 @@ describe("net worth utils", () => {
       { month: "2024-03", value: 20, current: true },
       { month: "2024-04", value: 60, current: true },
     ]);
+  });
+
+  it("compares explicit years to the complete prior calendar year, including its first day", () => {
+    const momentum = computeMomentum(
+      [
+        point({ date: "2024-01-01", netWorth: 100 }),
+        point({ date: "2024-01-02", netWorth: 225 }),
+        point({ date: "2024-12-31", netWorth: 300 }),
+        point({ date: "2025-01-01", netWorth: 400 }),
+        point({ date: "2025-12-31", netWorth: 700 }),
+      ],
+      "2025-01-01",
+      "2025-12-31",
+      2025,
+    );
+    expect(momentum).toMatchObject({ currentChange: 300, priorChange: 200, beatBy: 100 });
   });
 
   it("removes cash from investment allocation and rescales the remaining categories", () => {

@@ -596,6 +596,10 @@ impl QuoteServiceTrait for MockMarketDataRepository {
 
 struct MockFxService {
     dated_rates: HashMap<NaiveDate, Decimal>,
+    failed_dates: HashSet<NaiveDate>,
+    database_failed_dates: HashSet<NaiveDate>,
+    missing_pairs: RwLock<HashSet<(String, String)>>,
+    conversion_calls: std::sync::Mutex<Vec<(String, String, NaiveDate)>>,
     #[allow(dead_code)]
     base_currency: String,
 }
@@ -605,6 +609,10 @@ impl MockFxService {
         Self {
             base_currency: base_currency.to_string(),
             dated_rates: HashMap::new(),
+            failed_dates: HashSet::new(),
+            database_failed_dates: HashSet::new(),
+            missing_pairs: RwLock::new(HashSet::new()),
+            conversion_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -661,8 +669,29 @@ impl FxServiceTrait for MockFxService {
         to_currency: &str,
         date: NaiveDate,
     ) -> Result<Decimal> {
+        self.conversion_calls.lock().unwrap().push((
+            from_currency.to_string(),
+            to_currency.to_string(),
+            date,
+        ));
         if from_currency == to_currency {
             return Ok(amount);
+        }
+        if self.database_failed_dates.contains(&date) {
+            return Err(
+                crate::errors::DatabaseError::QueryFailed("injected failure".into()).into(),
+            );
+        }
+        if self
+            .missing_pairs
+            .read()
+            .unwrap()
+            .contains(&(from_currency.to_string(), to_currency.to_string()))
+        {
+            return Err(crate::fx::FxError::RateNotFound("injected missing pair".into()).into());
+        }
+        if self.failed_dates.contains(&date) {
+            return Err(crate::fx::FxError::ConversionError("injected failure".into()).into());
         }
         Ok(amount * self.dated_rates.get(&date).copied().unwrap_or(dec!(1)))
     }
@@ -707,11 +736,16 @@ impl FxServiceTrait for MockFxService {
 
 struct MockValuationRepository {
     valuations: Vec<DailyAccountValuation>,
+    /// Threads that read stored valuations.
+    readers: std::sync::Mutex<Vec<std::thread::ThreadId>>,
 }
 
 impl MockValuationRepository {
     fn new(valuations: Vec<DailyAccountValuation>) -> Self {
-        Self { valuations }
+        Self {
+            valuations,
+            readers: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -732,6 +766,10 @@ impl ValuationRepositoryTrait for MockValuationRepository {
         start_date: Option<NaiveDate>,
         end_date: Option<NaiveDate>,
     ) -> Result<Vec<DailyAccountValuation>> {
+        self.readers
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         let filtered: Vec<_> = self
             .valuations
             .iter()
@@ -788,6 +826,10 @@ impl ValuationRepositoryTrait for MockValuationRepository {
         account_ids: &[String],
         date: NaiveDate,
     ) -> Result<Vec<DailyAccountValuation>> {
+        self.readers
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         let filtered: Vec<_> = self
             .valuations
             .iter()
@@ -799,9 +841,26 @@ impl ValuationRepositoryTrait for MockValuationRepository {
 
     fn get_accounts_with_negative_balance(
         &self,
-        _account_ids: &[String],
+        account_ids: &[String],
     ) -> Result<Vec<NegativeBalanceInfo>> {
-        Ok(Vec::new())
+        Ok(account_ids
+            .iter()
+            .filter_map(|account_id| {
+                let first = self
+                    .valuations
+                    .iter()
+                    .filter(|v| &v.account_id == account_id)
+                    .filter(|v| v.cash_balance < Decimal::ZERO || v.total_value < Decimal::ZERO)
+                    .min_by_key(|v| v.valuation_date)?;
+                Some(NegativeBalanceInfo {
+                    account_id: account_id.clone(),
+                    first_negative_date: first.valuation_date,
+                    cash_balance: first.cash_balance,
+                    total_value: first.total_value,
+                    account_currency: first.account_currency.clone(),
+                })
+            })
+            .collect())
     }
 }
 
@@ -907,6 +966,7 @@ fn create_test_snapshot(
         cash_total_account_currency: Decimal::ZERO,
         cash_total_base_currency: Decimal::ZERO,
         calculated_at: Utc::now().naive_utc(),
+        base_currency: None,
         source: SnapshotSource::Calculated,
     }
 }
@@ -1355,6 +1415,41 @@ async fn test_credit_card_negative_balance_is_liability() {
 }
 
 #[tokio::test]
+async fn test_credit_card_liability_carries_its_first_balance_date() {
+    // Owed in January 2023, paid off in March 2023, charged again in 2024. The row
+    // is dated by the first balance, not by the latest return from zero.
+    let first_owed = NaiveDate::from_ymd_opt(2023, 1, 10).unwrap();
+    let paid_off = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
+    let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+    let card = create_test_account("card1", "CREDIT_CARD", "USD");
+    let mut cash = HashMap::new();
+    cash.insert("USD".to_string(), dec!(-300));
+    let snapshot = create_test_snapshot("card1", vec![], cash);
+
+    let service = create_net_worth_service_with_valuations(
+        vec![card],
+        vec![],
+        vec![snapshot],
+        vec![],
+        vec![
+            create_account_valuation("card1", first_owed, dec!(-500)),
+            create_account_valuation("card1", paid_off, Decimal::ZERO),
+            create_account_valuation("card1", date, dec!(-300)),
+        ],
+    );
+
+    let result = service.get_net_worth(date).await.unwrap();
+
+    let row = &result.liabilities.breakdown[0];
+    assert_eq!(row.asset_id.as_deref(), Some("CREDIT_CARD:card1"));
+    assert_eq!(row.first_value_date, Some(first_owed));
+    assert_eq!(
+        serde_json::to_value(row).unwrap()["firstValueDate"],
+        json!("2023-01-10")
+    );
+}
+
+#[tokio::test]
 async fn test_credit_card_positive_balance_is_cash() {
     let account = create_test_account("card1", "CREDIT_CARD", "USD");
     let mut cash = HashMap::new();
@@ -1395,7 +1490,7 @@ async fn test_credit_card_multi_currency_nets_before_liability_split() {
     assert_eq!(result.net_worth, dec!(-300));
     assert_eq!(get_category_value(&result, "cash"), Decimal::ZERO);
 
-    let history = service.get_net_worth_history(date, date).unwrap();
+    let history = service.get_net_worth_history(date, date).await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].total_assets, Decimal::ZERO);
     assert_eq!(history[0].total_liabilities, dec!(300));
@@ -1762,8 +1857,8 @@ async fn test_no_quote_falls_back_to_cost_basis() {
 // Net Worth History Tests
 // ============================================================================
 
-#[test]
-fn test_history_basic_portfolio_with_alt_assets() {
+#[tokio::test]
+async fn test_history_basic_portfolio_with_alt_assets() {
     // Setup: Portfolio + Property + Liability over 5 days
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
@@ -1804,7 +1899,7 @@ fn test_history_basic_portfolio_with_alt_assets() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d5).unwrap();
+    let history = service.get_net_worth_history(d1, d5).await.unwrap();
 
     assert_eq!(history.len(), 5, "Should have 5 data points");
 
@@ -1848,8 +1943,8 @@ fn test_history_basic_portfolio_with_alt_assets() {
     assert_eq!(total_gain, dec!(10000));
 }
 
-#[test]
-fn test_history_portfolio_only_no_alt_assets() {
+#[tokio::test]
+async fn test_history_portfolio_only_no_alt_assets() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
     let d3 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
@@ -1868,7 +1963,7 @@ fn test_history_portfolio_only_no_alt_assets() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d3).unwrap();
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
 
     assert_eq!(history.len(), 3);
     assert_eq!(history[0].portfolio_value, dec!(50000));
@@ -1879,8 +1974,8 @@ fn test_history_portfolio_only_no_alt_assets() {
     assert_eq!(history[2].net_worth, dec!(52000));
 }
 
-#[test]
-fn test_history_credit_card_balance_is_split_to_liabilities() {
+#[tokio::test]
+async fn test_history_credit_card_balance_is_split_to_liabilities() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     let valuations = vec![
@@ -1898,7 +1993,7 @@ fn test_history_credit_card_balance_is_split_to_liabilities() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].portfolio_value, dec!(100000));
@@ -1912,8 +2007,8 @@ fn test_history_credit_card_balance_is_split_to_liabilities() {
     );
 }
 
-#[test]
-fn test_history_credit_card_balance_before_first_portfolio_date_is_seeded() {
+#[tokio::test]
+async fn test_history_credit_card_balance_before_first_portfolio_date_is_seeded() {
     let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let card_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
     let first_portfolio_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
@@ -1935,6 +2030,7 @@ fn test_history_credit_card_balance_before_first_portfolio_date_is_seeded() {
 
     let history = service
         .get_net_worth_history(start, first_portfolio_date)
+        .await
         .unwrap();
 
     assert_eq!(history.len(), 1);
@@ -1944,8 +2040,8 @@ fn test_history_credit_card_balance_before_first_portfolio_date_is_seeded() {
     assert_eq!(history[0].net_worth, dec!(99500));
 }
 
-#[test]
-fn test_history_credit_card_without_total_stays_liability_only() {
+#[tokio::test]
+async fn test_history_credit_card_without_total_stays_liability_only() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     let account = create_test_account("card1", "CREDIT_CARD", "USD");
@@ -1954,7 +2050,7 @@ fn test_history_credit_card_without_total_stays_liability_only() {
     let service =
         create_net_worth_service_with_valuations(vec![account], vec![], vec![], vec![], valuations);
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].total_assets, Decimal::ZERO);
@@ -1962,8 +2058,8 @@ fn test_history_credit_card_without_total_stays_liability_only() {
     assert_eq!(history[0].net_worth, dec!(-500));
 }
 
-#[test]
-fn test_history_credit_card_positive_balance_without_total_is_cash_asset() {
+#[tokio::test]
+async fn test_history_credit_card_positive_balance_without_total_is_cash_asset() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     let account = create_test_account("card1", "CREDIT_CARD", "USD");
@@ -1972,7 +2068,7 @@ fn test_history_credit_card_positive_balance_without_total_is_cash_asset() {
     let service =
         create_net_worth_service_with_valuations(vec![account], vec![], vec![], vec![], valuations);
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].total_assets, dec!(25));
@@ -1980,8 +2076,8 @@ fn test_history_credit_card_positive_balance_without_total_is_cash_asset() {
     assert_eq!(history[0].net_worth, dec!(25));
 }
 
-#[test]
-fn test_history_credit_card_liability_carries_forward_between_dates() {
+#[tokio::test]
+async fn test_history_credit_card_liability_carries_forward_between_dates() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
     let d3 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
@@ -2006,7 +2102,7 @@ fn test_history_credit_card_liability_carries_forward_between_dates() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d3).unwrap();
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
 
     assert_eq!(history.len(), 3);
 
@@ -2026,8 +2122,8 @@ fn test_history_credit_card_liability_carries_forward_between_dates() {
     assert_eq!(history[2].net_worth, dec!(98800));
 }
 
-#[test]
-fn test_history_mixed_securities_cash_and_credit_card() {
+#[tokio::test]
+async fn test_history_mixed_securities_cash_and_credit_card() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     // Securities ($100K) + cash ($5K) both count toward portfolio_value; the
@@ -2049,7 +2145,7 @@ fn test_history_mixed_securities_cash_and_credit_card() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].portfolio_value, dec!(105000));
@@ -2064,8 +2160,9 @@ fn test_history_mixed_securities_cash_and_credit_card() {
     );
 }
 
-#[test]
-fn test_history_alt_asset_quote_after_range_start_before_first_portfolio_date_seeds_first_point() {
+#[tokio::test]
+async fn test_history_alt_asset_quote_after_range_start_before_first_portfolio_date_seeds_first_point(
+) {
     let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let quote_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
     let first_portfolio_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
@@ -2093,6 +2190,7 @@ fn test_history_alt_asset_quote_after_range_start_before_first_portfolio_date_se
 
     let history = service
         .get_net_worth_history(start, first_portfolio_date)
+        .await
         .unwrap();
 
     assert_eq!(history.len(), 1);
@@ -2102,8 +2200,8 @@ fn test_history_alt_asset_quote_after_range_start_before_first_portfolio_date_se
     assert_eq!(history[0].net_worth, dec!(550000));
 }
 
-#[test]
-fn test_history_includes_closed_non_archived_accounts() {
+#[tokio::test]
+async fn test_history_includes_closed_non_archived_accounts() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let closed_account =
         create_test_account_with_archive_state("closed-1", "SECURITIES", "USD", false, false);
@@ -2119,15 +2217,15 @@ fn test_history_includes_closed_non_archived_accounts() {
         vec![valuation],
     );
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].portfolio_value, dec!(50000));
     assert_eq!(history[0].net_worth, dec!(50000));
 }
 
-#[test]
-fn test_history_alt_assets_only_no_portfolio() {
+#[tokio::test]
+async fn test_history_alt_assets_only_no_portfolio() {
     // Edge case: user only has alternative assets, no portfolio
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
@@ -2146,7 +2244,7 @@ fn test_history_alt_assets_only_no_portfolio() {
         vec![], // No portfolio valuations
     );
 
-    let history = service.get_net_worth_history(d1, d2).unwrap();
+    let history = service.get_net_worth_history(d1, d2).await.unwrap();
 
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].portfolio_value, Decimal::ZERO);
@@ -2158,8 +2256,8 @@ fn test_history_alt_assets_only_no_portfolio() {
     assert_eq!(history[1].net_worth, dec!(410000));
 }
 
-#[test]
-fn test_history_forward_fill_alt_assets() {
+#[tokio::test]
+async fn test_history_forward_fill_alt_assets() {
     // Alt asset has quote on day 1 and day 5 only
     // Days 2-4 should forward-fill from day 1
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -2192,7 +2290,7 @@ fn test_history_forward_fill_alt_assets() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d5).unwrap();
+    let history = service.get_net_worth_history(d1, d5).await.unwrap();
 
     assert_eq!(history.len(), 5);
 
@@ -2205,8 +2303,8 @@ fn test_history_forward_fill_alt_assets() {
     assert_eq!(history[4].alternative_assets_value, dec!(210000));
 }
 
-#[test]
-fn test_history_starts_from_first_portfolio_date() {
+#[tokio::test]
+async fn test_history_starts_from_first_portfolio_date() {
     // Alt assets have data before portfolio starts
     // History should only start from first portfolio date
     let d_before = NaiveDate::from_ymd_opt(2023, 12, 1).unwrap();
@@ -2235,7 +2333,7 @@ fn test_history_starts_from_first_portfolio_date() {
     );
 
     // Query includes d_before, but history should start from d1
-    let history = service.get_net_worth_history(d_before, d2).unwrap();
+    let history = service.get_net_worth_history(d_before, d2).await.unwrap();
 
     // Should only have 2 points (d1 and d2), not 3
     assert_eq!(history.len(), 2);
@@ -2247,8 +2345,8 @@ fn test_history_starts_from_first_portfolio_date() {
     assert_eq!(history[0].net_worth, dec!(350000));
 }
 
-#[test]
-fn test_history_empty_range() {
+#[tokio::test]
+async fn test_history_empty_range() {
     // Query range before any data exists
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 5).unwrap();
@@ -2260,13 +2358,13 @@ fn test_history_empty_range() {
         create_net_worth_service_with_valuations(vec![], vec![], vec![], vec![], valuations);
 
     // Query before any data
-    let history = service.get_net_worth_history(d1, d2).unwrap();
+    let history = service.get_net_worth_history(d1, d2).await.unwrap();
 
     assert!(history.is_empty(), "Should return empty history");
 }
 
-#[test]
-fn test_history_single_day() {
+#[tokio::test]
+async fn test_history_single_day() {
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
 
     let valuations = vec![create_total_valuation(d1, dec!(100000), dec!(90000))];
@@ -2282,7 +2380,7 @@ fn test_history_single_day() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d1).unwrap();
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].date, d1);
@@ -2292,8 +2390,8 @@ fn test_history_single_day() {
     assert_eq!(history[0].net_contribution, dec!(90000));
 }
 
-#[test]
-fn test_history_liability_reduction_is_positive_gain() {
+#[tokio::test]
+async fn test_history_liability_reduction_is_positive_gain() {
     // Test that paying down debt shows as positive contribution to net worth
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
@@ -2317,7 +2415,7 @@ fn test_history_liability_reduction_is_positive_gain() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d2).unwrap();
+    let history = service.get_net_worth_history(d1, d2).await.unwrap();
 
     assert_eq!(history.len(), 2);
 
@@ -2332,8 +2430,8 @@ fn test_history_liability_reduction_is_positive_gain() {
     assert_eq!(liability_reduction, dec!(5000));
 }
 
-#[test]
-fn test_history_contribution_adjusted_gain() {
+#[tokio::test]
+async fn test_history_contribution_adjusted_gain() {
     // Verify that deposits don't count as gain
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
@@ -2349,7 +2447,7 @@ fn test_history_contribution_adjusted_gain() {
     let service =
         create_net_worth_service_with_valuations(vec![], vec![], vec![], vec![], valuations);
 
-    let history = service.get_net_worth_history(d1, d2).unwrap();
+    let history = service.get_net_worth_history(d1, d2).await.unwrap();
 
     assert_eq!(history.len(), 2);
 
@@ -2366,8 +2464,8 @@ fn test_history_contribution_adjusted_gain() {
     assert_eq!(portfolio_gain, dec!(5000));
 }
 
-#[test]
-fn test_history_multiple_alt_assets() {
+#[tokio::test]
+async fn test_history_multiple_alt_assets() {
     // Multiple alternative assets, each with different update schedules
     let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let d2 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
@@ -2402,7 +2500,7 @@ fn test_history_multiple_alt_assets() {
         valuations,
     );
 
-    let history = service.get_net_worth_history(d1, d3).unwrap();
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
 
     assert_eq!(history.len(), 3);
 
@@ -2433,6 +2531,90 @@ fn test_history_multiple_alt_assets() {
     assert_eq!(
         history[2].breakdown.get("preciousMetals"),
         Some(&dec!(5500))
+    );
+}
+
+/// The history reads every account's stored rows. `#[tokio::test]` runs a
+/// current-thread runtime, which polls tasks on the test's thread, so a read
+/// there would hold the runtime (and a synchronous desktop command would hold
+/// the UI thread).
+#[tokio::test]
+async fn test_history_reads_valuations_off_the_async_worker() {
+    let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let account_repo = Arc::new(MockAccountRepository::new(vec![create_test_account(
+        "account-1",
+        account_types::SECURITIES,
+        "USD",
+    )]));
+    let valuations = Arc::new(MockValuationRepository::new(vec![create_total_valuation(
+        d1,
+        dec!(100),
+        dec!(100),
+    )]));
+    let service = NetWorthService::new(
+        Arc::new(RwLock::new("USD".to_string())),
+        account_repo.clone(),
+        Arc::new(MockAssetRepository::new(vec![])),
+        Arc::new(SnapshotService::new(
+            Arc::new(RwLock::new("UTC".to_string())),
+            account_repo,
+            Arc::new(MockSnapshotRepository::new(vec![])),
+            Arc::new(InMemoryActivityRepository::new(Vec::new(), HashSet::new())),
+        )),
+        Arc::new(MockMarketDataRepository::new(vec![])),
+        valuations.clone(),
+        Arc::new(MockFxService::new("USD")),
+    );
+
+    let history = service.get_net_worth_history(d1, d1).await.unwrap();
+
+    assert_eq!(history.len(), 1);
+    let readers = valuations.readers.lock().unwrap();
+    assert!(!readers.is_empty(), "the history must read valuations");
+    assert!(
+        !readers.contains(&std::thread::current().id()),
+        "the history read valuations on the async worker"
+    );
+}
+
+/// Net worth on a date reads stored valuations and every asset's quote
+/// history, so like the history it must not run on the async worker (Health
+/// Center's full check calls it too).
+#[tokio::test]
+async fn test_net_worth_reads_valuations_off_the_async_worker() {
+    let d1 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let account_repo = Arc::new(MockAccountRepository::new(vec![create_test_account(
+        "account-1",
+        account_types::SECURITIES,
+        "USD",
+    )]));
+    let valuations = Arc::new(MockValuationRepository::new(vec![create_total_valuation(
+        d1,
+        dec!(100),
+        dec!(100),
+    )]));
+    let service = NetWorthService::new(
+        Arc::new(RwLock::new("USD".to_string())),
+        account_repo.clone(),
+        Arc::new(MockAssetRepository::new(vec![])),
+        Arc::new(SnapshotService::new(
+            Arc::new(RwLock::new("UTC".to_string())),
+            account_repo,
+            Arc::new(MockSnapshotRepository::new(vec![])),
+            Arc::new(InMemoryActivityRepository::new(Vec::new(), HashSet::new())),
+        )),
+        Arc::new(MockMarketDataRepository::new(vec![])),
+        valuations.clone(),
+        Arc::new(MockFxService::new("USD")),
+    );
+
+    service.get_net_worth(d1).await.unwrap();
+
+    let readers = valuations.readers.lock().unwrap();
+    assert!(!readers.is_empty(), "net worth must read valuations");
+    assert!(
+        !readers.contains(&std::thread::current().id()),
+        "net worth read valuations on the async worker"
     );
 }
 
@@ -2708,7 +2890,7 @@ async fn automated_loan_net_worth_and_history_use_the_same_as_of_balance() {
         )],
     );
     let current = service.get_net_worth(end).await.unwrap();
-    let history = service.get_net_worth_history(start, end).unwrap();
+    let history = service.get_net_worth_history(start, end).await.unwrap();
     assert_eq!(current.liabilities.total, dec!(700));
     assert_eq!(history.last().unwrap().total_liabilities, dec!(700));
     assert_eq!(
@@ -2719,6 +2901,37 @@ async fn automated_loan_net_worth_and_history_use_the_same_as_of_balance() {
             .total_liabilities,
         dec!(1000)
     );
+}
+
+/// An automatic loan is valued on the as-of date, so only a manual one goes stale.
+#[tokio::test]
+async fn automated_loan_is_never_stale_but_a_manual_one_is() {
+    let recorded = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let as_of = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+    let mut automatic = create_test_asset("LIAB-automatic", AssetKind::Liability, "USD");
+    automatic.metadata = Some(serde_json::json!({
+        "loan_projection": {"version": 1,"annualRate":0,"paymentAmount":100,"frequency":"monthly","firstPaymentDate":"2026-02-01","amortizationEndDate":"2027-01-01"}
+    }));
+    let manual = create_test_asset("LIAB-manual", AssetKind::Liability, "USD");
+    let service = create_net_worth_service(
+        vec![],
+        vec![automatic, manual],
+        vec![],
+        vec![
+            create_test_quote("LIAB-automatic", dec!(1200), recorded, "USD"),
+            create_test_quote("LIAB-manual", dec!(5000), recorded, "USD"),
+        ],
+    );
+
+    let result = service.get_net_worth(as_of).await.unwrap();
+
+    assert_eq!(result.liabilities.total, dec!(5700));
+    let stale: Vec<_> = result
+        .stale_assets
+        .iter()
+        .map(|asset| asset.asset_id.as_str())
+        .collect();
+    assert_eq!(stale, vec!["LIAB-manual"]);
 }
 
 #[tokio::test]
@@ -2754,6 +2967,7 @@ async fn loan_history_before_first_confirmation_matches_point_in_time() {
     assert_eq!(
         service
             .get_net_worth_history(start, as_of)
+            .await
             .unwrap()
             .last()
             .unwrap()
@@ -2767,7 +2981,7 @@ struct TaggedPayments(HashMap<String, Vec<crate::assets::loan::StoredPayment>>);
 
 #[async_trait]
 impl crate::assets::AlternativeAssetRepositoryTrait for TaggedPayments {
-    async fn delete_alternative_asset(&self, _: &str) -> Result<()> {
+    async fn delete_alternative_asset(&self, _: &str) -> Result<Vec<crate::activities::Activity>> {
         unimplemented!("not used by net worth")
     }
     async fn update_asset_metadata(&self, _: &str, _: Option<serde_json::Value>) -> Result<()> {
@@ -2846,7 +3060,7 @@ async fn tagged_loan_payments_count_in_net_worth_and_its_history() {
     );
     // The same figures as a recorded extra repayment of 200 on April 15.
     let current = service.get_net_worth(end).await.unwrap();
-    let history = service.get_net_worth_history(start, end).unwrap();
+    let history = service.get_net_worth_history(start, end).await.unwrap();
     assert_eq!(current.liabilities.total, dec!(700));
     assert_eq!(history.last().unwrap().total_liabilities, dec!(700));
 }
@@ -2881,12 +3095,16 @@ async fn manual_mortgage_with_a_recorded_balance_does_not_backfill_original_prin
         }
         let earlier = service
             .get_net_worth_history(origin, before_confirmation)
+            .await
             .unwrap();
         assert!(!earlier.is_empty());
         assert!(earlier
             .iter()
             .all(|point| point.total_liabilities.is_zero()));
-        let history = service.get_net_worth_history(origin, confirmation).unwrap();
+        let history = service
+            .get_net_worth_history(origin, confirmation)
+            .await
+            .unwrap();
         assert_eq!(history.first().unwrap().net_worth, dec!(500000));
         assert_eq!(history.last().unwrap().net_worth, dec!(500000) - balance);
         for point in history {
@@ -2932,7 +3150,7 @@ async fn manual_loan_principal_matches_net_worth_history_and_dated_quotes() {
                 .total,
             dec!(0)
         );
-        let history = service.get_net_worth_history(origin, end).unwrap();
+        let history = service.get_net_worth_history(origin, end).await.unwrap();
         assert_eq!(
             history.first().unwrap().date,
             if recorded.is_some() {
@@ -2971,6 +3189,7 @@ async fn manual_loan_principal_matches_net_worth_history_and_dated_quotes() {
         let after_origin = origin + chrono::Days::new(2);
         let before_confirmation = service
             .get_net_worth_history(after_origin, after_origin)
+            .await
             .unwrap();
         if recorded.is_some() {
             assert!(before_confirmation.is_empty());
@@ -3023,7 +3242,7 @@ async fn undated_manual_principal_keeps_its_creation_anchor_as_today_advances() 
         let instant: chrono::DateTime<Utc> = now.parse().unwrap();
         crate::utils::clock::set_frozen(instant);
         let today = instant.date_naive();
-        let history = service.get_net_worth_history(created, today).unwrap();
+        let history = service.get_net_worth_history(created, today).await.unwrap();
         assert_eq!(history.first().unwrap().date, created);
         assert_eq!(history.last().unwrap().date, today);
         for point in history {
@@ -3033,7 +3252,10 @@ async fn undated_manual_principal_keeps_its_creation_anchor_as_today_advances() 
         // A range beginning after creation must retain debt on its first point,
         // rather than introducing the same drop again on each new current day.
         let yesterday = today.pred_opt().unwrap();
-        let recent = service.get_net_worth_history(yesterday, today).unwrap();
+        let recent = service
+            .get_net_worth_history(yesterday, today)
+            .await
+            .unwrap();
         assert_eq!(recent.first().unwrap().date, yesterday);
         assert_eq!(recent.first().unwrap().total_liabilities, dec!(9000));
         assert_eq!(
@@ -3061,7 +3283,7 @@ async fn manual_principal_history_revalues_foreign_currency_on_each_date() {
         .collect();
     let service =
         create_net_worth_service_with_fx(vec![], vec![asset], vec![], vec![], vec![], Arc::new(fx));
-    let history = service.get_net_worth_history(origin, end).unwrap();
+    let history = service.get_net_worth_history(origin, end).await.unwrap();
     assert_eq!(history.first().unwrap().total_liabilities, dec!(75));
     assert_eq!(history.last().unwrap().total_liabilities, dec!(80));
     for point in history {
@@ -3112,10 +3334,480 @@ async fn undated_manual_principal_uses_the_settings_timezone() {
     assert_eq!(
         service
             .get_net_worth_history(created, created)
+            .await
             .unwrap()
             .last()
             .unwrap()
             .total_liabilities,
         dec!(100)
     );
+}
+
+// Independent synthetic review probes. No production changes.
+use crate::fx::FxService;
+use crate::test_support::in_memory::{InMemoryFxRepository, InMemoryQuoteService};
+
+fn dates() -> [NaiveDate; 3] {
+    [15, 16, 17].map(|day| NaiveDate::from_ymd_opt(2024, 1, day).unwrap())
+}
+fn rate(from: &str, to: &str, value: Decimal, date: NaiveDate) -> ExchangeRate {
+    ExchangeRate {
+        id: format!("{from}-{to}-{date}"),
+        from_currency: from.into(),
+        to_currency: to.into(),
+        rate: value,
+        source: "MANUAL".into(),
+        timestamp: date.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+    }
+}
+fn real_fx() -> (Arc<InMemoryFxRepository>, Arc<FxService>) {
+    let repo = Arc::new(InMemoryFxRepository::new(vec![]));
+    let fx = Arc::new(FxService::new(repo.clone()));
+    fx.initialize().unwrap();
+    (repo, fx)
+}
+fn aed_service(
+    accounts: Vec<Account>,
+    assets: Vec<Asset>,
+    snapshots: Vec<AccountStateSnapshot>,
+    quotes: Vec<Quote>,
+    vals: Vec<DailyAccountValuation>,
+    fx: Arc<dyn FxServiceTrait>,
+) -> NetWorthService {
+    let account_repo = Arc::new(MockAccountRepository::new(accounts));
+    let asset_repo = Arc::new(MockAssetRepository::new(assets.clone()));
+    let snapshot_service = Arc::new(SnapshotService::new(
+        Arc::new(RwLock::new("UTC".into())),
+        account_repo.clone(),
+        Arc::new(MockSnapshotRepository::new(snapshots)),
+        Arc::new(InMemoryActivityRepository::new(vec![], HashSet::new())),
+    ));
+    NetWorthService::new(
+        Arc::new(RwLock::new("AED".into())),
+        account_repo,
+        asset_repo,
+        snapshot_service,
+        Arc::new(InMemoryQuoteService::new(quotes, assets)),
+        Arc::new(MockValuationRepository::new(vals)),
+        fx,
+    )
+}
+
+#[tokio::test]
+async fn net_worth_history_memoizes_missing_pairs_only_within_each_request() {
+    let [d1, d2, d3] = dates();
+    let mut fx = MockFxService::new("AED");
+    fx.dated_rates = HashMap::from([(d1, dec!(0.001)), (d2, dec!(0.002)), (d3, dec!(0.003))]);
+    *fx.missing_pairs.write().unwrap() =
+        HashSet::from([("COP".into(), "AED".into()), ("JPY".into(), "AED".into())]);
+    let fx = Arc::new(fx);
+    let mut loan = create_test_asset("loan", AssetKind::Liability, "COP");
+    loan.metadata = Some(json!({"original_amount":"50000","origination_date":d1.to_string()}));
+    let service = aed_service(
+        vec![],
+        vec![
+            create_test_asset("home", AssetKind::Property, "COP"),
+            create_test_asset("car", AssetKind::Vehicle, "COP"),
+            create_test_asset("other", AssetKind::Property, "JPY"),
+            create_test_asset("healthy", AssetKind::Property, "EUR"),
+            create_test_asset("local", AssetKind::Property, "AED"),
+            loan,
+        ],
+        vec![],
+        vec![
+            create_test_quote("home", dec!(100000), d1, "COP"),
+            create_test_quote("car", dec!(200000), d1, "COP"),
+            create_test_quote("other", dec!(300000), d1, "JPY"),
+            create_test_quote("healthy", dec!(100000), d1, "EUR"),
+            create_test_quote("local", dec!(1000), d1, "AED"),
+        ],
+        vec![],
+        fx.clone(),
+    );
+
+    // Each request looks up each missing pair once, shared across items and days.
+    for _ in 0..2 {
+        fx.conversion_calls.lock().unwrap().clear();
+        let history = service.get_net_worth_history(d1, d3).await.unwrap();
+        assert_eq!(history.len(), 3);
+        for (index, point) in history.iter().enumerate() {
+            assert_eq!(point.value_status, ValuationStatus::Unavailable);
+            assert_eq!(
+                point.net_worth,
+                dec!(1100) + dec!(100) * Decimal::from(index)
+            );
+            assert_eq!(
+                point
+                    .missing_fx
+                    .iter()
+                    .map(|issue| issue.item_id.as_str())
+                    .collect::<HashSet<_>>(),
+                HashSet::from(["home", "car", "other", "loan"])
+            );
+        }
+        let calls = fx.conversion_calls.lock().unwrap();
+        assert_eq!(calls.len(), 5);
+        for (currency, expected) in [("COP", 1), ("JPY", 1), ("EUR", 3)] {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(from, to, _)| from == currency && to == "AED")
+                    .count(),
+                expected,
+                "{currency}"
+            );
+        }
+    }
+
+    // Newly available rates are used on the next request, on each point's date.
+    fx.missing_pairs.write().unwrap().clear();
+    fx.conversion_calls.lock().unwrap().clear();
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(fx.conversion_calls.lock().unwrap().len(), 15);
+    for (index, point) in history.iter().enumerate() {
+        assert_eq!(point.value_status, ValuationStatus::Complete);
+        assert!(point.missing_fx.is_empty());
+        assert_eq!(
+            point.net_worth,
+            dec!(1650) + dec!(650) * Decimal::from(index)
+        );
+    }
+}
+
+#[tokio::test]
+async fn net_worth_history_retries_database_errors_on_later_dates() {
+    let [d1, d2, d3] = dates();
+    let mut fx = MockFxService::new("AED");
+    fx.database_failed_dates.insert(d1);
+    fx.dated_rates = HashMap::from([(d2, dec!(0.002)), (d3, dec!(0.003))]);
+    let fx = Arc::new(fx);
+    let service = aed_service(
+        vec![],
+        vec![create_test_asset("home", AssetKind::Property, "COP")],
+        vec![],
+        vec![create_test_quote("home", dec!(100000), d1, "COP")],
+        vec![],
+        fx.clone(),
+    );
+
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(fx.conversion_calls.lock().unwrap().len(), 3);
+    assert_eq!(history[0].value_status, ValuationStatus::Unavailable);
+    assert_eq!(history[0].missing_fx.len(), 1);
+    for (point, expected) in history[1..].iter().zip([dec!(200), dec!(300)]) {
+        assert_eq!(point.net_worth, expected);
+        assert_eq!(point.value_status, ValuationStatus::Complete);
+        assert!(point.missing_fx.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn net_worth_history_zero_values_do_not_require_even_a_known_missing_pair() {
+    let [d1, d2, d3] = dates();
+    let fx = Arc::new(MockFxService::new("AED"));
+    fx.missing_pairs
+        .write()
+        .unwrap()
+        .insert(("COP".into(), "AED".into()));
+    let service = aed_service(
+        vec![],
+        vec![create_test_asset("home", AssetKind::Property, "COP")],
+        vec![],
+        vec![
+            create_test_quote("home", dec!(0), d1, "COP"),
+            create_test_quote("home", dec!(100000), d2, "COP"),
+            create_test_quote("home", dec!(0), d3, "COP"),
+        ],
+        vec![],
+        fx.clone(),
+    );
+
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(history.len(), 3);
+    assert_eq!(fx.conversion_calls.lock().unwrap().len(), 1);
+    assert_eq!(history[1].value_status, ValuationStatus::Unavailable);
+    for point in [&history[0], &history[2]] {
+        assert_eq!(point.net_worth, dec!(0));
+        assert_eq!(point.value_status, ValuationStatus::Complete);
+        assert!(point.missing_fx.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn missing_fx_real_converter_property_missing_then_recovery() {
+    let [d1, _, d3] = dates();
+    let (repo, fx) = real_fx();
+    let service = aed_service(
+        vec![],
+        vec![
+            create_test_asset("home", AssetKind::Property, "COP"),
+            create_test_asset("local", AssetKind::Property, "AED"),
+        ],
+        vec![],
+        vec![
+            create_test_quote("home", dec!(330000000), d1, "COP"),
+            create_test_quote("local", dec!(1000), d1, "AED"),
+        ],
+        vec![],
+        fx.clone(),
+    );
+    let missing = service.get_net_worth(d3).await.unwrap();
+    assert_eq!(missing.value_status, ValuationStatus::Unavailable);
+    assert_eq!(missing.missing_fx[0].from_currency, "COP");
+    assert_eq!(missing.net_worth, dec!(1000));
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(history.len(), 3);
+    assert!(history.iter().all(|p| p.net_worth == dec!(1000)));
+    // Restore stored USD legs, exercising the existing converter independently of #2702.
+    repo.add_rates(vec![
+        rate("COP", "USD", dec!(0.00025), d1),
+        rate("USD", "AED", dec!(4), d1),
+    ]);
+    fx.initialize().unwrap();
+    let restored = service.get_net_worth(d3).await.unwrap();
+    let recovered_history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(restored.net_worth, dec!(331000));
+    assert!(recovered_history
+        .iter()
+        .all(|p| p.net_worth == dec!(331000)));
+}
+
+#[tokio::test]
+async fn missing_fx_real_converter_cash_positions_cards_and_loans() {
+    let [date, _, _] = dates();
+    let mut omissions_correct = true;
+    for case in [
+        "cash",
+        "position",
+        "card",
+        "recorded-loan",
+        "manual-loan",
+        "automatic-loan",
+    ] {
+        let (repo, fx) = real_fx();
+        let mut accounts = vec![];
+        let mut assets = vec![create_test_asset("local", AssetKind::Property, "AED")];
+        let mut snapshots = vec![];
+        let mut quotes = vec![create_test_quote("local", dec!(1000), date, "AED")];
+        let value = if case == "card" {
+            dec!(-100000)
+        } else {
+            dec!(100000)
+        };
+        if ["cash", "position", "card"].contains(&case) {
+            accounts.push(create_test_account(
+                "account",
+                if case == "card" {
+                    account_types::CREDIT_CARD
+                } else {
+                    account_types::SECURITIES
+                },
+                "COP",
+            ));
+            let positions = if case == "position" {
+                assets.push(create_test_asset("stock", AssetKind::Investment, "COP"));
+                quotes.push(create_test_quote("stock", dec!(10000), date, "COP"));
+                vec![create_test_position(
+                    "account",
+                    "stock",
+                    dec!(10),
+                    dec!(100000),
+                    "COP",
+                )]
+            } else {
+                vec![]
+            };
+            let cash = if case == "position" {
+                HashMap::new()
+            } else {
+                HashMap::from([("COP".into(), value), ("AED".into(), dec!(20))])
+            };
+            snapshots.push(create_test_snapshot("account", positions, cash));
+        } else {
+            let mut loan = create_test_asset("loan", AssetKind::Liability, "COP");
+            if case == "recorded-loan" {
+                quotes.push(create_test_quote("loan", value, date, "COP"));
+            } else {
+                loan.metadata =
+                    Some(json!({"original_amount":"100000","origination_date":date.to_string()}));
+                if case == "automatic-loan" {
+                    loan.metadata.as_mut().unwrap()["loan_projection"] = json!({"version":1,"annualRate":0,"paymentAmount":100,"frequency":"monthly","firstPaymentDate":"2024-02-01","amortizationEndDate":"2025-01-01"});
+                }
+            }
+            assets.push(loan);
+        }
+        let service = aed_service(accounts, assets, snapshots, quotes, vec![], fx.clone());
+        let missing = service.get_net_worth(date).await.unwrap();
+        assert_eq!(missing.value_status, ValuationStatus::Unavailable, "{case}");
+        assert!(!missing.missing_fx.is_empty(), "{case}");
+        omissions_correct &= missing.net_worth
+            == if case == "cash" {
+                dec!(1020)
+            } else {
+                dec!(1000)
+            };
+        if case.contains("loan") {
+            let h = service.get_net_worth_history(date, date).await.unwrap();
+            omissions_correct &= h[0].net_worth == dec!(1000);
+        }
+        repo.add_rates(vec![rate("COP", "AED", dec!(0.001), date)]);
+        fx.initialize().unwrap();
+        let restored = service.get_net_worth(date).await.unwrap();
+        assert_eq!(restored.value_status, ValuationStatus::Complete, "{case}");
+        assert!(restored.missing_fx.is_empty(), "{case}");
+        let expected = match case {
+            "cash" => dec!(1120),
+            "position" => dec!(1100),
+            "card" => dec!(920),
+            _ => dec!(900),
+        };
+        assert_eq!(restored.net_worth, expected, "{case}");
+        if case.contains("loan") {
+            let history = service.get_net_worth_history(date, date).await.unwrap();
+            assert_eq!(history[0].net_worth, expected, "{case} history");
+        }
+    }
+    assert!(
+        omissions_correct,
+        "all missing currencies should be omitted"
+    );
+}
+
+#[tokio::test]
+async fn missing_fx_failed_dates_mark_history_and_current_unavailable_then_recover() {
+    let [d1, d2, d3] = dates();
+    let mut failures_correct = true;
+    for kind in ["property", "recorded-loan", "manual-loan", "automatic-loan"] {
+        let mut fx = MockFxService::new("AED");
+        fx.dated_rates = HashMap::from([(d1, dec!(0.001)), (d3, dec!(0.002))]);
+        fx.failed_dates.insert(d2);
+        let mut asset = create_test_asset(
+            "foreign",
+            if kind == "property" {
+                AssetKind::Property
+            } else {
+                AssetKind::Liability
+            },
+            "COP",
+        );
+        let mut quotes = vec![create_test_quote("local", dec!(1000), d1, "AED")];
+        if kind == "property" || kind == "recorded-loan" {
+            quotes.extend([
+                create_test_quote("foreign", dec!(100000), d1, "COP"),
+                create_test_quote("foreign", dec!(200000), d2, "COP"),
+            ]);
+        } else {
+            asset.metadata =
+                Some(json!({"original_amount":"100000","origination_date":d1.to_string()}));
+            if kind == "automatic-loan" {
+                asset.metadata.as_mut().unwrap()["loan_projection"] = json!({"version":1,"annualRate":0,"paymentAmount":100,"frequency":"monthly","firstPaymentDate":"2024-02-01","amortizationEndDate":"2025-01-01"});
+            }
+        }
+        let service = aed_service(
+            vec![],
+            vec![
+                asset,
+                create_test_asset("local", AssetKind::Property, "AED"),
+            ],
+            vec![],
+            quotes,
+            vec![],
+            Arc::new(fx),
+        );
+        let history = service.get_net_worth_history(d1, d3).await.unwrap();
+        let sign = if kind == "property" {
+            dec!(1)
+        } else {
+            dec!(-1)
+        };
+        let end = if kind == "property" || kind == "recorded-loan" {
+            dec!(400)
+        } else {
+            dec!(200)
+        };
+        failures_correct &= history.iter().map(|p| p.net_worth).collect::<Vec<_>>()
+            == vec![
+                dec!(1000) + sign * dec!(100),
+                dec!(1000),
+                dec!(1000) + sign * end,
+            ];
+        failures_correct &= service.get_net_worth(d2).await.unwrap().net_worth == dec!(1000);
+        assert_eq!(history[1].value_status, ValuationStatus::Unavailable);
+        assert_eq!(history[0].value_status, ValuationStatus::Complete);
+        assert_eq!(history[2].value_status, ValuationStatus::Complete);
+        assert_eq!(
+            service.get_net_worth(d3).await.unwrap().net_worth,
+            dec!(1000) + sign * end
+        );
+    }
+    assert!(failures_correct, "failed-date behavior");
+}
+
+#[tokio::test]
+async fn missing_fx_stored_unavailable_account_valuations_bypass_conversion() {
+    let [d1, _, d3] = dates();
+    let (repo, fx) = real_fx();
+    let mut vals = vec![];
+    for date in dates() {
+        let mut v = create_account_valuation("account", date, dec!(0));
+        v.account_currency = "COP".into();
+        v.base_currency = "AED".into();
+        v.cash_balance = dec!(100000);
+        v.total_value = dec!(100000);
+        v.value_status = ValuationStatus::Unavailable;
+        v.fx_rate_to_base = dec!(0);
+        vals.push(v);
+    }
+    let service = aed_service(
+        vec![create_test_account("account", account_types::CASH, "COP")],
+        vec![],
+        vec![create_test_snapshot(
+            "account",
+            vec![],
+            HashMap::from([("COP".into(), dec!(100000))]),
+        )],
+        vec![],
+        vals,
+        fx.clone(),
+    );
+    assert_eq!(service.get_net_worth(d3).await.unwrap().net_worth, dec!(0));
+    repo.add_rates(vec![rate("COP", "AED", dec!(0.001), d1)]);
+    fx.initialize().unwrap();
+    let current = service.get_net_worth(d3).await.unwrap();
+    let history = service.get_net_worth_history(d1, d3).await.unwrap();
+    assert_eq!(current.net_worth, dec!(0));
+    assert!(history.iter().all(|p| p.net_worth == dec!(0)));
+}
+
+#[tokio::test]
+async fn missing_fx_preserves_quote_age_without_adding_unconverted_values() {
+    let quoted = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+    for kind in [AssetKind::Property, AssetKind::Liability] {
+        for age in [50, 200] {
+            let (_, fx) = real_fx();
+            let service = aed_service(
+                vec![],
+                vec![create_test_asset("foreign", kind.clone(), "COP")],
+                vec![],
+                vec![create_test_quote("foreign", dec!(330000000), quoted, "COP")],
+                vec![],
+                fx,
+            );
+            let result = service
+                .get_net_worth(quoted + chrono::Duration::days(age))
+                .await
+                .unwrap();
+            assert_eq!(result.value_status, ValuationStatus::Unavailable);
+            assert_eq!(result.net_worth, Decimal::ZERO);
+            assert_eq!(result.oldest_valuation_date, Some(quoted));
+            assert_eq!(
+                result.stale_assets.len(),
+                usize::from(age > STALENESS_THRESHOLD_DAYS)
+            );
+            if age > STALENESS_THRESHOLD_DAYS {
+                assert_eq!(result.stale_assets[0].asset_id, "foreign");
+                assert_eq!(result.stale_assets[0].days_stale, age);
+            }
+        }
+    }
 }

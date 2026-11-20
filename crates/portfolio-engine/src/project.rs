@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 
 use crate::arith;
 use crate::compile::CompiledLedger;
-use crate::diagnostics::{Diagnostic, DiagnosticCode};
+use crate::diagnostics::{ActivityReason, ActivityRejection, Diagnostic, DiagnosticCode};
 use crate::error::EngineError;
 use crate::model::*;
 use crate::resolve::FxResolver;
@@ -30,8 +30,31 @@ const UNIT_COST_DIGITS: u32 = 15;
 
 /// A value outside the kernel range rejects the event (architecture §4.3):
 /// the fold keeps the scratch state from before it and reports why.
-fn checked(value: Option<Decimal>, what: &str) -> Result<Decimal, String> {
-    value.ok_or_else(|| format!("{what} is outside the kernel range"))
+fn checked(value: Option<Decimal>, what: &str) -> Result<Decimal, ActivityRejection> {
+    value.ok_or_else(|| format!("{what} is outside the kernel range").into())
+}
+
+/// A conversion can also fail on range checks. Classify missing FX only when
+/// the resolver has no rate, preserving the existing message for other failures.
+fn conversion_failure(
+    fx: &FxResolver<'_>,
+    from: &str,
+    to: &str,
+    date: NaiveDate,
+    message: String,
+) -> ActivityRejection {
+    let reason = fx
+        .rate(from, to, date)
+        .is_none()
+        .then(|| ActivityReason::MissingFxRate {
+            from: from.to_string(),
+            to: to.to_string(),
+            date,
+        });
+    ActivityRejection {
+        message,
+        reason: reason.map(Box::new),
+    }
 }
 
 pub fn project(
@@ -90,16 +113,15 @@ pub fn project_accounts(
         transfers_in: ledger
             .events
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.action,
-                    Action::SecurityTransfer {
-                        direction: Direction::In,
-                        ..
-                    }
-                )
+            .filter_map(|e| match &e.action {
+                Action::SecurityTransfer {
+                    direction: Direction::In,
+                    ..
+                } => Some(e.id.clone()),
+                // The lots a conversion opens belong to its arriving row.
+                Action::Conversion { arriving, .. } => Some(EventId::new(arriving.as_str())),
+                _ => None,
             })
-            .map(|e| e.id.clone())
             .collect(),
     };
     let mut state = start.unwrap_or_else(|| ProjectionState {
@@ -370,7 +392,8 @@ struct Projector<'a> {
     event_dates: HashMap<&'a str, NaiveDate>,
     /// The days each account records a split of an asset (`pool_lots`).
     split_days: BTreeSet<(AccountId, AssetId, NaiveDate)>,
-    /// Incoming security transfer legs, whose lots never pool (`pool_lots`).
+    /// Incoming security transfer legs and conversions' arriving rows, whose
+    /// lots never pool (`pool_lots`).
     transfers_in: BTreeSet<EventId>,
 }
 
@@ -426,18 +449,25 @@ pub(crate) fn position_book_cost(
     })
 }
 
-/// The position an event may change besides cash and the account totals
-/// (checked in debug builds): the asset its action names.
-fn footprint(event: &EconomicEvent) -> Option<&AssetId> {
-    match &event.action {
-        Action::None => None,
+/// The positions an event may change besides cash and the account totals
+/// (checked in debug builds): the asset its action names, or a conversion's
+/// two.
+fn footprint(event: &EconomicEvent) -> impl Iterator<Item = &AssetId> {
+    let (first, second) = match &event.action {
+        Action::None => (None, None),
         Action::Trade { asset, .. }
         | Action::SecurityTransfer { asset, .. }
         | Action::Split { asset, .. }
         | Action::OptionExpiry { asset, .. }
         | Action::ReturnOfCapital { asset, .. }
-        | Action::NotionalDistribution { asset, .. } => Some(asset),
-    }
+        | Action::NotionalDistribution { asset, .. } => (Some(asset), None),
+        Action::Conversion {
+            from_asset,
+            to_asset,
+            ..
+        } => (Some(from_asset), Some(to_asset)),
+    };
+    first.into_iter().chain(second)
 }
 
 impl Savepoint {
@@ -454,7 +484,7 @@ impl Savepoint {
             cash_total_account,
             cash_total_base,
         } = account;
-        let mut assets: Vec<&AssetId> = legs.filter_map(footprint).collect();
+        let mut assets: Vec<&AssetId> = legs.flat_map(footprint).collect();
         assets.sort();
         assets.dedup();
         Self {
@@ -537,7 +567,7 @@ impl Projector<'_> {
         position: &mut Position,
         requested: Decimal,
         negative: bool,
-    ) -> Result<Reduction, String> {
+    ) -> Result<Reduction, ActivityRejection> {
         let method = self.method(account);
         if method == CostBasisMethod::Wac {
             self.pool_lots(account, account_currency, event, position, negative)?;
@@ -566,7 +596,7 @@ impl Projector<'_> {
         event: &EconomicEvent,
         position: &mut Position,
         negative: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         sort_lots(position);
         let position_currency = position.currency.clone();
         let base = self.facts.policy.base_currency.clone();
@@ -759,7 +789,7 @@ impl Projector<'_> {
                         cache.remove(&group);
                     }
                 }
-                Err(message) => {
+                Err(rejection) => {
                     // Nothing the attempt did stays, its warnings included:
                     // only the rejection is reported.
                     savepoint.restore(&mut account);
@@ -767,11 +797,29 @@ impl Projector<'_> {
                     let activity = &legs[0].source;
                     #[cfg(debug_assertions)]
                     debug_assert_eq!(account, before, "rejected {activity} left a trace");
-                    run.diagnostics.push(Diagnostic::error(
-                        DiagnosticCode::ActivityRejected,
-                        activity.as_str(),
-                        message,
-                    ));
+                    // A conversion's arriving row is rejected with it.
+                    let arriving = legs.iter().find_map(|leg| match &leg.action {
+                        Action::Conversion { arriving, .. } => Some(arriving),
+                        _ => None,
+                    });
+                    run.diagnostics.push(
+                        Diagnostic::error(
+                            DiagnosticCode::ActivityRejected,
+                            activity.as_str(),
+                            rejection.message.clone(),
+                        )
+                        .with_reason(rejection.reason.as_deref().cloned()),
+                    );
+                    if let Some(arriving) = arriving {
+                        run.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticCode::ActivityRejected,
+                                arriving.as_str(),
+                                rejection.message,
+                            )
+                            .with_reason(rejection.reason.map(|reason| *reason)),
+                        );
+                    }
                 }
             }
         }
@@ -790,7 +838,7 @@ impl Projector<'_> {
         // touched (the others keep theirs: acquisition FX does not move with
         // the day), then the account's total by the same rule as valuation,
         // then cash totals (once per day).
-        let touched: BTreeSet<&AssetId> = events.iter().filter_map(|e| footprint(e)).collect();
+        let touched: BTreeSet<&AssetId> = events.iter().flat_map(|e| footprint(e)).collect();
         let account_currency = account.currency.as_str().to_string();
         let base = self.base().to_string();
         for (asset, position) in account.positions.iter_mut() {
@@ -834,7 +882,16 @@ impl Projector<'_> {
         cache: &BTreeMap<String, StagedLots>,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
+        // A conversion row that does not form a pair changes nothing (rules
+        // R7.5).
+        if let Some(invalid) = event
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::InvalidConversion)
+        {
+            return Err(invalid.message.clone().into());
+        }
         match &event.action {
             Action::None => {
                 if event.kind == ActivityKind::Adjustment {
@@ -843,7 +900,7 @@ impl Projector<'_> {
                         .iter()
                         .find(|diagnostic| diagnostic.code == DiagnosticCode::UnknownAsset)
                     {
-                        return Err(diagnostic.message.clone());
+                        return Err(diagnostic.message.clone().into());
                     }
                 }
                 self.apply_cash_only(event, state, run)
@@ -909,6 +966,23 @@ impl Projector<'_> {
             Action::NotionalDistribution { asset, amount } => {
                 self.notional_distribution(event, state, asset, *amount)
             }
+            Action::Conversion {
+                from_asset,
+                from_quantity,
+                to_asset,
+                to_quantity,
+                arriving,
+            } => self.convert(
+                event,
+                state,
+                from_asset,
+                *from_quantity,
+                to_asset,
+                *to_quantity,
+                arriving,
+                effects,
+                run,
+            ),
         }
     }
 
@@ -920,7 +994,7 @@ impl Projector<'_> {
         event: &EconomicEvent,
         state: &mut AccountState,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         let Some(cash) = &event.cash else {
             return Ok(());
         };
@@ -946,15 +1020,11 @@ impl Projector<'_> {
         state: &mut AccountState,
         event: &EconomicEvent,
         cash: &CashEffect,
-    ) -> Result<(), String> {
-        let (currency, amount) = match cash.booking {
-            Booking::ActivityCurrency => (event.currency.clone(), cash.amount),
-            Booking::AccountCurrency { rate } => (
-                state.currency.clone(),
-                checked(arith::mul(cash.amount, rate), "cash at the supplied rate")?,
-            ),
-        };
-        *state.cash.entry(currency).or_insert(Decimal::ZERO) += amount;
+    ) -> Result<(), ActivityRejection> {
+        let (currency, amount) = cash
+            .booked(&event.currency, &state.currency)
+            .ok_or_else(|| "cash at the supplied rate is outside the kernel range".to_string())?;
+        *state.cash.entry(currency.clone()).or_insert(Decimal::ZERO) += amount;
         Ok(())
     }
 
@@ -967,7 +1037,7 @@ impl Projector<'_> {
         event: &EconomicEvent,
         account_currency: &str,
         run: &mut RunLog,
-    ) -> Result<Decimal, String> {
+    ) -> Result<Decimal, ActivityRejection> {
         let from = event.currency.as_str();
         if from == account_currency {
             return Ok(amount);
@@ -1042,7 +1112,11 @@ impl Projector<'_> {
     /// a transfer can differ: amounts then convert at each lot's acquisition
     /// rate, and its stored rates scale so its account and base cost stay
     /// the same. No rate rejects the transfer, as it does a trade.
-    fn staged_lots_in(&self, staged: &StagedLots, currency: &str) -> Result<Vec<Lot>, String> {
+    fn staged_lots_in(
+        &self,
+        staged: &StagedLots,
+        currency: &str,
+    ) -> Result<Vec<Lot>, ActivityRejection> {
         let from = staged.currency.as_str();
         if from == currency || from.is_empty() || currency.is_empty() {
             return Ok(staged.lots.clone());
@@ -1055,10 +1129,10 @@ impl Projector<'_> {
                     .fx
                     .rate(from, currency, lot.acquisition_date)
                     .ok_or_else(|| {
-                        format!(
+                        ActivityRejection::with_reason(format!(
                             "failed to convert the transferred lots from {from} to {currency} on {}",
                             lot.acquisition_date
-                        )
+                        ), ActivityReason::MissingFxRate { from: from.to_string(), to: currency.to_string(), date: lot.acquisition_date })
                     })?;
                 let convert = |amount: Decimal| checked(arith::mul(amount, rate), "transferred lot");
                 Ok(Lot {
@@ -1092,7 +1166,7 @@ impl Projector<'_> {
         intent: Option<Intent>,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         let info = self.asset_facts(asset, &event.currency);
         let close_only = intent == Some(Intent::Close);
         let short_quantity = state
@@ -1103,27 +1177,38 @@ impl Projector<'_> {
 
         if info.allows_negative_lots && close_only {
             if short_quantity.is_zero() {
-                return Err(format!(
-                    "BUY {} is marked POSITION_CLOSE for {asset} but no short position exists",
-                    event.source
+                return Err(ActivityRejection::with_reason(
+                    format!(
+                        "BUY {} is marked POSITION_CLOSE for {asset} but no short position exists",
+                        event.source
+                    ),
+                    ActivityReason::CloseBuyWithoutShortPosition {
+                        asset: asset.to_string(),
+                    },
                 ));
             }
             if quantity > short_quantity {
-                return Err(format!("BUY {} is marked POSITION_CLOSE for {quantity} units of {asset} but only {short_quantity} are short", event.source));
+                return Err(format!("BUY {} is marked POSITION_CLOSE for {quantity} units of {asset} but only {short_quantity} are short", event.source).into());
             }
         }
         if info.requires_explicit_short_intent {
             if close_only && short_quantity.is_zero() {
-                return Err(format!(
-                    "BUY {} is marked POSITION_CLOSE for {asset} but no short position exists",
-                    event.source
+                return Err(ActivityRejection::with_reason(
+                    format!(
+                        "BUY {} is marked POSITION_CLOSE for {asset} but no short position exists",
+                        event.source
+                    ),
+                    ActivityReason::CloseBuyWithoutShortPosition {
+                        asset: asset.to_string(),
+                    },
                 ));
             }
             if !close_only && short_quantity > Decimal::ZERO {
                 return Err(format!(
                     "BUY {} would reduce short {asset} without Buy to Cover intent",
                     event.source
-                ));
+                )
+                .into());
             }
         }
 
@@ -1210,7 +1295,7 @@ impl Projector<'_> {
         intent: Option<Intent>,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         let info = self.asset_facts(asset, &event.currency);
         let close_only = intent == Some(Intent::Close);
         let open_short = intent == Some(Intent::Open);
@@ -1224,10 +1309,11 @@ impl Projector<'_> {
                 return Err(format!(
                     "SELL {} is marked POSITION_CLOSE for {asset} but no long position exists",
                     event.source
-                ));
+                )
+                .into());
             }
             if quantity > long_quantity {
-                return Err(format!("SELL {} is marked POSITION_CLOSE for {quantity} units of {asset} but only {long_quantity} are long", event.source));
+                return Err(format!("SELL {} is marked POSITION_CLOSE for {quantity} units of {asset} but only {long_quantity} are long", event.source).into());
             }
         }
         if info.requires_explicit_short_intent {
@@ -1240,12 +1326,18 @@ impl Projector<'_> {
                 return Err(format!(
                     "SELL {} is marked POSITION_OPEN for {asset} while a long position exists",
                     event.source
-                ));
+                )
+                .into());
             }
             if !open_short && existing < Decimal::ZERO {
-                return Err(format!(
-                    "SELL {} would increase short {asset} without Sell Short intent",
-                    event.source
+                return Err(ActivityRejection::with_reason(
+                    format!(
+                        "SELL {} would increase short {asset} without Sell Short intent",
+                        event.source
+                    ),
+                    ActivityReason::SellShortIntentRequired {
+                        asset: asset.to_string(),
+                    },
                 ));
             }
         }
@@ -1336,11 +1428,16 @@ impl Projector<'_> {
                 run,
             );
         } else {
-            run.diagnostics.push(Diagnostic::warning(
-                DiagnosticCode::NoPositionToReduce,
-                event.source.as_str(),
-                format!("SELL of non-existent position {asset}; cash effect only"),
-            ));
+            run.diagnostics.push(
+                Diagnostic::warning(
+                    DiagnosticCode::NoPositionToReduce,
+                    event.source.as_str(),
+                    format!("SELL of non-existent position {asset}; cash effect only"),
+                )
+                .with_reason(Some(ActivityReason::SellWithoutPosition {
+                    asset: asset.to_string(),
+                })),
+            );
         }
         Ok(())
     }
@@ -1365,7 +1462,7 @@ impl Projector<'_> {
         account_currency: &str,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<Decimal, String> {
+    ) -> Result<Decimal, ActivityRejection> {
         let position_currency = position.currency.clone();
         let other_side = match side {
             Side::Buy => negative_effective_abs(position),
@@ -1467,7 +1564,7 @@ impl Projector<'_> {
         position_currency: &str,
         account_currency: &str,
         run: &mut RunLog,
-    ) -> Result<Lot, String> {
+    ) -> Result<Lot, ActivityRejection> {
         let compiled_basis = {
             let price_basis = checked(
                 arith::product(&[quantity, unit_price, info.contract_multiplier]),
@@ -1522,7 +1619,7 @@ impl Projector<'_> {
         cache: &BTreeMap<String, StagedLots>,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         if let Some(cash) = &event.cash {
             if !cash.amount.is_zero() {
                 *state
@@ -1680,7 +1777,7 @@ impl Projector<'_> {
             if cover_abs.is_zero() && added_lots.is_empty() {
                 // Rejected whole, so the fee is not paid either; the lots
                 // stay cached.
-                return Err(format!("TRANSFER_IN booked none of the cached lots for {asset} (negative lots not allowed); cache kept"));
+                return Err(format!("TRANSFER_IN booked none of the cached lots for {asset} (negative lots not allowed); cache kept").into());
             }
             effects.cache_removals.push(g.to_string());
         }
@@ -1786,7 +1883,7 @@ impl Projector<'_> {
         quantity: Decimal,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         if let Some(cash) = &event.cash {
             if !cash.amount.is_zero() {
                 *state
@@ -1881,13 +1978,175 @@ impl Projector<'_> {
 
     // ----------------------------------------------------- corporate actions
 
+    /// A conversion (rules R7.5): relieves `from_quantity` of `from_asset` by
+    /// the account's method at cost, and opens each relieved lot as
+    /// `to_asset` at the ratio of the units, keeping its cost, charges,
+    /// acquisition and rates. No cash, contribution or flow. Rejected whole
+    /// unless the account holds the units long, does not hold `to_asset`
+    /// short, keeps both in one currency and records no split of either that
+    /// day.
+    #[allow(clippy::too_many_arguments)]
+    fn convert(
+        &self,
+        event: &EconomicEvent,
+        state: &mut AccountState,
+        from_asset: &AssetId,
+        from_quantity: Decimal,
+        to_asset: &AssetId,
+        to_quantity: Decimal,
+        arriving: &ActivityId,
+        effects: &mut SideEffects,
+        run: &mut RunLog,
+    ) -> Result<(), ActivityRejection> {
+        let account_id = state.account.clone();
+        let account_currency = state.currency.clone();
+        for asset in [from_asset, to_asset] {
+            if self
+                .split_days
+                .contains(&(account_id.clone(), asset.clone(), event.date))
+            {
+                return Err(format!(
+                    "the account records a split of {asset} on {}, the day of the conversion",
+                    event.date
+                )
+                .into());
+            }
+        }
+        let Some(from_position) = state.positions.get(from_asset) else {
+            return Err(format!("the account holds no {from_asset} to convert").into());
+        };
+        let from_currency = from_position.currency.clone();
+        if from_position.quantity < from_quantity - QUANTITY_THRESHOLD {
+            return Err(ActivityRejection::with_reason(
+                format!(
+                    "the account holds {} {from_asset}, fewer than the {} that leave",
+                    from_position.quantity.normalize(),
+                    from_quantity.normalize()
+                ),
+                ActivityReason::ConversionInsufficientHoldings {
+                    asset: from_asset.to_string(),
+                    requested: from_quantity.normalize().to_string(),
+                    held: from_position.quantity.normalize().to_string(),
+                },
+            ));
+        }
+        let info = self.asset_facts(to_asset, &from_currency);
+        let to_currency = match state.positions.get(to_asset) {
+            Some(position) if position.lots.iter().any(|lot| lot.quantity < Decimal::ZERO) => {
+                return Err(format!("the account holds {to_asset} short").into());
+            }
+            Some(position) => position.currency.clone(),
+            None => info
+                .quote_currency
+                .clone()
+                .unwrap_or_else(|| from_currency.clone()),
+        };
+        if to_currency != from_currency {
+            return Err(ActivityRejection::with_reason(format!(
+                "{from_asset} is held in {from_currency} and {to_asset} in {to_currency}; a conversion keeps one currency"
+            ), ActivityReason::ConversionCurrencyMismatch { from_asset: from_asset.to_string(), from_currency: from_currency.to_string(), to_asset: to_asset.to_string(), to_currency: to_currency.to_string() }));
+        }
+        // A position holds no fewer units: fewer leaving could relieve nothing,
+        // and fewer arriving would drop the lots' cost.
+        for (asset, units) in [(from_asset, from_quantity), (to_asset, to_quantity)] {
+            if !is_significant(units) {
+                return Err(format!(
+                    "{} {asset} is less than the smallest quantity a position holds",
+                    units.normalize()
+                )
+                .into());
+            }
+        }
+
+        let from_position = state
+            .positions
+            .get_mut(from_asset)
+            .ok_or_else(|| format!("the account holds no {from_asset} to convert"))?;
+        let reduction = self.relieve_lots(
+            &account_id,
+            account_currency.as_str(),
+            event,
+            from_position,
+            from_quantity,
+            false,
+        )?;
+        if is_significant(from_quantity - reduction.quantity_reduced) {
+            return Err(format!(
+                "only {} of the {} {from_asset} could be relieved",
+                reduction.quantity_reduced.normalize(),
+                from_quantity.normalize()
+            )
+            .into());
+        }
+        self.record_reduction(
+            &account_id,
+            from_asset,
+            event,
+            &reduction,
+            Proceeds::AtCost,
+            &from_currency,
+            effects,
+            run,
+        )?;
+
+        // Each relieved lot opens as the arriving asset: its units after
+        // splits times the ratio, its price per unit divided alike, the rest
+        // as it was. The last lot takes the rounding.
+        let ratio = checked(arith::div(to_quantity, from_quantity), "conversion ratio")?;
+        let count = reduction.removed_lots.len();
+        let mut opened = Decimal::ZERO;
+        let mut lots = Vec::with_capacity(count);
+        for (index, lot) in reduction.removed_lots.iter().enumerate() {
+            let factor = checked(arith::mul(lot.split_ratio, ratio), "conversion factor")?;
+            let units = if index + 1 == count {
+                to_quantity - opened
+            } else {
+                checked(arith::mul(lot.quantity, factor), "converted units")?
+            };
+            if units <= Decimal::ZERO {
+                return Err(format!(
+                    "the conversion of {from_asset} into {to_asset} opens no units for a lot"
+                )
+                .into());
+            }
+            opened += units;
+            lots.push(Lot {
+                quantity: units,
+                original_quantity: units,
+                acquisition_price: checked(
+                    arith::div(lot.acquisition_price, factor),
+                    "converted price",
+                )?,
+                split_ratio: Decimal::ONE,
+                ..lot.clone()
+            });
+        }
+        let opening_base: Vec<_> = lots
+            .iter()
+            .map(|lot| self.lot_book_cost(lot, to_currency.as_str(), self.base()))
+            .collect();
+        let info = AssetFacts {
+            quote_currency: Some(to_currency),
+            ..info
+        };
+        let to_position = self.position_mut(state, to_asset, &info, event);
+        add_transferred_lots(
+            to_position,
+            arriving.as_str(),
+            &lots,
+            &opening_base,
+            info.allows_negative_lots,
+        )?;
+        Ok(())
+    }
+
     fn split(
         &self,
         event: &EconomicEvent,
         state: &mut AccountState,
         asset: &AssetId,
         ratio: Decimal,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         let Some(position) = state.positions.get_mut(asset) else {
             return Ok(());
         };
@@ -1915,7 +2174,21 @@ impl Projector<'_> {
         quantity: Decimal,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
+        // An expiry ends an option contract. Booked against a stock it would
+        // remove shares at zero proceeds, so it changes nothing instead. An
+        // untyped asset may be a legacy option and still books.
+        if self.asset_facts(asset, &event.currency).instrument == InstrumentClass::NotOption {
+            return Err(ActivityRejection::with_reason(
+                format!(
+                    "OPTION_EXPIRY {} names {asset}, which is not an option contract",
+                    event.source
+                ),
+                ActivityReason::OptionExpiryNotOption {
+                    asset: asset.to_string(),
+                },
+            ));
+        }
         let account_id = state.account.clone();
         let account_currency = state.currency.clone();
         let Some(position) = state.positions.get_mut(asset) else {
@@ -2000,7 +2273,7 @@ impl Projector<'_> {
         state: &AccountState,
         position_currency: &Currency,
         amount: Decimal,
-    ) -> Result<(Decimal, Option<Decimal>, Option<Decimal>), String> {
+    ) -> Result<(Decimal, Option<Decimal>, Option<Decimal>), ActivityRejection> {
         let account_currency = &state.currency;
         let (in_position, ..) = in_position_currency(
             self.fx,
@@ -2044,9 +2317,12 @@ impl Projector<'_> {
         amount: Decimal,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         if amount.is_zero() {
-            return Err("a return of capital needs an amount".to_string());
+            return Err(ActivityRejection::with_reason(
+                "a return of capital needs an amount".to_string(),
+                ActivityReason::ReturnOfCapitalAmountRequired,
+            ));
         }
         let account = state.account.clone();
         let account_currency = state.currency.clone();
@@ -2057,7 +2333,7 @@ impl Projector<'_> {
             }
         }
         let Some(position_currency) = state.positions.get(asset).map(|p| p.currency.clone()) else {
-            return Err(format!("return of capital of {asset} with no units held"));
+            return Err(format!("return of capital of {asset} with no units held").into());
         };
         let (in_position, in_account, in_base) =
             self.adjustment_amounts(event, state, &position_currency, amount)?;
@@ -2097,6 +2373,8 @@ impl Projector<'_> {
                 realized_pnl: (stored_proceeds - stored_cost).round_dp(STORED_PRECISION),
                 proceeds_base: stored_proceeds_base,
                 cost_basis_base: stored_cost_base,
+                proceeds_base_known: proceeds_base.is_some(),
+                cost_basis_base_known: cost_base.is_some(),
                 realized_pnl_base: if proceeds_base.is_some() && cost_base.is_some() {
                     (stored_proceeds_base - stored_cost_base).round_dp(STORED_PRECISION)
                 } else {
@@ -2223,14 +2501,12 @@ impl Projector<'_> {
         state: &mut AccountState,
         asset: &AssetId,
         amount: Decimal,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         if amount.is_zero() {
-            return Err("a notional distribution needs an amount".to_string());
+            return Err("a notional distribution needs an amount".to_string().into());
         }
         let Some((long, units, held)) = Self::long_units(state, asset) else {
-            return Err(format!(
-                "notional distribution of {asset} with no units held"
-            ));
+            return Err(format!("notional distribution of {asset} with no units held").into());
         };
         let account_currency = state.currency.clone();
         let base = self.facts.policy.base_currency.clone();
@@ -2240,11 +2516,17 @@ impl Projector<'_> {
         let (in_position, in_account, in_base) =
             self.adjustment_amounts(event, state, &position_currency, amount)?;
         let missing = |target: &Currency| {
-            format!(
-                "no {}->{} rate on {}",
+            conversion_failure(
+                self.fx,
                 event.currency.as_str(),
                 target.as_str(),
-                event.date
+                event.date,
+                format!(
+                    "no {}->{} rate on {}",
+                    event.currency.as_str(),
+                    target.as_str(),
+                    event.date
+                ),
             )
         };
         let in_account = in_account.ok_or_else(|| missing(&account_currency))?;
@@ -2288,7 +2570,7 @@ impl Projector<'_> {
         amount: Decimal,
         target: &str,
         account_currency: &Currency,
-    ) -> Result<Decimal, String> {
+    ) -> Result<Decimal, ActivityRejection> {
         let from = event.currency.as_str();
         if from == target {
             return Ok(amount);
@@ -2300,7 +2582,15 @@ impl Projector<'_> {
         }
         self.fx
             .convert(amount, from, target, event.date)
-            .ok_or_else(|| format!("no {from}->{target} rate on {}", event.date))
+            .ok_or_else(|| {
+                conversion_failure(
+                    self.fx,
+                    from,
+                    target,
+                    event.date,
+                    format!("no {from}->{target} rate on {}", event.date),
+                )
+            })
     }
 
     // ------------------------------------------------------------- helpers
@@ -2346,7 +2636,7 @@ impl Projector<'_> {
         event: &EconomicEvent,
         position_currency: &str,
         account_currency: &str,
-    ) -> Result<(Decimal, Decimal, Decimal, Option<Decimal>), String> {
+    ) -> Result<(Decimal, Decimal, Decimal, Option<Decimal>), ActivityRejection> {
         in_position_currency(
             self.fx,
             event,
@@ -2363,7 +2653,7 @@ impl Projector<'_> {
         event: &EconomicEvent,
         position_currency: &str,
         account_currency: &str,
-    ) -> Result<Decimal, String> {
+    ) -> Result<Decimal, ActivityRejection> {
         let activity_currency = event.currency.as_str();
         if position_currency.is_empty() || position_currency == activity_currency {
             return Ok(amount);
@@ -2377,7 +2667,8 @@ impl Projector<'_> {
         }
         self.fx
             .convert(amount, activity_currency, position_currency, event.date)
-            .ok_or_else(|| format!("failed to convert sell proceeds from {activity_currency} to {position_currency} on {}", event.date))
+            .ok_or_else(|| conversion_failure(self.fx, activity_currency, position_currency, event.date,
+                format!("failed to convert sell proceeds from {activity_currency} to {position_currency} on {}", event.date)))
     }
 
     /// Legacy `convert_position_amount_to_account_currency` (soft failure).
@@ -2647,7 +2938,7 @@ impl Projector<'_> {
         position_currency: &Currency,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         self.record_disposals(
             account,
             asset,
@@ -2674,7 +2965,7 @@ impl Projector<'_> {
         lot: &Lot,
         event: &EconomicEvent,
         position_currency: &Currency,
-    ) -> Result<LotClosure, String> {
+    ) -> Result<LotClosure, ActivityRejection> {
         let original_quantity = if lot.original_quantity.is_zero() {
             lot.quantity
         } else {
@@ -2732,7 +3023,7 @@ impl Projector<'_> {
         position_currency: &Currency,
         effects: &mut SideEffects,
         run: &mut RunLog,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActivityRejection> {
         if removed.is_empty() || total_quantity.is_zero() {
             return Ok(());
         }
@@ -2809,6 +3100,8 @@ impl Projector<'_> {
                 realized_pnl: (stored_proceeds - stored_cost).round_dp(STORED_PRECISION),
                 proceeds_base: stored_proceeds_base,
                 cost_basis_base: stored_cost_base,
+                proceeds_base_known: proceeds_base.is_some(),
+                cost_basis_base_known: cost_basis_base.is_some(),
                 realized_pnl_base,
                 currency: position_currency.clone(),
                 fx_rate_to_base: disposal_rate,
@@ -2852,7 +3145,7 @@ pub(crate) fn in_position_currency(
     [unit_price, fee, tax]: [Decimal; 3],
     position_currency: &str,
     account_currency: &str,
-) -> Result<(Decimal, Decimal, Decimal, Option<Decimal>), String> {
+) -> Result<(Decimal, Decimal, Decimal, Option<Decimal>), ActivityRejection> {
     let activity_currency = event.currency.as_str();
     if position_currency.is_empty() || position_currency == activity_currency {
         return Ok((unit_price, fee, tax, None));
@@ -2874,10 +3167,10 @@ pub(crate) fn in_position_currency(
     let convert = |amount: Decimal, what: &str| {
         fx.convert(amount, activity_currency, position_currency, event.date)
             .ok_or_else(|| {
-                format!(
+                conversion_failure(fx, activity_currency, position_currency, event.date, format!(
                     "failed to convert {what} from {activity_currency} to {position_currency} on {}",
                     event.date
-                )
+                ))
             })
     };
     let price = convert(unit_price, "unit_price")?;
@@ -2923,7 +3216,11 @@ fn is_significant(quantity: Decimal) -> bool {
     quantity.abs() >= QUANTITY_THRESHOLD
 }
 
-fn proportional(amount: Decimal, part: Decimal, total: Decimal) -> Result<Decimal, String> {
+fn proportional(
+    amount: Decimal,
+    part: Decimal,
+    total: Decimal,
+) -> Result<Decimal, ActivityRejection> {
     if amount.is_zero() || part.is_zero() || total.is_zero() {
         Ok(Decimal::ZERO)
     } else {
@@ -2936,7 +3233,7 @@ fn effective_unit_price(
     gross_abs: Decimal,
     unit_price: Decimal,
     multiplier: Decimal,
-) -> Result<Decimal, String> {
+) -> Result<Decimal, ActivityRejection> {
     if !quantity.is_zero() && !gross_abs.is_zero() {
         checked(arith::div(gross_abs, quantity), "unit price")
     } else {
@@ -2955,11 +3252,18 @@ fn report_shortfall(
     run: &mut RunLog,
 ) {
     if reduced.is_zero() {
-        run.diagnostics.push(Diagnostic::warning(
-            DiagnosticCode::NoPositionToReduce,
-            event.source.as_str(),
-            format!("{verb} of {asset} with no units held; nothing disposed"),
-        ));
+        run.diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticCode::NoPositionToReduce,
+                event.source.as_str(),
+                format!("{verb} of {asset} with no units held; nothing disposed"),
+            )
+            .with_reason((verb == "SELL").then(|| {
+                ActivityReason::SellWithoutPosition {
+                    asset: asset.to_string(),
+                }
+            })),
+        );
     } else if is_significant(requested - reduced) {
         run.diagnostics.push(Diagnostic::warning(
             DiagnosticCode::InsufficientQuantity,
@@ -2968,7 +3272,11 @@ fn report_shortfall(
                 "{verb} of {requested} {asset} with only {reduced} held; the {} units beyond the position have no lot",
                 requested - reduced
             ),
-        ));
+        ).with_reason(Some(ActivityReason::InsufficientQuantity {
+            action: verb.to_string(), asset: asset.to_string(),
+            requested: requested.normalize().to_string(), held: reduced.normalize().to_string(),
+            excess: (requested - reduced).normalize().to_string(),
+        })));
     }
 }
 
@@ -2980,7 +3288,7 @@ fn capitalize_fee(
     fee: Decimal,
     allows_negative: bool,
     fx: &FxResolver<'_>,
-) -> Result<(), String> {
+) -> Result<(), ActivityRejection> {
     let delivered: Vec<usize> = (0..position.lots.len())
         .filter(|i| position.lots[*i].source_event.as_ref() == Some(event))
         .collect();
@@ -3013,7 +3321,7 @@ fn spread_by_units(
     total: Decimal,
     units: &[Decimal],
     held: Decimal,
-) -> Result<Vec<Decimal>, String> {
+) -> Result<Vec<Decimal>, ActivityRejection> {
     let mut shares = Vec::with_capacity(units.len());
     let mut remaining = total;
     for (k, &part) in units.iter().enumerate() {
@@ -3036,7 +3344,7 @@ fn spread_return_of_capital(
     costs: &[Decimal],
     units: &[Decimal],
     held: Decimal,
-) -> Result<Vec<Decimal>, String> {
+) -> Result<Vec<Decimal>, ActivityRejection> {
     let basis: Decimal = costs.iter().sum();
     if total < basis {
         return spread_by_units(total, costs, basis);
@@ -3089,7 +3397,7 @@ fn add_fee(
     fee: Decimal,
     position_currency: &str,
     fx: &FxResolver<'_>,
-) -> Result<(), String> {
+) -> Result<(), ActivityRejection> {
     if fee.is_zero() {
         return Ok(());
     }
@@ -3170,7 +3478,10 @@ fn sort_lots(position: &mut Position) {
 }
 
 /// Legacy `recalculate_aggregates_with_policy`.
-fn recalculate_aggregates(position: &mut Position, allows_negative: bool) -> Result<(), String> {
+fn recalculate_aggregates(
+    position: &mut Position,
+    allows_negative: bool,
+) -> Result<(), ActivityRejection> {
     let quantity: Decimal = position.lots.iter().map(Lot::effective_quantity).sum();
     let cost_basis: Decimal = position.lots.iter().map(|l| l.cost_basis).sum();
     position.quantity = quantity;
@@ -3206,7 +3517,7 @@ fn new_lot(
     event: &EconomicEvent,
     fx_used: Option<Decimal>,
     book: &BookBasis,
-) -> Result<Lot, String> {
+) -> Result<Lot, ActivityRejection> {
     Ok(Lot {
         id,
         acquisition: event.timestamp,
@@ -3244,7 +3555,7 @@ fn add_lot(
     event: &EconomicEvent,
     fx_used: Option<Decimal>,
     book: &BookBasis,
-) -> Result<Decimal, String> {
+) -> Result<Decimal, ActivityRejection> {
     if !quantity.is_sign_positive() || quantity.is_zero() {
         return Ok(Decimal::ZERO);
     }
@@ -3268,15 +3579,12 @@ fn open_lot_signed(
     fx_used: Option<Decimal>,
     book: &BookBasis,
     allows_negative: bool,
-) -> Result<Decimal, String> {
+) -> Result<Decimal, ActivityRejection> {
     if signed_quantity.is_zero() {
         return Ok(Decimal::ZERO);
     }
     if signed_quantity.is_sign_negative() && !allows_negative {
-        return Err(format!(
-            "negative lots are not allowed for {}",
-            position.asset
-        ));
+        return Err(format!("negative lots are not allowed for {}", position.asset).into());
     }
     let lot = new_lot(id, signed_quantity, price, fee, tax, event, fx_used, book)?;
     let cost_basis = lot.cost_basis;
@@ -3293,7 +3601,7 @@ fn add_transferred_lots(
     lots: &[Lot],
     opening_base: &[Option<Decimal>],
     allows_negative: bool,
-) -> Result<Decimal, String> {
+) -> Result<Decimal, ActivityRejection> {
     let mut total = Decimal::ZERO;
     for (i, source) in lots.iter().enumerate() {
         if source.quantity.is_zero() || (source.quantity.is_sign_negative() && !allows_negative) {
@@ -3337,7 +3645,10 @@ fn add_transferred_lots(
 
 /// Splits single-signed lots into (cover, residual), each lot covering the
 /// effective units `taken` names for it.
-fn split_lots_by_cover(lots: &[Lot], taken: &[Decimal]) -> Result<(Vec<Lot>, Vec<Lot>), String> {
+fn split_lots_by_cover(
+    lots: &[Lot],
+    taken: &[Decimal],
+) -> Result<(Vec<Lot>, Vec<Lot>), ActivityRejection> {
     let mut cover = Vec::new();
     let mut residual = Vec::new();
     for (lot, &take) in lots.iter().zip(taken) {
@@ -3404,9 +3715,9 @@ fn relieve(
     requested: Decimal,
     negative: bool,
     method: CostBasisMethod,
-) -> Result<Reduction, String> {
+) -> Result<Reduction, ActivityRejection> {
     if !requested.is_sign_positive() || requested.is_zero() {
-        return Err("quantity to reduce must be positive".to_string());
+        return Err("quantity to reduce must be positive".to_string().into());
     }
     let side_ok = |lot: &Lot| {
         if negative {
@@ -3542,7 +3853,7 @@ fn split_for_cover(
     lots: &[Lot],
     cover_abs: Decimal,
     method: CostBasisMethod,
-) -> Result<(Vec<Lot>, Vec<Lot>), String> {
+) -> Result<(Vec<Lot>, Vec<Lot>), ActivityRejection> {
     let taken = units_taken(lots, |_| true, cover_abs, method)?;
     split_lots_by_cover(lots, &taken)
 }
@@ -3561,7 +3872,7 @@ fn units_taken(
     eligible: impl Fn(&Lot) -> bool,
     units: Decimal,
     method: CostBasisMethod,
-) -> Result<Vec<Decimal>, String> {
+) -> Result<Vec<Decimal>, ActivityRejection> {
     let held = |lot: &Lot| {
         if eligible(lot) {
             lot.effective_quantity().abs()
@@ -3615,7 +3926,7 @@ fn units_taken(
 /// compare at `UNIT_COST_DIGITS` significant digits: equal costs reached by
 /// different divisions differ in their last digits, and that must not reorder
 /// them.
-fn relief_order(lots: &[Lot], method: CostBasisMethod) -> Result<Vec<usize>, String> {
+fn relief_order(lots: &[Lot], method: CostBasisMethod) -> Result<Vec<usize>, ActivityRejection> {
     let mut order: Vec<usize> = (0..lots.len()).collect();
     match method {
         CostBasisMethod::Lifo => {
@@ -3633,7 +3944,7 @@ fn relief_order(lots: &[Lot], method: CostBasisMethod) -> Result<Vec<usize>, Str
                     let cost = checked(arith::div(lot.cost_basis.abs(), units), "cost per unit")?;
                     Ok(cost.round_sf(UNIT_COST_DIGITS).unwrap_or(cost))
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, ActivityRejection>>()?;
             order.sort_by(|&a, &b| {
                 unit_costs[b]
                     .cmp(&unit_costs[a])

@@ -103,10 +103,14 @@ export {
   getImportTemplate,
   getBrokerSyncProfile,
   findTransferMatchCandidates,
+  convertToInternalTransfer,
+  reviewConvertToTransferSplitEffects,
   getTransferPairForActivity,
   getAccountImportMapping,
   linkAccountTemplate,
   linkTransferActivities,
+  linkTransferPairs,
+  reviewTransferMatches,
   unlinkTransferActivities,
   getActivities,
   importActivities,
@@ -119,6 +123,8 @@ export {
   saveActivities,
   searchActivities,
   updateActivity,
+  reviewActivitiesSplitEffects,
+  reviewInternalTransferPairSplitEffects,
 } from "../shared/activities";
 export { parseCsv } from "./activities";
 
@@ -184,6 +190,7 @@ export {
   checkHoldingsImport,
   deleteSnapshot,
   getAssetHoldings,
+  getAssetHoldingsScope,
   getAssetLots,
   getHistoricalValuations,
   getHolding,
@@ -246,6 +253,8 @@ export {
   deleteContributionLimit,
   getContributionLimit,
   updateContributionLimit,
+  getContributionLimitDetails,
+  setContributionActivityExcluded,
 } from "../shared/contribution-limits";
 
 // Exchange Rates Commands
@@ -265,6 +274,7 @@ export {
   isSpendingEnabled,
   listCategorizationRules,
   rerunCategorizationRules,
+  rerunCategorizationRulesDetailed,
   SPEND_CATEGORY_KIND_TO_TAXONOMY_ID,
   TAXONOMY_ID_TO_SPEND_CATEGORY_KIND,
   updateCategorizationRule,
@@ -385,10 +395,11 @@ export {
 // Allocation Target Commands
 export {
   archiveAllocationTarget,
-  calculateRebalancePlan,
+  calculateAllocationWorksheet,
   canonicalizeEligibleAssetIds,
   createAllocationTarget,
   deleteAllocationTarget,
+  generateCalculatedAdjustments,
   getAllocationTargetDrift,
   getAllocationTarget,
   listAllocationTargetWeights,
@@ -402,6 +413,7 @@ export {
 
 // Data Export Commands
 export { exportDataFile } from "./exports";
+export { getDataExportSummary } from "../shared/exports";
 
 // ============================================================================
 // Platform-specific modules (different implementations for web vs desktop)
@@ -416,6 +428,7 @@ export {
   listAgentAuditLog,
   purgeAgentAuditLog,
   deleteAgentAccessToken,
+  updateAgentAccessTokenScopes,
   setMcpAuditEnabled,
   setMcpEnabled,
   setMcpAutoStart,
@@ -429,6 +442,7 @@ export { streamAiChat } from "./ai-streaming";
 // Event Listeners (web-specific SSE implementation)
 export {
   listenAssetClassificationsChanged,
+  listenBackButton,
   listenBrokerSyncComplete,
   listenBrokerSyncError,
   listenBrokerSyncStart,
@@ -444,6 +458,7 @@ export {
   listenMarketSyncStart,
   listenNavigateToRoute,
   listenPortfolioUpdateComplete,
+  listenGoalSummariesUpdated,
   listenPortfolioUpdateError,
   listenPortfolioUpdateStart,
 } from "./events";

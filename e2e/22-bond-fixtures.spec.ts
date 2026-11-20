@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import {
   BASE_URL,
   completeOnboardingIfNeeded,
@@ -138,8 +138,8 @@ test("bond UI entry, identifier reuse, provider terms, prices, and holdings use 
   // through the real security dialog, then select the saved asset in the buy form.
   const note = securities[1];
   await gotoAppPath(page, "/settings/securities");
-  await page.getByRole("button", { name: "Add Security", exact: true }).click();
-  const securityDialog = page.getByRole("dialog", { name: "Add Security", exact: true });
+  await page.getByRole("button", { name: "Add security", exact: true }).click();
+  const securityDialog = page.getByRole("dialog", { name: "Add security", exact: true });
   await expect(securityDialog).toBeVisible();
   await securityDialog.getByLabel("Symbol", { exact: true }).fill(note.cusip);
   await securityDialog.getByLabel("Name", { exact: true }).fill("Fixture Treasury Note");
@@ -148,9 +148,9 @@ test("bond UI entry, identifier reuse, provider terms, prices, and holdings use 
   await securityDialog.getByRole("combobox", { name: "Currency", exact: true }).click();
   await page.getByPlaceholder("Search currency...").fill("USD");
   await page.getByRole("option", { name: /USD/ }).first().click();
-  await securityDialog.getByRole("combobox", { name: "Quote Mode", exact: true }).click();
+  await securityDialog.getByRole("combobox", { name: "Quote mode", exact: true }).click();
   await page.getByRole("option", { name: "Market (auto-sync)", exact: true }).click();
-  await securityDialog.getByRole("button", { name: "Create Security", exact: true }).click();
+  await securityDialog.getByRole("button", { name: "Create security", exact: true }).click();
   await expect(securityDialog).not.toBeVisible();
   await expect
     .poll(async () => (await getAssets()).find((asset) => asset.instrumentSymbol === note.isin)?.id)
@@ -300,7 +300,12 @@ test("bond UI entry, identifier reuse, provider terms, prices, and holdings use 
             assetId: assetIds[security.label],
           });
           const response = await page.request.get(`${api}/holdings/item?${params}`);
-          expect(response.ok()).toBeTruthy();
+          // The recalculation above withholds holdings until it has rebuilt them.
+          if (response.status() === 503) {
+            expect((await response.json()).errorCode).toBe("HOLDINGS_PENDING");
+            return null;
+          }
+          expect(response.ok(), await response.text()).toBeTruthy();
           const holding = (await response.json()) as HoldingResponse | null;
           // The jobs the purchases queued may not have written it yet.
           if (!holding) return null;

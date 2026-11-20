@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { useDateFormatting } from "@wealthfolio/ui";
+import { useDateFormatting, useNumberFormatting } from "@wealthfolio/ui";
 import {
   discardDatabaseBackupImport,
   getDatabaseEncryptionStatus,
@@ -28,6 +28,7 @@ import { PasswordInput } from "@wealthfolio/ui/components/ui/password-input";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Label } from "@wealthfolio/ui/components/ui/label";
 import { BackupAlert, PendingIcon } from "./backup-ui";
+import { Alert, AlertDescription, AlertTitle } from "@wealthfolio/ui/components/ui/alert";
 
 export function BackupImportDialog({
   filename,
@@ -43,7 +44,8 @@ export function BackupImportDialog({
   /** Fetches a new caller preview after this one was used; the caller remounts the dialog. */
   onRetry?: () => Promise<void>;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
+  const numbers = useNumberFormatting();
   const formatting = useDateFormatting();
   const id = useId();
   const reduceMotion = useReducedMotion();
@@ -63,14 +65,39 @@ export function BackupImportDialog({
   const previewId = useRef<string | null>(initialPreview?.id ?? null);
   // StrictMode remounts once in development, so a caller's preview is discarded on close only.
   const callerPreviewId = useRef(initialPreview?.id);
-  useEffect(
-    () => () => {
-      operation.current?.abort();
-      if (previewId.current && previewId.current !== callerPreviewId.current)
-        void discardDatabaseBackupImport(previewId.current).catch(() => undefined);
-    },
-    [],
-  );
+  // The title as last shown; React lets go of `stepHeading` when the dialog hides or unmounts.
+  const shownTitle = useRef<HTMLHeadingElement | null>(null);
+  const hiddenWatch = useRef<MutationObserver | null>(null);
+  useEffect(() => {
+    hiddenWatch.current?.disconnect();
+    hiddenWatch.current = null;
+    const callerId = callerPreviewId.current;
+    return () => {
+      const release = () => {
+        operation.current?.abort();
+        if (previewId.current && previewId.current !== callerId)
+          void discardDatabaseBackupImport(previewId.current).catch(() => undefined);
+      };
+      // A phone screen kept under another one (a hidden <Activity>) runs this
+      // cleanup too, but keeps its nodes in the page: the preview stays on
+      // screen there, to restore once the screen is shown again. An unmounted
+      // dialog's nodes are gone by the time this runs.
+      const title = shownTitle.current;
+      if (!title?.isConnected) {
+        release();
+        return;
+      }
+      // A hidden screen that is dropped without being shown again runs no
+      // cleanup; its nodes leaving the page is the only sign.
+      const watch = new MutationObserver(() => {
+        if (title.isConnected) return;
+        watch.disconnect();
+        release();
+      });
+      watch.observe(document.body, { childList: true, subtree: true });
+      hiddenWatch.current = watch;
+    };
+  }, []);
   useEffect(() => {
     if (scrollBody.current) scrollBody.current.scrollTop = 0;
     if (preview) stepHeading.current?.focus();
@@ -172,23 +199,30 @@ export function BackupImportDialog({
   return (
     <Dialog
       open
-      onOpenChange={(open) => {
-        if (!open) close();
+      onOpenChange={(open, details) => {
+        if (open) return;
+        // A running restore can't be dismissed.
+        if (pending === "restore") {
+          details.cancel();
+          return;
+        }
+        close();
       }}
     >
       <DialogContent
         className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md"
         mobileClassName="h-[min(42rem,85dvh)]"
         showCloseButton={pending !== "restore"}
-        onEscapeKeyDown={(event) => {
-          if (pending === "restore") event.preventDefault();
-        }}
-        onPointerDownOutside={(event) => {
-          if (pending === "restore") event.preventDefault();
-        }}
       >
-        <DialogHeader className={restored ? "sr-only" : "shrink-0 px-6 pb-4 pt-6 text-left"}>
-          <DialogTitle ref={stepHeading} tabIndex={-1} className="pr-8 outline-none">
+        <DialogHeader className={restored ? "sr-only" : "shrink-0 px-6 pt-6 pb-4 text-start"}>
+          <DialogTitle
+            ref={(node) => {
+              stepHeading.current = node;
+              if (node) shownTitle.current = node;
+            }}
+            tabIndex={-1}
+            className="pe-8 outline-none"
+          >
             {t(
               restored
                 ? "settings:backup_restored_title"
@@ -211,7 +245,7 @@ export function BackupImportDialog({
               initial={reduceMotion ? false : { scale: 0.6, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ type: "spring", stiffness: 200, damping: 15 }}
-              className="bg-success/10 text-success flex size-20 items-center justify-center rounded-full"
+              className="text-success-subtle-foreground flex size-20 items-center justify-center rounded-full bg-current/15"
             >
               <Icons.CheckCircle className="size-10" aria-hidden />
             </motion.div>
@@ -253,8 +287,8 @@ export function BackupImportDialog({
                         ].map(({ label, value }) => (
                           <div key={label} className="flex flex-col gap-0.5 px-4">
                             <dt className="text-muted-foreground text-xs">{label}</dt>
-                            <dd className="order-first text-xl font-semibold tabular-nums tracking-tight">
-                              {value.toLocaleString(i18n.resolvedLanguage)}
+                            <dd className="order-first text-xl font-semibold tracking-tight tabular-nums">
+                              {numbers.formatDecimal(value)}
                             </dd>
                           </div>
                         ))}
@@ -270,20 +304,13 @@ export function BackupImportDialog({
                         </p>
                       )}
                     </section>
-                    <div className="border-warning/30 bg-warning/10 flex gap-3 rounded-lg border p-3">
-                      <Icons.AlertTriangle
-                        className="text-warning mt-0.5 size-4 shrink-0"
-                        aria-hidden
-                      />
-                      <div className="space-y-1">
-                        <p className="text-sm font-medium">
-                          {t("settings:backup_replace_warning")}
-                        </p>
-                        <p className="text-muted-foreground text-xs leading-relaxed">
-                          {t("settings:backup_restore_safeguard")}
-                        </p>
-                      </div>
-                    </div>
+                    <Alert variant="warning" className="p-3">
+                      <Icons.AlertTriangle aria-hidden />
+                      <AlertTitle>{t("settings:backup_replace_warning")}</AlertTitle>
+                      <AlertDescription className="text-xs leading-relaxed">
+                        {t("settings:backup_restore_safeguard")}
+                      </AlertDescription>
+                    </Alert>
                     <ul className="text-muted-foreground space-y-2 text-xs leading-relaxed">
                       {encryption.data && (
                         <li className="flex gap-2.5">
@@ -320,7 +347,7 @@ export function BackupImportDialog({
                             type="button"
                             variant="ghost"
                             size="icon-sm"
-                            className="pointer-coarse:size-11 shrink-0"
+                            className="shrink-0 pointer-coarse:size-11"
                             disabled={pending !== null}
                             onClick={() => void choose()}
                             aria-label={t("settings:recovery_change_file")}
@@ -368,7 +395,7 @@ export function BackupImportDialog({
                         <details className="text-muted-foreground group text-xs leading-relaxed">
                           <summary className="inline-flex cursor-pointer list-none items-center gap-1 py-1 [&::-webkit-details-marker]:hidden">
                             <Icons.ChevronRight
-                              className="size-3.5 transition-transform group-open:rotate-90"
+                              className="size-3.5 transition-transform group-open:rotate-90 rtl:rotate-180"
                               aria-hidden
                             />
                             {t("settings:backup_password_help_title")}
@@ -391,14 +418,16 @@ export function BackupImportDialog({
                 {error && <BackupAlert error={error} />}
               </motion.div>
             </div>
-            <DialogFooter className="bg-background shrink-0 border-t px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-4 sm:pb-6">
+            <DialogFooter className="bg-background shrink-0 border-t px-6 pt-4 pb-6 sm:pb-6">
               <Button
                 type="button"
                 variant="ghost"
                 disabled={pending === "restore"}
                 onClick={preview && !initialPreview ? back : close}
               >
-                {preview && !initialPreview && <Icons.ArrowLeft aria-hidden />}
+                {preview && !initialPreview && (
+                  <Icons.ArrowLeft aria-hidden className="rtl:rotate-180" />
+                )}
                 {t(preview && !initialPreview ? "common:back" : "common:cancel")}
               </Button>
               <Button
@@ -425,7 +454,9 @@ export function BackupImportDialog({
                         ? "settings:recovery_inspecting"
                         : "settings:recovery_inspect",
                 )}
-                {!pending && !preview && <Icons.ArrowRight aria-hidden />}
+                {!pending && !preview && (
+                  <Icons.ArrowRight aria-hidden className="rtl:rotate-180" />
+                )}
               </Button>
             </DialogFooter>
           </form>

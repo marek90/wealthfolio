@@ -41,17 +41,24 @@ const validateFile = async (container: HTMLElement) => {
   fireEvent.change(fileInput, {
     target: { files: [new File(["symbol,date,close\n"], "quotes.csv", { type: "text/csv" })] },
   });
-  fireEvent.click(await screen.findByRole("button", { name: /Validate File/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Validate file/ }));
 };
 
-const startOverButton = () => screen.getByRole("button", { name: /Start Over/ });
+const startOverButton = () => screen.getByRole("button", { name: /Start over/ });
 
-describe("MarketDataImportPage", () => {
+// findByRole keeps rerunning its role query while the upload step's real
+// 0.3-second Motion exit changes the DOM, so on shared CI runners the wait can
+// exceed 1s.
+const findImportButton = () =>
+  screen.findByRole("button", { name: /Import 1 quote/ }, { timeout: 5_000 });
+
+// Those waits can push a whole test past the default 5s.
+describe("MarketDataImportPage", { timeout: 15_000 }, () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("disables Start Over until validation finishes", async () => {
+  it("disables Start over until validation finishes", async () => {
     let finishValidation!: (quotes: QuoteImport[]) => void;
     adapterMocks.checkQuotesImport.mockReturnValue(
       new Promise<QuoteImport[]>((resolve) => (finishValidation = resolve)),
@@ -65,7 +72,7 @@ describe("MarketDataImportPage", () => {
 
     finishValidation([quote]);
 
-    expect(await screen.findByRole("button", { name: /Import 1 Quote/ })).toBeEnabled();
+    expect(await findImportButton()).toBeEnabled();
     expect(startOverButton()).toBeEnabled();
   });
 
@@ -90,7 +97,7 @@ describe("MarketDataImportPage", () => {
     expect(screen.queryByText("other.csv")).not.toBeInTheDocument();
   });
 
-  it("disables Start Over and Back until the import finishes", async () => {
+  it("disables Start over and Back until the import finishes", async () => {
     let finishImport!: (quotes: QuoteImport[]) => void;
     adapterMocks.checkQuotesImport.mockResolvedValue([quote]);
     adapterMocks.importManualQuotes.mockReturnValue(
@@ -99,7 +106,7 @@ describe("MarketDataImportPage", () => {
     const { container } = renderPage();
 
     await validateFile(container);
-    const importButton = await screen.findByRole("button", { name: /Import 1 Quote/ });
+    const importButton = await findImportButton();
     fireEvent.click(importButton);
     await waitFor(() => expect(adapterMocks.importManualQuotes).toHaveBeenCalledTimes(1));
 
@@ -129,27 +136,27 @@ describe("MarketDataImportPage", () => {
     // The outgoing form is still mounted until its exit animation ends.
     expect(validateButton).toBeInTheDocument();
     expect(validateButton).toBeDisabled();
-    expect(screen.queryByRole("button", { name: /Remove File/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove file/ })).not.toBeInTheDocument();
     fireEvent.click(validateButton);
     fireEvent.click(validateButton);
     expect(adapterMocks.checkQuotesImport).toHaveBeenCalledTimes(1);
 
-    expect(await screen.findByRole("button", { name: /Import 1 Quote/ })).toBeEnabled();
+    expect(await findImportButton()).toBeEnabled();
   });
 
   it.each([
     ["Back", "click"],
     ["Back", "Enter"],
     ["Back", "Space"],
-    ["Start Over", "click"],
-    ["Start Over", "Enter"],
-    ["Start Over", "Space"],
+    ["Start over", "click"],
+    ["Start over", "Enter"],
+    ["Start over", "Space"],
   ])("locks the exiting preview after %s against %s activation", async (action, activation) => {
     const user = userEvent.setup();
     adapterMocks.checkQuotesImport.mockResolvedValue([quote]);
     const { container } = renderPage();
     await validateFile(container);
-    const importButton = await screen.findByRole("button", { name: /Import 1 Quote/ });
+    const importButton = await findImportButton();
     const backButton = within(importButton.parentElement!).getByRole("button", { name: /^Back$/ });
     importButton.focus();
 
@@ -178,8 +185,8 @@ describe("MarketDataImportPage", () => {
     expect(
       screen.queryByText("No quotes to import. Please validate the file first."),
     ).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /Validate File/ }));
-    const nextImportButton = await screen.findByRole("button", { name: /Import 1 Quote/ });
+    fireEvent.click(await screen.findByRole("button", { name: /Validate file/ }));
+    const nextImportButton = await findImportButton();
     expect(nextImportButton).toBeEnabled();
     fireEvent.click(nextImportButton);
     expect(await screen.findByText("Import completed")).toBeInTheDocument();

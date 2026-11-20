@@ -1,11 +1,12 @@
+import { isValuationComplete } from "@/lib/valuation";
+import { useTranslation } from "react-i18next";
 import { formatZonedDateKey } from "@/features/spending/lib/timezone";
-import { parseLocalDate } from "@/lib/utils";
 import { calculatePerformanceSummary } from "@/adapters";
-import { ChartRangePicker } from "@/components/chart-range-picker";
 import { HistoryChart } from "@/components/history-chart";
 import { useHapticFeedback } from "@/hooks";
 import { useCurrentValuation } from "@/hooks/use-current-account-valuations";
 import { useHoldings } from "@/hooks/use-holdings";
+import { HoldingsScopeNotice } from "@/components/holdings-scope-notice";
 import { useValuationHistory } from "@/hooks/use-valuation-history";
 import { HoldingType, isAlternativeAssetKind } from "@/lib/constants";
 import { performancePeriodPnl, performanceSummaryReturn } from "@/lib/performance";
@@ -15,31 +16,24 @@ import type { DateRange } from "@/lib/types";
 import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigger";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TimePeriod as UITimePeriod } from "@wealthfolio/ui";
-import {
-  GainAmount,
-  GainPercent,
-  getInitialIntervalData,
-  IntervalSelector,
-  useDateFormatting,
-} from "@wealthfolio/ui";
-import { usePersistentState } from "@/hooks/use-persistent-state";
+import { GainAmount, GainPercent, IntervalSelector, useDateFormatting } from "@wealthfolio/ui";
+import { SpendingDatePicker } from "@/features/spending/components/spending-date-picker";
+import { PeriodNavigation } from "@/features/spending/components/period-navigation";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
-import { formatDate } from "@/lib/utils";
+import { formatDate, parseLocalDate } from "@/lib/utils";
 import { format } from "date-fns";
 import { useMemo, useState } from "react";
+import { HealthStatusIndicator } from "@/components/health-status-icon";
 import { PrivacyToggle } from "@/components/privacy-toggle";
 import type { AccountScope } from "@/lib/types";
 import { accountScopeKey } from "@/pages/allocation-targets/components/target-scope";
-import { useTranslation } from "react-i18next";
 import { AccountsSummary } from "./accounts-summary";
 import Balance from "./balance";
 import SavingGoals from "./goals";
 import TopHoldings from "./top-holdings";
+import { useDashboardPeriod } from "./use-dashboard-period";
 
-const DEFAULT_INTERVAL: UITimePeriod = "3M";
-const INTERVAL_STORAGE_KEY = "dashboard-interval";
-
-function getDashboardChartMinDomainSpanRatio(period: UITimePeriod): number {
+function getDashboardChartMinDomainSpanRatio(period: UITimePeriod | null): number {
   switch (period) {
     case "1D":
     case "1W":
@@ -59,7 +53,9 @@ function getDashboardChartMinDomainSpanRatio(period: UITimePeriod): number {
   }
 }
 
-function getDashboardNetContributionMaxDomainSpanRatio(period: UITimePeriod): number | undefined {
+function getDashboardNetContributionMaxDomainSpanRatio(
+  period: UITimePeriod | null,
+): number | undefined {
   switch (period) {
     case "1D":
     case "1W":
@@ -94,22 +90,13 @@ export function DashboardContent({
   const dateFormatting = useDateFormatting();
   const { settings } = useSettingsContext();
   const todayISO = formatZonedDateKey(new Date(), settings?.timezone);
-  const [selectedInterval, setSelectedInterval] = usePersistentState<UITimePeriod>(
-    INTERVAL_STORAGE_KEY,
-    DEFAULT_INTERVAL,
-  );
-  const intervalDateRange = useMemo(
-    () => getInitialIntervalData(selectedInterval, parseLocalDate(todayISO)).range,
-    [selectedInterval, todayISO],
-  );
-  // A custom calendar range (not a period preset) overrides the interval-derived range.
-  const [customRange, setCustomRange] = useState<DateRange | undefined>(undefined);
-  const isCustomRangeActive = customRange !== undefined;
-  const dateRange = customRange ?? intervalDateRange;
-  const isAllTime = selectedInterval === "ALL" && !isCustomRangeActive;
+  const period = useDashboardPeriod(todayISO);
+  const { code: selectedInterval, range: dateRange } = period;
+  const isAllTime = selectedInterval === "ALL";
+  // Client-side brush window from the chart (no refetch); drives the performance summary.
   const [brushDisplayRange, setBrushDisplayRange] = useState<DateRange | undefined>(undefined);
-
-  const { holdings: allHoldings, isLoading: isHoldingsLoading } = useHoldings(scope);
+  const holdingsQuery = useHoldings(scope);
+  const { holdings: allHoldings, isLoading: isHoldingsLoading } = holdingsQuery;
   const {
     currentValuation: portfolioCurrentValuation,
     isLoading: isCurrentValuationLoading,
@@ -166,10 +153,18 @@ export function DashboardContent({
     retry: 1,
   });
 
-  const gainLossAmount = performancePeriodPnl(portfolioPerformance);
-  const simpleReturn = performanceSummaryReturn(portfolioPerformance);
+  const hasIncompleteHistory =
+    valuationHistory?.some((point) => !isValuationComplete(point.valueStatus)) ?? false;
+  const hasIncompletePeriod =
+    ((endDate === undefined || endDate >= todayISO) &&
+      !isValuationComplete(portfolioCurrentValuation?.summary.valueStatus)) ||
+    hasIncompleteHistory;
+  const gainLossAmount = hasIncompletePeriod ? null : performancePeriodPnl(portfolioPerformance);
+  const simpleReturn = hasIncompletePeriod ? null : performanceSummaryReturn(portfolioPerformance);
   const isCurrentValuationUnavailable =
-    !isCurrentValuationLoading && !portfolioCurrentValuation && Boolean(currentValuationError);
+    !isCurrentValuationLoading &&
+    (!isValuationComplete(portfolioCurrentValuation?.summary.valueStatus) ||
+      (!portfolioCurrentValuation && Boolean(currentValuationError)));
   const portfolioSourceDataAsOf =
     portfolioCurrentValuation?.summary.sourceDataAsOf ??
     (!isCurrentValuationUnavailable
@@ -181,8 +176,8 @@ export function DashboardContent({
       valuationHistory
         // A day the engine could not fully convert carries a partial value;
         // it is not plotted rather than drawn as if it were complete.
-        ?.filter((item) => item.valueStatus !== "unavailable")
-        .map((item) => ({
+        ?.map((item) => ({
+          isUnavailable: !isValuationComplete(item.valueStatus),
           date: item.valuationDate,
           totalValue: item.totalValueBase,
           netContribution: item.netContributionBase,
@@ -191,17 +186,14 @@ export function DashboardContent({
     );
   }, [valuationHistory, baseCurrency]);
 
-  // The "ALL" preset uses 1970-01-01 as a sentinel "from" date, which is confusing to see
-  // pre-filled in the calendar. Clamp the picker's *displayed* from up to the first date that
-  // actually has portfolio data. Display-only: this does not change what useValuationHistory fetches.
-  const firstDataDate = chartData[0]?.date;
-  const pickerValue = useMemo<DateRange | undefined>(() => {
-    if (!dateRange?.from || !firstDataDate) {
-      return dateRange;
-    }
-    const earliest = new Date(firstDataDate);
-    return dateRange.from < earliest ? { from: earliest, to: dateRange.to } : dateRange;
-  }, [dateRange, firstDataDate]);
+  // HistoryChart drops its brush whenever its data changes identity (period change via pill,
+  // upstream's picker or its prev/next navigation, or a refetch); clear the echo in step.
+  // Adjust-during-render (CUSTOM_CHANGES §5.7); the chart must not call back during render (§5.9).
+  const [prevChartData, setPrevChartData] = useState(chartData);
+  if (chartData !== prevChartData) {
+    setPrevChartData(chartData);
+    setBrushDisplayRange(undefined);
+  }
 
   const chartMinDomainSpanRatio = useMemo(
     () => getDashboardChartMinDomainSpanRatio(selectedInterval),
@@ -214,34 +206,33 @@ export function DashboardContent({
 
   const isNegative = totalValue < 0;
 
-  // Callback for IntervalSelector
-  const handleIntervalSelect = (code: UITimePeriod) => {
-    setSelectedInterval(code);
-    setBrushDisplayRange(undefined);
-    setCustomRange(undefined);
-  };
-
-  // Callback for the custom date range picker (overrides the interval-derived dateRange,
-  // so the existing useValuationHistory hook refetches it).
-  const handleCustomRangeChange = (range: { from?: Date; to?: Date } | undefined) => {
-    // Only a complete range may reach dateRange: a half-open one ({from, to: undefined})
-    // would refetch a degenerate window and blank the chart. The picker already filters
-    // partial selections; this guard keeps the invariant local.
-    if (!range?.from || !range?.to) return;
-    setCustomRange({ from: range.from, to: range.to });
-    setBrushDisplayRange(undefined);
-  };
-
   return (
     <div className="flex min-h-full flex-col">
-      <div className="px-4 pb-1 pt-2 md:px-6 lg:px-8">
+      <div className="px-4 pt-2 pb-6 md:px-6 md:pb-2 lg:px-8">
         <div className="min-w-0">
           {scope.type === "portfolio" && scopeLabel && (
             <p className="text-muted-foreground mb-1 truncate text-xs" title={scopeLabel}>
               {scopeLabel}
             </p>
           )}
+          <div
+            className="flex max-w-full flex-wrap items-center gap-x-1"
+            data-testid="dashboard-period-header"
+          >
+            <div
+              className="text-muted-foreground/80 text-2xs font-semibold tracking-[0.12em] uppercase"
+              data-testid="dashboard-period-caption"
+            >
+              {t("dashboard:tabs.investments")} · {period.label}
+            </div>
+            <PeriodNavigation navigation={period.navigation} />
+          </div>
           <div className="flex flex-wrap items-center gap-2">
+            {period.isHistorical && (
+              <span className="text-muted-foreground w-full text-xs">
+                {t("common:currentValue")}
+              </span>
+            )}
             <PortfolioUpdateTrigger
               lastCalculatedAt={portfolioSourceDataAsOf}
               notices={portfolioCurrentValuation?.summary.warnings}
@@ -254,19 +245,22 @@ export function DashboardContent({
                 displayCurrency={true}
               />
             </PortfolioUpdateTrigger>
-            <PrivacyToggle className="hover:bg-muted/50 bg-transparent" />
+            <PrivacyToggle variant="ghost" />
+            <HealthStatusIndicator />
           </div>
-          <div className="text-md flex min-h-5 items-center space-x-3">
+          <div className="text-md flex min-h-5 flex-wrap items-center gap-x-3">
             {isPortfolioPerformanceLoading ? (
               <div className="flex items-center gap-3">
                 <Skeleton className="h-4 w-24" />
-                <div className="border-secondary my-1 border-r pr-2" />
+                <div className="border-secondary my-1 border-e pe-2" />
                 <Skeleton className="h-4 w-16" />
               </div>
             ) : (
               <>
                 {gainLossAmount == null ? (
-                  <span className="text-muted-foreground lg:text-md text-sm font-light">N/A</span>
+                  <span className="text-muted-foreground lg:text-md text-sm font-light">
+                    {t("performance:not_available")}
+                  </span>
                 ) : (
                   <GainAmount
                     className="lg:text-md text-sm font-light"
@@ -275,9 +269,12 @@ export function DashboardContent({
                     displayCurrency={false}
                   />
                 )}
-                <div className="border-secondary my-1 border-r pr-2" />
+                {/* Stretch: the row centres its items, so an empty divider has no height. */}
+                <div className="border-secondary my-1 self-stretch border-e pe-2" />
                 {simpleReturn == null ? (
-                  <span className="text-muted-foreground lg:text-md text-sm font-light">N/A</span>
+                  <span className="text-muted-foreground lg:text-md text-sm font-light">
+                    {t("performance:not_available")}
+                  </span>
                 ) : (
                   <GainPercent
                     className="lg:text-md text-sm font-light"
@@ -287,14 +284,16 @@ export function DashboardContent({
                 )}
               </>
             )}
-            {(selectedInterval || brushDisplayRange) && (
-              <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
-                {brushDisplayRange?.from && brushDisplayRange?.to
-                  ? `${formatDate(brushDisplayRange.from, dateFormatting)} – ${formatDate(brushDisplayRange.to, dateFormatting)}`
-                  : isCustomRangeActive && dateRange?.from && dateRange?.to
-                    ? `${formatDate(dateRange.from, dateFormatting)} – ${formatDate(dateRange.to, dateFormatting)}`
-                    : t(`ui:interval.${selectedInterval}`)}
+            {brushDisplayRange?.from && brushDisplayRange?.to ? (
+              <span className="text-muted-foreground text-sm font-light">
+                {`${formatDate(brushDisplayRange.from, dateFormatting)} – ${formatDate(brushDisplayRange.to, dateFormatting)}`}
               </span>
+            ) : (
+              period.isHistorical && (
+                <span className="text-muted-foreground text-sm font-light">
+                  {t("common:periodReturn", { period: period.label })}
+                </span>
+              )
             )}
           </div>
         </div>
@@ -304,8 +303,8 @@ export function DashboardContent({
         className="flex grow flex-col"
         style={{
           backgroundImage: isNegative
-            ? `linear-gradient(to top, color-mix(in srgb, var(--destructive) 30%, transparent), color-mix(in srgb, var(--destructive) 15%, transparent) 50%, transparent 100%)`
-            : `linear-gradient(to top, color-mix(in srgb, var(--success) 30%, transparent), color-mix(in srgb, var(--success) 15%, transparent) 50%, transparent 100%)`,
+            ? `linear-gradient(to top, color-mix(in srgb, var(--loss) 30%, transparent), color-mix(in srgb, var(--loss) 15%, transparent) 50%, transparent 100%)`
+            : `linear-gradient(to top, color-mix(in srgb, var(--investments) 30%, transparent), color-mix(in srgb, var(--investments) 15%, transparent) 50%, transparent 100%)`,
         }}
       >
         {/* Taller than upstream's h-70 (280px): the brush bar at the bottom needs the extra 40px. */}
@@ -316,36 +315,49 @@ export function DashboardContent({
             scaleMode="fit-visible"
             minDomainSpanRatio={chartMinDomainSpanRatio}
             netContributionMaxDomainSpanRatio={chartNetContributionMaxDomainSpanRatio}
+            color="var(--investments)"
             onVisibleRangeChange={(r) =>
-              setBrushDisplayRange(r ? { from: new Date(r.from), to: new Date(r.to) } : undefined)
+              setBrushDisplayRange(
+                r ? { from: parseLocalDate(r.from), to: parseLocalDate(r.to) } : undefined,
+              )
             }
           />
-          {/* Not gated on chartData.length: if a picked range returns no points, the
-              pills and calendar must stay mounted so the user can pick their way back. */}
+          {/* Not gated on chartData.length: if a picked period returns no points, the
+              pills and date picker must stay mounted so the user can pick their way back.
+              -translate-y-6 tucks the controls under the brush bar (h-80 chart, see above). */}
           {valuationHistory && (
-            <div className="flex w-full -translate-y-6 items-center justify-center gap-2 px-4">
-              <IntervalSelector
-                className={`pointer-events-auto relative z-20 w-auto max-w-full ${
-                  isCustomRangeActive ? "interval-pill-suppressed" : ""
-                }`}
-                onIntervalSelect={handleIntervalSelect}
-                onHaptic={triggerHaptic}
-                isLoading={isValuationHistoryLoading}
-                value={selectedInterval}
-              />
-              <ChartRangePicker
-                className="pointer-events-auto relative z-20 shrink-0"
-                value={brushDisplayRange ?? pickerValue}
-                onChange={handleCustomRangeChange}
-                isActive={isCustomRangeActive}
-              />
+            <div className="flex w-full -translate-y-6 justify-center">
+              <div className="pointer-events-auto relative z-20 flex w-full max-w-screen-sm min-w-0 items-center justify-center gap-1.5 pe-4 sm:max-w-screen-md md:max-w-2xl md:pe-0 lg:max-w-3xl">
+                <IntervalSelector
+                  className="w-auto"
+                  onIntervalSelect={period.selectPreset}
+                  onHaptic={triggerHaptic}
+                  isLoading={isValuationHistoryLoading}
+                  value={period.selectedPreset}
+                />
+                <SpendingDatePicker
+                  customMonth={period.customMonth}
+                  customRange={period.customRange}
+                  customYear={period.customYear}
+                  maxYear={period.maxYear}
+                  onCustomYearChange={period.selectYear}
+                  selectionLabel={
+                    period.customMonth || period.customYear !== null ? period.label : undefined
+                  }
+                  maxMonth={period.maxMonth}
+                  onCustomMonthChange={period.selectMonth}
+                  onCustomRangeChange={period.selectRange}
+                />
+              </div>
             </div>
           )}
         </div>
 
-        <div className="grow px-4 pb-[var(--mobile-nav-total-offset)] pt-14 md:px-6 md:pb-6 md:pt-12 lg:px-10 lg:pb-8 lg:pt-14">
-          <div className="grid grid-cols-1 gap-8 lg:grid-cols-3 lg:gap-20">
-            <div className="lg:col-span-2">
+        {/* Two columns once the content area, not the window (the sidebar may be open),
+            fits Accounts beside the 24rem right column. */}
+        <div className="@container grow px-4 pt-14 pb-[var(--mobile-nav-total-offset)] md:px-6 md:pt-12 md:pb-6 lg:px-10 lg:pt-14 lg:pb-8">
+          <div className="grid grid-cols-1 gap-8 @min-[53rem]:grid-cols-[minmax(0,2fr)_minmax(24rem,1fr)] @min-[53rem]:gap-20">
+            <div>
               <AccountsSummary
                 accountIds={accountIds}
                 dateRange={dateRange}
@@ -354,12 +366,15 @@ export function DashboardContent({
                 isLoadingCurrentValuations={isCurrentValuationLoading}
               />
             </div>
-            <div className="space-y-6 lg:col-span-1">
-              <TopHoldings
-                holdings={holdings}
-                isLoading={isHoldingsLoading}
-                baseCurrency={baseCurrency}
-              />
+            <div className="space-y-6">
+              <HoldingsScopeNotice {...holdingsQuery} />
+              {(holdingsQuery.isComplete || isHoldingsLoading) && (
+                <TopHoldings
+                  holdings={holdings}
+                  isLoading={isHoldingsLoading}
+                  baseCurrency={baseCurrency}
+                />
+              )}
               <SavingGoals />
             </div>
           </div>

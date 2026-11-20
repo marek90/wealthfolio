@@ -49,6 +49,7 @@ const HINT_KEYS: Partial<Record<MoneyFlowNodeKind, string>> = {
   total: "spending:moneyFlow.hint.total",
   shortfall: "spending:moneyFlow.hint.shortfall",
   refunds: "spending:moneyFlow.hint.refunds",
+  "from-savings": "spending:moneyFlow.hint.fromSavings",
   saved: "spending:moneyFlow.hint.saved",
   surplus: "spending:moneyFlow.hint.surplus",
   uncategorized: "spending:moneyFlow.hint.uncategorized",
@@ -76,7 +77,7 @@ interface MoneyFlowChartProps {
   currency: string;
   isMobile: boolean;
   onCategoryClick?: (categoryId: string) => void;
-  /** Zoom into a destination (a group or Set aside) or a category with subcategories. */
+  /** Zoom into a destination (a group or To savings) or a category with subcategories. */
   onFocusNode?: (nodeId: string) => void;
   /** Node to take keyboard focus once rendered — where a zoom was left from. */
   autoFocusNodeId?: string | null;
@@ -347,7 +348,7 @@ export function MoneyFlowChart({
           x={textX}
           y={centerY - 2}
           textAnchor={labelLeft ? "end" : "start"}
-          className="text-[11px] font-medium"
+          className="text-2xs font-medium"
           style={{ fill: "var(--foreground)" }}
         >
           {name}
@@ -357,7 +358,7 @@ export function MoneyFlowChart({
           x={textX}
           y={centerY + 11}
           textAnchor={labelLeft ? "end" : "start"}
-          className="text-[10.5px] tabular-nums"
+          className="text-2xs tabular-nums"
           style={{ fill: "var(--muted-foreground)" }}
         >
           {amount}
@@ -450,7 +451,10 @@ export function MoneyFlowChart({
           height="100%"
           onResize={(nextWidth) => setWidth(nextWidth)}
         >
+          {/* The nodes are the chart's one Tab stop (renderNode); Recharts'
+              layer would add the whole SVG as another. */}
           <Sankey
+            accessibilityLayer={false}
             data={data}
             nodeWidth={NODE_WIDTH}
             nodePadding={ROW_PITCH}
@@ -534,11 +538,14 @@ function MoneyFlowTooltip({
     anchor < chartHeight / 2
       ? { top: Math.max(TOOLTIP_EDGE, anchor - TOOLTIP_ANCHOR_OFFSET) }
       : { bottom: Math.max(TOOLTIP_EDGE, chartHeight - anchor - TOOLTIP_ANCHOR_OFFSET) };
-  const base = totals.income > 0 ? totals.income : totals.total;
+  // Shares are of income, unless money from savings also came in: then no
+  // node should read as a share of income it wasn't part of.
+  const shareOfIncome = totals.income > 0 && totals.fromSavings === 0;
+  const base = shareOfIncome ? totals.income : totals.total;
   const share = base > 0 ? (node.value / base) * 100 : 0;
-  // Without income the total is simply money out, before any refunds.
+  // With nothing coming in, the total is simply money out, before any refunds.
   const hintKey =
-    node.kind === "total" && totals.income === 0
+    node.kind === "total" && totals.income === 0 && totals.fromSavings === 0
       ? "spending:moneyFlow.hint.totalOut"
       : HINT_KEYS[node.kind];
   const members = node.members ?? [];
@@ -564,7 +571,7 @@ function MoneyFlowTooltip({
         {node.kind !== "total" && (
           <span className="text-muted-foreground tabular-nums">
             {t(
-              totals.income > 0
+              shareOfIncome
                 ? "spending:moneyFlow.shareOfIncome"
                 : "spending:moneyFlow.shareOfTotal",
               { pct: formatPercentValue(share, numberFormatting, { digits: 0 }) },
@@ -603,7 +610,7 @@ function MoneyFlowTooltip({
         </ul>
       )}
       {(node.categoryId || canFocus) && (
-        <p className="text-muted-foreground/80 mt-2 text-[11px]">
+        <p className="text-muted-foreground/80 text-2xs mt-2">
           {t(
             canFocus
               ? node.subcategories

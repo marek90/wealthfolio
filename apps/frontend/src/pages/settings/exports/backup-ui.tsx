@@ -24,6 +24,8 @@ import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { ActionPalette } from "@/components/action-palette";
 import { useIsMobileViewport } from "@/hooks/use-platform";
 import { BackupError, type BackupFailure } from "./backup-error";
+import { AlertDescription } from "@wealthfolio/ui/components/ui/alert";
+import { Spinner } from "@wealthfolio/ui";
 
 /** Rows shown before "Show older". Connect returns at most 30 restore points. */
 const BACKUP_LIST_LIMIT = 5;
@@ -32,15 +34,17 @@ const BACKUP_LIST_LIMIT = 5;
 export function InfoPopover({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          className="text-muted-foreground pointer-coarse:size-11"
-          aria-label={label}
-        >
-          <Icons.Info className="size-4" aria-hidden />
-        </Button>
+      <PopoverTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground pointer-coarse:size-11"
+            aria-label={label}
+          />
+        }
+      >
+        <Icons.Info className="size-4" aria-hidden />
       </PopoverTrigger>
       <PopoverContent
         align="start"
@@ -83,7 +87,7 @@ export function BackupCardHeader({
         {icon}
       </div>
       <div className="col-start-1 row-start-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 md:col-start-2">
-        <h2 className="text-base font-semibold leading-6 tracking-tight">{title}</h2>
+        <h2 className="text-lg leading-6 font-semibold tracking-tight">{title}</h2>
         {info}
         {badge}
       </div>
@@ -123,14 +127,22 @@ export function InlineFacts({ items }: { items: { label: string; value: ReactNod
   );
 }
 
-export function BackupAlert({ error, action }: { error: BackupFailure; action?: ReactNode }) {
+export function BackupAlert({
+  error,
+  action,
+  className,
+}: {
+  error: BackupFailure;
+  action?: ReactNode;
+  className?: string;
+}) {
   return (
-    <Alert className="border-destructive/20 bg-destructive/5 text-destructive [&>svg]:text-destructive">
-      <Icons.AlertCircle className="size-4" aria-hidden />
-      <div className="space-y-2 break-words text-sm">
+    <Alert variant="destructive" className={className}>
+      <Icons.AlertCircle aria-hidden />
+      <AlertDescription className="space-y-2 break-words">
         <BackupError error={error} />
         {action}
-      </div>
+      </AlertDescription>
     </Alert>
   );
 }
@@ -156,7 +168,7 @@ export function BackupList<T>({
         <Button
           variant="ghost"
           size="sm"
-          className="text-muted-foreground pointer-coarse:min-h-11 w-full"
+          className="text-muted-foreground w-full pointer-coarse:min-h-11"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
@@ -204,12 +216,12 @@ export function BackupRow({
     <li className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
       <BackupFileTile className="hidden md:flex" />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium leading-5">{title}</p>
+        <p className="truncate text-sm leading-5 font-medium">{title}</p>
         <p className="text-muted-foreground mt-0.5 truncate text-xs leading-5">
           {parts.map(({ part, detail }, index) => (
             <span
               key={index}
-              className={`[&_svg]:mr-1 [&_svg]:inline [&_svg]:align-[-2px] ${detail ? "max-md:hidden" : ""}`}
+              className={`[&_svg]:me-1 [&_svg]:inline [&_svg]:align-[-2px] ${detail ? "max-md:hidden" : ""}`}
             >
               {index > 0 && <span aria-hidden> · </span>}
               {part}
@@ -260,13 +272,13 @@ export function BackupActions({
     <Button
       variant="ghost"
       size="icon-sm"
-      className="pointer-coarse:size-11 shrink-0 aria-busy:opacity-100"
+      className="shrink-0 aria-busy:opacity-100 pointer-coarse:size-11"
       aria-label={label}
       aria-busy={busy}
       disabled={disabled}
     >
       {busy ? (
-        <Icons.Spinner className="size-4 animate-spin" aria-hidden />
+        <Spinner className="size-4" aria-hidden />
       ) : (
         <Icons.MoreHorizontal className="size-4" aria-hidden />
       )}
@@ -299,7 +311,7 @@ export function BackupActions({
         <Button
           variant="outline"
           size="sm"
-          className="pointer-coarse:h-11 aria-busy:opacity-100"
+          className="aria-busy:opacity-100 pointer-coarse:h-11"
           disabled={disabled || primary.disabled}
           aria-busy={!!primary.pending}
           aria-label={primary.ariaLabel}
@@ -314,7 +326,7 @@ export function BackupActions({
       )}
       {menu.length > 0 && (
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+          <DropdownMenuTrigger render={trigger} />
           <DropdownMenuContent align="end" className="min-w-48">
             {menu.map((group, index) => (
               <Fragment key={index}>
@@ -324,7 +336,7 @@ export function BackupActions({
                     key={action.label}
                     variant={action.destructive ? "destructive" : "default"}
                     disabled={action.disabled}
-                    onSelect={action.onSelect}
+                    onClick={action.onSelect}
                   >
                     <action.icon />
                     {action.label}
@@ -341,10 +353,10 @@ export function BackupActions({
 
 export function BackupEmpty({ title, description }: { title: string; description: string }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-dashed p-4">
+    <div className="flex items-start gap-3">
       <Icons.History className="text-muted-foreground mt-0.5 size-5 shrink-0" aria-hidden />
       <div className="space-y-0.5">
-        <p className="text-sm font-medium leading-5">{title}</p>
+        <p className="text-sm leading-5 font-medium">{title}</p>
         <p className="text-muted-foreground text-sm">{description}</p>
       </div>
     </div>
@@ -373,7 +385,7 @@ export function BackupRowsSkeleton() {
 }
 
 export function PendingIcon({ pending, icon }: { pending: boolean; icon?: ReactNode }) {
-  return pending ? <Icons.Spinner className="size-4 animate-spin" aria-hidden /> : (icon ?? null);
+  return pending ? <Spinner className="size-4" aria-hidden /> : (icon ?? null);
 }
 
 /** Destructive confirmation shared by local and cloud backups. */
@@ -406,10 +418,10 @@ export function BackupDeleteDialog({
     >
       <DialogContent
         className="sm:max-w-md"
-        mobileClassName="h-auto max-h-[85dvh] overflow-y-auto"
+        mobileClassName="h-auto [--overlay-max-height:85dvh] overflow-y-auto"
         showCloseButton={!pending}
       >
-        <DialogHeader className="text-left">
+        <DialogHeader className="text-start">
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>

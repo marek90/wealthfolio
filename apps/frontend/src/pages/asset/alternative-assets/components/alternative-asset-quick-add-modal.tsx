@@ -5,6 +5,7 @@ import {
   type LoanSetupField,
 } from "./loan-error-text";
 import { useLoanSchedulePreview } from "../hooks/use-loan-calculation";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 import { parseLocalDate } from "@/lib/utils";
 import { LoanInterestMethodSelect } from "./loan-interest-method-select";
 import { useState, useMemo, useCallback, useEffect, useId } from "react";
@@ -30,6 +31,7 @@ import {
   QuantityInput,
   useAmountFormatting,
   useDateFormatting,
+  Spinner,
 } from "@wealthfolio/ui";
 import { cn } from "@/lib/utils";
 import { useSettingsContext } from "@/lib/settings-provider";
@@ -216,7 +218,7 @@ export function AlternativeAssetQuickAddModal({
   const { createMutation } = useAlternativeAssetMutations();
 
   // Reset form when modal opens
-  useEffect(() => {
+  useEffectOnChange(() => {
     if (open) {
       // Skip step 1 if a defaultKind is provided
       setStep(defaultKind ? 2 : 1);
@@ -340,7 +342,9 @@ export function AlternativeAssetQuickAddModal({
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   // A refusal answers what was submitted, not the form as edited since.
-  useEffect(() => setSubmitError(null), [formData]);
+  useEffectOnChange(() => {
+    setSubmitError(null);
+  }, [formData]);
   const handleSubmit = async () => {
     if (!canProceed || refusedTerms || createMutation.isPending) return;
 
@@ -469,12 +473,12 @@ export function AlternativeAssetQuickAddModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex max-h-[90dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[560px]"
-        mobileClassName="flex h-[90vh] flex-col"
+        className="flex flex-col gap-0 overflow-hidden p-0 [--overlay-max-height:90dvh] sm:max-w-140"
+        mobileClassName="flex flex-col"
       >
         {/* Header with progress indicator */}
         <DialogHeader className="shrink-0 border-b px-6 py-4">
-          <div className="flex flex-col items-center space-y-2 sm:flex-row sm:items-center sm:justify-between sm:space-y-0 sm:pr-8">
+          <div className="flex flex-col items-center space-y-2 sm:flex-row sm:items-center sm:justify-between sm:space-y-0 sm:pe-8">
             <DialogTitle className="text-foreground text-lg font-semibold">
               {step === 1
                 ? t("asset:quickAdd.add_new_asset")
@@ -507,7 +511,7 @@ export function AlternativeAssetQuickAddModal({
         </DialogHeader>
 
         {/* Content area with animations */}
-        <div className="relative min-h-0 flex-1 overflow-y-auto">
+        <div className="relative min-h-0 flex-auto overflow-y-auto">
           <AnimatePresence mode="wait">
             {step === 1 ? (
               <motion.div
@@ -532,7 +536,7 @@ export function AlternativeAssetQuickAddModal({
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                         className={cn(
-                          "relative flex flex-col items-start rounded-xl border-2 p-4 text-left transition-all duration-200",
+                          "relative flex flex-col items-start rounded-xl border-2 p-4 text-start transition-all duration-200",
                           "hover:shadow-md",
                           isSelected
                             ? cn(type.borderColor, type.selectedBg)
@@ -543,7 +547,7 @@ export function AlternativeAssetQuickAddModal({
                           <motion.div
                             initial={{ scale: 0 }}
                             animate={{ scale: 1 }}
-                            className="absolute right-2 top-2"
+                            className="absolute end-2 top-2"
                           >
                             <div className="bg-primary flex h-5 w-5 items-center justify-center rounded-full">
                               <Icons.Check className="text-primary-foreground h-3 w-3" />
@@ -591,11 +595,12 @@ export function AlternativeAssetQuickAddModal({
                         {t("asset:quickAdd.metal_type")}
                       </Label>
                       <ResponsiveSelect
+                        aria-label={t("asset:quickAdd.metal_type")}
                         value={formData.metalType || "gold"}
                         onValueChange={(v) => updateFormData("metalType", v)}
                         options={METAL_TYPES.map((metal) => ({
                           value: metal.value,
-                          label: metal.label,
+                          label: t(`asset:altContent.metalType.${metal.value}`),
                         }))}
                         placeholder={t("asset:quickAdd.select_metal")}
                         sheetTitle={t("asset:quickAdd.select_metal_title")}
@@ -618,11 +623,12 @@ export function AlternativeAssetQuickAddModal({
                           {t("asset:quickAdd.unit")}
                         </Label>
                         <ResponsiveSelect
+                          aria-label={t("asset:quickAdd.unit")}
                           value={formData.unit || "oz"}
                           onValueChange={(v) => updateFormData("unit", v)}
                           options={WEIGHT_UNITS.map((unit) => ({
                             value: unit.value,
-                            label: unit.label,
+                            label: t(`asset:altContent.weightUnit.${unit.value}`),
                           }))}
                           placeholder={t("asset:quickAdd.select_unit")}
                           sheetTitle={t("asset:quickAdd.select_unit_title")}
@@ -638,11 +644,12 @@ export function AlternativeAssetQuickAddModal({
                       {t("asset:quickAdd.liability_type")}
                     </Label>
                     <ResponsiveSelect
+                      aria-label={t("asset:quickAdd.liability_type")}
                       value={formData.liabilityType || "mortgage"}
                       onValueChange={(v) => updateFormData("liabilityType", v)}
                       options={LIABILITY_TYPES.map((type) => ({
                         value: type.value,
-                        label: type.label,
+                        label: t(`asset:altContent.liabilityType.${type.value}`),
                       }))}
                       placeholder={t("asset:quickAdd.select_type")}
                       sheetTitle={t("asset:quickAdd.select_liability_type_title")}
@@ -702,6 +709,7 @@ export function AlternativeAssetQuickAddModal({
                           {t("asset:quickAdd.original_amount")}
                         </Label>
                         <MoneyInput
+                          aria-label={t("asset:quickAdd.original_amount")}
                           aria-describedby={describedBy("originalAmount")}
                           value={formData.purchasePrice || ""}
                           onValueChange={(value) => updateFormData("purchasePrice", value)}
@@ -719,6 +727,7 @@ export function AlternativeAssetQuickAddModal({
                           </LoanFieldInfo>
                         </div>
                         <DatePickerInput
+                          aria-label={t("asset:quickAdd.origination_date")}
                           aria-describedby={describedBy("originationDate")}
                           value={formData.purchaseDate}
                           onChange={(date) => date && updateFormData("purchaseDate", date)}
@@ -731,7 +740,7 @@ export function AlternativeAssetQuickAddModal({
                         <Label className="text-foreground text-sm font-medium">
                           {t("asset:quickAdd.interest_rate")}
                           {!automaticSchedule && (
-                            <span className="text-muted-foreground ml-1 text-xs font-normal">
+                            <span className="text-muted-foreground ms-1 text-xs font-normal">
                               {t("asset:quickAdd.optional")}
                             </span>
                           )}
@@ -743,9 +752,9 @@ export function AlternativeAssetQuickAddModal({
                             value={formData.interestRate || ""}
                             onValueChange={(v) => updateFormData("interestRate", v)}
                             placeholder="0"
-                            className="h-11 pr-8"
+                            className="h-11 pe-8"
                           />
-                          <span className="text-muted-foreground pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm">
+                          <span className="text-muted-foreground pointer-events-none absolute end-3 top-1/2 -translate-y-1/2 text-sm">
                             %
                           </span>
                         </div>
@@ -757,6 +766,7 @@ export function AlternativeAssetQuickAddModal({
                             {t("asset:loanActions.payment_frequency")}
                           </Label>
                           <ResponsiveSelect
+                            aria-label={t("asset:loanActions.payment_frequency")}
                             value={formData.paymentFrequency ?? "monthly"}
                             onValueChange={(value) =>
                               updateFormData("paymentFrequency", value as LoanPaymentFrequency)
@@ -827,12 +837,12 @@ export function AlternativeAssetQuickAddModal({
                           aria-expanded={moreOptions}
                           aria-controls={moreOptionsId}
                           onClick={() => setMoreOptions((shown) => !shown)}
-                          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex items-center gap-1 rounded-sm text-sm focus-visible:outline-none focus-visible:ring-2"
+                          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex items-center gap-1 rounded-sm text-sm focus-visible:ring-2 focus-visible:outline-none"
                         >
                           <Icons.ChevronRight
                             className={cn(
                               "size-4 transition-transform",
-                              moreOptions && "rotate-90",
+                              moreOptions ? "rotate-90" : "rtl:rotate-180",
                             )}
                           />
                           {t("common:layout.more_options")}
@@ -858,6 +868,7 @@ export function AlternativeAssetQuickAddModal({
                                 {t("asset:loanActions.first_payment_date")}
                               </Label>
                               <DatePickerInput
+                                aria-label={t("asset:loanActions.first_payment_date")}
                                 aria-describedby={describedBy("firstPaymentDate")}
                                 value={firstPaymentDate}
                                 onChange={(date) => updateFormData("firstPaymentDate", date)}
@@ -877,12 +888,13 @@ export function AlternativeAssetQuickAddModal({
                     <Label className="text-foreground text-sm font-medium">
                       {getValueLabel()}
                       {formData.kind === AlternativeAssetKind.LIABILITY && (
-                        <span className="text-muted-foreground ml-1 text-xs font-normal">
+                        <span className="text-muted-foreground ms-1 text-xs font-normal">
                           {t("asset:quickAdd.optional")}
                         </span>
                       )}
                     </Label>
                     <MoneyInput
+                      aria-label={t("asset:quickAdd.current_value")}
                       value={formData.currentValue}
                       onValueChange={(value) => updateFormData("currentValue", value)}
                       className="h-11"
@@ -899,12 +911,13 @@ export function AlternativeAssetQuickAddModal({
                         ? t("asset:quickAdd.balance_date")
                         : t("asset:quickAdd.value_date")}
                       {formData.kind === AlternativeAssetKind.LIABILITY && (
-                        <span className="text-muted-foreground ml-1 text-xs font-normal">
+                        <span className="text-muted-foreground ms-1 text-xs font-normal">
                           {t("asset:quickAdd.optional")}
                         </span>
                       )}
                     </Label>
                     <DatePickerInput
+                      aria-label={t("asset:quickAdd.value_date")}
                       value={formData.valueDate}
                       onChange={(date) => date && updateFormData("valueDate", date)}
                     />
@@ -917,11 +930,12 @@ export function AlternativeAssetQuickAddModal({
                     <div className="space-y-2">
                       <Label className="text-foreground text-sm font-medium">
                         {t("asset:quickAdd.purchase_price")}
-                        <span className="text-muted-foreground ml-1 text-xs font-normal">
+                        <span className="text-muted-foreground ms-1 text-xs font-normal">
                           {t("asset:quickAdd.optional")}
                         </span>
                       </Label>
                       <MoneyInput
+                        aria-label={t("asset:quickAdd.purchase_price")}
                         value={formData.purchasePrice || ""}
                         onValueChange={(value) => updateFormData("purchasePrice", value)}
                         className="h-11"
@@ -933,11 +947,12 @@ export function AlternativeAssetQuickAddModal({
                     <div className="space-y-2">
                       <Label className="text-foreground text-sm font-medium">
                         {t("asset:quickAdd.purchase_date")}
-                        <span className="text-muted-foreground ml-1 text-xs font-normal">
+                        <span className="text-muted-foreground ms-1 text-xs font-normal">
                           {t("asset:quickAdd.optional")}
                         </span>
                       </Label>
                       <DatePickerInput
+                        aria-label={t("asset:quickAdd.purchase_date")}
                         value={formData.purchaseDate}
                         onChange={(date) => date && updateFormData("purchaseDate", date)}
                       />
@@ -981,6 +996,7 @@ export function AlternativeAssetQuickAddModal({
                         {t("asset:quickAdd.link_to_asset_optional")}
                       </Label>
                       <ResponsiveSelect
+                        aria-label={t("asset:quickAdd.link_to_asset_optional")}
                         value={formData.linkedAssetId}
                         onValueChange={(v) => updateFormData("linkedAssetId", v)}
                         options={linkableAssetOptions}
@@ -996,7 +1012,7 @@ export function AlternativeAssetQuickAddModal({
         </div>
 
         {/* Footer with navigation */}
-        <div className="mt-auto shrink-0 border-t px-6 py-4">
+        <div className="shrink-0 border-t px-6 py-4">
           <div className="flex w-full gap-3">
             {step === 2 && allowKindChange && (
               <Button
@@ -1007,7 +1023,7 @@ export function AlternativeAssetQuickAddModal({
                 disabled={isSubmitting}
                 className="flex-1"
               >
-                <Icons.ArrowLeft className="mr-2 h-4 w-4" />
+                <Icons.ArrowLeft className="me-2 h-4 w-4 rtl:rotate-180" />
                 {t("asset:quickAdd.back")}
               </Button>
             )}
@@ -1019,13 +1035,13 @@ export function AlternativeAssetQuickAddModal({
             >
               {isSubmitting ? (
                 <>
-                  <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                  <Spinner className="me-2 h-4 w-4" />
                   {t("asset:quickAdd.creating")}
                 </>
               ) : step === 1 ? (
                 <>
                   {t("asset:quickAdd.continue")}
-                  <Icons.ArrowRight className="ml-2 h-4 w-4" />
+                  <Icons.ArrowRight className="ms-2 h-4 w-4 rtl:rotate-180" />
                 </>
               ) : formData.kind === AlternativeAssetKind.LIABILITY ? (
                 t("asset:quickAdd.add_liability")

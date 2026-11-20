@@ -19,23 +19,35 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use wealthfolio_agent_tools::AgentTool;
 use wealthfolio_ai::env::test_env::{
-    MockAccountService, MockAssetService, MockCashActivityService, MockEnvironment,
-    MockTaxonomyService,
+    MockAccountService, MockAssetService, MockCashActivityService, MockCategorizationRulesService,
+    MockEnvironment, MockHealthService, MockTaxonomyService,
 };
 use wealthfolio_ai::tools::{
     GetAccounts, GetAssetAllocation, GetAssetTaxonomyAssignments, GetCashBalances, GetGoals,
     GetHealthStatus, GetHoldings, GetIncome, GetPerformance, GetValuationHistory,
-    ListAssetTaxonomies, ListCategorizationContext, PrepareAssetClassification, RecordActivities,
-    RecordActivity, RigAgentTool, SearchActivities,
+    ListAssetTaxonomies, ListCategorizationContext, PrepareAssetClassification, ProposeCategories,
+    RecordActivities, RecordActivity, RigAgentTool, SearchActivities,
 };
 use wealthfolio_core::accounts::{Account, TrackingMode};
 use wealthfolio_core::activities::{Activity, ActivityStatus};
 use wealthfolio_core::assets::{Asset, AssetKind, InstrumentType, QuoteMode};
+use wealthfolio_core::settings::{Settings, SettingsServiceTrait, SettingsUpdate};
 use wealthfolio_core::taxonomies::{
     AssetTaxonomyAssignment, Category, Taxonomy, TaxonomyWithCategories,
 };
+use wealthfolio_spending::activity_splits::ActivitySplit;
 use wealthfolio_spending::cash_activities::model::CashFlowBucket;
 use wealthfolio_spending::cash_activities::CashActivity;
+
+/// A JSON snapshot with sorted keys. wealthfolio-ai enables serde_json's
+/// `preserve_order`, so keys would otherwise follow insertion order.
+macro_rules! assert_sorted_json_snapshot {
+    ($value:expr) => {
+        insta::with_settings!({ sort_maps => true }, {
+            insta::assert_json_snapshot!($value);
+        })
+    };
+}
 
 fn fixture_account(id: &str, name: &str, account_type: &str, currency: &str) -> Account {
     let ts = NaiveDate::from_ymd_opt(2024, 1, 1)
@@ -110,7 +122,7 @@ macro_rules! output_test_dyn {
         #[tokio::test]
         async fn $test_name() {
             let result = call_json_dyn($tool, env(), serde_json::json!($args)).await;
-            insta::assert_json_snapshot!(result);
+            assert_sorted_json_snapshot!(result);
         }
     };
 }
@@ -121,7 +133,7 @@ macro_rules! output_test_dyn_env {
         #[tokio::test]
         async fn $test_name() {
             let result = call_json_dyn($tool, $env, serde_json::json!($args)).await;
-            insta::assert_json_snapshot!(result);
+            assert_sorted_json_snapshot!(result);
         }
     };
 }
@@ -204,6 +216,102 @@ output_test_dyn!(output_get_income, GetIncome, { "period": "ALL" });
 output_test_dyn!(output_get_income_default, GetIncome, {});
 output_test_dyn!(output_get_goals, GetGoals, {});
 output_test_dyn!(output_get_health_status, GetHealthStatus, {});
+output_test_dyn!(
+    output_get_health_status_refresh,
+    GetHealthStatus,
+    { "refresh": true }
+);
+
+/// A currency override must be a three-letter code, and a rate only applies
+/// between two currencies.
+#[tokio::test]
+async fn record_activity_rejects_a_bad_currency_and_a_same_currency_rate() {
+    let errors = |result: &serde_json::Value| -> Vec<String> {
+        result["ok"]["validation"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error["field"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let deposit = |extra: serde_json::Value| {
+        let mut args = serde_json::json!({
+            "activityType": "DEPOSIT", "activityDate": "2026-01-17", "amount": 100.0
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+
+    let named = call_json_dyn(
+        RecordActivity,
+        single_account_env(),
+        deposit(serde_json::json!({ "currency": "us dollars" })),
+    )
+    .await;
+    assert_eq!(errors(&named), vec!["currency"], "{named}");
+    assert_eq!(named["ok"]["validation"]["isValid"], false);
+    assert_eq!(named["ok"]["draft"]["currency"], "USD", "{named}");
+
+    let same = call_json_dyn(
+        RecordActivity,
+        single_account_env(),
+        deposit(serde_json::json!({ "fxRate": 1.08 })),
+    )
+    .await;
+    assert_eq!(errors(&same), vec!["fx_rate"], "{same}");
+    assert_eq!(same["ok"]["validation"]["isValid"], false);
+}
+
+/// A refresh within a minute of the last run returns that run; an older one
+/// runs the checks again (the mock run reports INFO).
+#[tokio::test]
+async fn health_refresh_reuses_a_run_from_the_last_minute() {
+    let env_with_run_at = |checked_at: DateTime<Utc>| {
+        let mut status = wealthfolio_core::health::HealthStatus::healthy();
+        status.overall_severity = wealthfolio_core::health::Severity::Warning;
+        status.checked_at = checked_at;
+        let mut env = MockEnvironment::new();
+        env.health_service = Arc::new(MockHealthService {
+            cached_status: Some(status),
+            ..Default::default()
+        });
+        Arc::new(env)
+    };
+    let refresh = serde_json::json!({ "refresh": true });
+
+    let recent = call_json_dyn(
+        GetHealthStatus,
+        env_with_run_at(Utc::now()),
+        refresh.clone(),
+    )
+    .await;
+    assert_eq!(recent["ok"]["overallSeverity"], "WARNING", "{recent}");
+
+    let old = Utc::now() - chrono::Duration::minutes(2);
+    let rerun = call_json_dyn(GetHealthStatus, env_with_run_at(old), refresh).await;
+    assert_eq!(rerun["ok"]["overallSeverity"], "INFO", "{rerun}");
+}
+
+/// Two refreshes at once run the checks once: the second waits for the first
+/// and returns its run.
+#[tokio::test]
+async fn concurrent_health_refreshes_run_the_checks_once() {
+    let health = Arc::new(MockHealthService::default());
+    let mut env = MockEnvironment::new();
+    env.health_service = health.clone();
+    let env = Arc::new(env);
+    let refresh = serde_json::json!({ "refresh": true });
+
+    let (first, second) = tokio::join!(
+        call_json_dyn(GetHealthStatus, env.clone(), refresh.clone()),
+        call_json_dyn(GetHealthStatus, env, refresh),
+    );
+    assert_eq!(first["ok"]["overallSeverity"], "INFO", "{first}");
+    assert_eq!(second["ok"]["overallSeverity"], "INFO", "{second}");
+    assert_eq!(health.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
 output_test_dyn!(output_list_asset_taxonomies, ListAssetTaxonomies, {});
 output_test_dyn!(
     output_get_asset_taxonomy_assignments,
@@ -377,6 +485,7 @@ fn classification_env() -> Arc<MockEnvironment> {
                 false,
             ),
         ],
+        ..Default::default()
     });
     env.taxonomy_service = Arc::new(MockTaxonomyService {
         taxonomies: vec![
@@ -606,6 +715,8 @@ fn fixture_cash_activity(
         net_amount: -12.5,
         net_amount_base: None,
         visible_spending_amount: 0.0,
+        cash_balance: None,
+        cash_balance_currency: None,
     }
 }
 
@@ -618,12 +729,12 @@ fn categorization_env() -> Arc<MockEnvironment> {
     });
     env.taxonomy_service = Arc::new(MockTaxonomyService {
         taxonomies: vec![fixture_taxonomy(
-            "spending",
+            "spending_categories",
             "Spending",
             "activity",
             vec![
-                fixture_category("spending", "cat-food", "Food"),
-                fixture_child_category("spending", "cat-coffee", "cat-food", "Coffee"),
+                fixture_category("spending_categories", "cat-food", "Food"),
+                fixture_child_category("spending_categories", "cat-coffee", "cat-food", "Coffee"),
             ],
         )],
         assignments: vec![],
@@ -642,11 +753,66 @@ fn categorization_env() -> Arc<MockEnvironment> {
                 "acc-1",
                 "2024-05-10T00:00:00Z",
                 "SQ *COFFEE SHOP OTTAWA",
-                Some(("spending", "cat-coffee")),
+                Some(("spending_categories", "cat-coffee")),
             ),
         ],
     });
     Arc::new(env)
+}
+
+#[tokio::test]
+async fn incompatible_savings_rule_does_not_hide_compatible_rule_proposals() {
+    use wealthfolio_agent_tools::tools::categorization_context::{
+        compute_categorization_state, CategorizationFilters,
+    };
+    use wealthfolio_spending::categorization_rules::{CategorizationRule, RuleMatchType};
+
+    let mut env = Arc::into_inner(categorization_env()).expect("only fixture owner");
+    let now = Utc::now().naive_utc();
+    env.categorization_rules_service = Arc::new(MockCategorizationRulesService {
+        rules: [
+            ("savings_categories", "cat-savings", 10),
+            ("spending_categories", "cat-coffee", 1),
+        ]
+        .into_iter()
+        .map(|(taxonomy, category, priority)| CategorizationRule {
+            id: category.to_string(),
+            name: category.to_string(),
+            pattern: "COFFEE".to_string(),
+            match_type: RuleMatchType::Contains,
+            taxonomy_id: Some(taxonomy.to_string()),
+            category_id: Some(category.to_string()),
+            activity_type: None,
+            amount_op: None,
+            amount_value: None,
+            amount_value2: None,
+            priority,
+            is_global: true,
+            account_id: None,
+            preset_id: None,
+            preset_rule_key: None,
+            preset_version: None,
+            preset_modified: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .collect(),
+    });
+
+    let state = compute_categorization_state(
+        &env,
+        CategorizationFilters {
+            activity_ids: Some(vec!["cash-a".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.proposals.len(), 1);
+    assert_eq!(state.proposals[0].activity_id, "cash-a");
+    assert_eq!(state.proposals[0].category_id, "cat-coffee");
+    assert_eq!(state.proposals[0].source, "rule");
+    assert!(state.unproposed.is_empty());
 }
 
 output_test_dyn_env!(
@@ -661,6 +827,287 @@ output_test_dyn_env!(
     categorization_env(),
     { "activityIds": ["cash-a"] }
 );
+
+/// Kind of a fixture row in [`categorization_env_with`].
+#[derive(Clone, Copy, PartialEq)]
+enum Row {
+    /// Takes a category.
+    Spending,
+    /// Neutral transfer: takes no category.
+    Transfer,
+    /// Already split across categories: left as it is.
+    Split,
+}
+
+/// Env whose search returns the given rows.
+fn categorization_env_with(rows: &[(&str, Row)]) -> Arc<MockEnvironment> {
+    let mut env = Arc::into_inner(categorization_env()).expect("only fixture owner");
+    env.cash_activity_service = Arc::new(MockCashActivityService {
+        items: rows
+            .iter()
+            .map(|(id, kind)| {
+                let mut row = fixture_cash_activity(
+                    id,
+                    "acc-1",
+                    "2024-06-15T00:00:00Z",
+                    &format!("PAYEE {id}"),
+                    None,
+                );
+                match kind {
+                    Row::Spending => {}
+                    Row::Transfer => row.cash_flow_bucket = CashFlowBucket::Neutral,
+                    Row::Split => {
+                        let created = DateTime::<Utc>::from_timestamp(0, 0)
+                            .expect("epoch is a valid timestamp")
+                            .naive_utc();
+                        row.splits.push(ActivitySplit {
+                            id: format!("split-{id}"),
+                            activity_id: id.to_string(),
+                            taxonomy_id: "spending_categories".to_string(),
+                            category_id: "dining".to_string(),
+                            amount: Decimal::new(-1250, 2),
+                            note: None,
+                            sort_order: 0,
+                            created_at: created,
+                            updated_at: created,
+                        });
+                    }
+                }
+                row
+            })
+            .collect(),
+    });
+    Arc::new(env)
+}
+
+/// Rows that take no category (neutral transfers) count toward `total` but
+/// appear in neither list, so they never become "rows needing a choice" and a
+/// batch made only of them renders no review widget.
+#[tokio::test]
+async fn neutral_rows_are_not_rows_needing_a_choice() {
+    let only_neutral = categorization_env_with(&[("transfer", Row::Transfer)]);
+    let context = call_json_dyn(
+        ListCategorizationContext,
+        only_neutral.clone(),
+        serde_json::json!({ "status": "all" }),
+    )
+    .await;
+    assert_eq!(context["ok"]["summary"]["total"], 1, "{context}");
+    assert!(
+        context["ok"]["nextStep"]
+            .as_str()
+            .is_some_and(|step| step.contains("no categorization widget")),
+        "{context}"
+    );
+    let proposals = call_json_dyn(
+        ProposeCategories,
+        only_neutral,
+        serde_json::json!({ "status": "all", "aiProposals": [] }),
+    )
+    .await;
+    assert_eq!(proposals["ok"]["summary"]["total"], 1, "{proposals}");
+    assert_eq!(proposals["ok"]["summary"]["unproposed"], 0, "{proposals}");
+
+    let mixed = categorization_env_with(&[("transfer", Row::Transfer), ("unknown", Row::Spending)]);
+    let proposals = call_json_dyn(
+        ProposeCategories,
+        mixed,
+        serde_json::json!({ "status": "all", "aiProposals": [] }),
+    )
+    .await;
+    assert_eq!(proposals["ok"]["summary"]["total"], 2, "{proposals}");
+    assert_eq!(proposals["ok"]["summary"]["unproposed"], 1, "{proposals}");
+    assert_eq!(
+        proposals["ok"]["unproposed"].as_array().map(Vec::len),
+        Some(1),
+        "{proposals}"
+    );
+}
+
+fn next_step_of(context: &serde_json::Value) -> String {
+    context["ok"]["nextStep"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A call that fills its limit with rows needing no category read only the
+/// first matches, so the next step says later matches were not checked instead
+/// of "none take a category". This holds for a search and for an id list longer
+/// than the limit; an id list within the limit is read whole.
+#[tokio::test]
+async fn full_batch_of_neutral_rows_is_not_called_complete() {
+    let env = categorization_env_with(&[
+        ("transfer-1", Row::Transfer),
+        ("transfer-2", Row::Transfer),
+        ("transfer-3", Row::Transfer),
+    ]);
+    let next_step = |args: serde_json::Value| {
+        let env = env.clone();
+        async move { next_step_of(&call_json_dyn(ListCategorizationContext, env, args).await) }
+    };
+
+    let full = next_step(serde_json::json!({ "status": "all", "limit": 2 })).await;
+    assert!(
+        full.contains("None of the first 2 matching transactions"),
+        "{full}"
+    );
+    assert!(full.contains("Later matches were not checked"), "{full}");
+
+    let partial = next_step(serde_json::json!({ "status": "all", "limit": 4 })).await;
+    assert!(partial.starts_with("None of the matching"), "{partial}");
+
+    let cut_short = next_step(serde_json::json!({
+        "status": "all",
+        "limit": 2,
+        "activityIds": ["transfer-1", "transfer-2", "transfer-3"]
+    }))
+    .await;
+    assert!(
+        cut_short.contains("None of the first 2 matching transactions"),
+        "{cut_short}"
+    );
+
+    let read_whole = next_step(serde_json::json!({
+        "status": "all",
+        "limit": 2,
+        "activityIds": ["transfer-1", "transfer-2"]
+    }))
+    .await;
+    assert!(
+        read_whole.starts_with("None of the matching"),
+        "{read_whole}"
+    );
+}
+
+/// Split rows are left as they are, so a full batch of them has a total of 0.
+/// The next step still says later matches were not checked rather than "no
+/// matching transactions were found".
+#[tokio::test]
+async fn full_batch_of_split_rows_is_not_called_empty() {
+    let env = categorization_env_with(&[("split-1", Row::Split), ("split-2", Row::Split)]);
+
+    let full = next_step_of(
+        &call_json_dyn(
+            ListCategorizationContext,
+            env.clone(),
+            serde_json::json!({ "status": "all", "limit": 2 }),
+        )
+        .await,
+    );
+    assert!(full.contains("2 are split transactions"), "{full}");
+    assert!(full.contains("Later matches were not checked"), "{full}");
+
+    let partial = next_step_of(
+        &call_json_dyn(
+            ListCategorizationContext,
+            env,
+            serde_json::json!({ "status": "all", "limit": 3 }),
+        )
+        .await,
+    );
+    assert!(partial.starts_with("No matching transactions"), "{partial}");
+}
+
+/// A call whose filters match no rows still returns the configured
+/// categories, so the review card says "no transactions matched" rather than
+/// "no spending taxonomies are configured".
+#[tokio::test]
+async fn no_matching_rows_still_return_the_configured_categories() {
+    let mut env = Arc::into_inner(categorization_env()).expect("only fixture owner");
+    env.cash_activity_service = Arc::new(MockCashActivityService { items: Vec::new() });
+    let env = Arc::new(env);
+    for result in [
+        call_json_dyn(
+            ProposeCategories,
+            env.clone(),
+            serde_json::json!({ "aiProposals": [] }),
+        )
+        .await,
+        call_json_dyn(ListCategorizationContext, env, serde_json::json!({})).await,
+    ] {
+        assert_eq!(result["ok"]["summary"]["total"], 0, "{result}");
+        assert_eq!(
+            result["ok"]["taxonomies"][0]["taxonomyId"], "spending_categories",
+            "{result}"
+        );
+    }
+}
+
+/// Settings that only answer the timezone.
+struct TimezoneSettings(&'static str);
+
+#[async_trait::async_trait]
+impl SettingsServiceTrait for TimezoneSettings {
+    fn get_settings(&self) -> wealthfolio_core::errors::Result<Settings> {
+        Ok(Settings {
+            timezone: self.0.to_string(),
+            ..Settings::default()
+        })
+    }
+    async fn update_settings(&self, _: &SettingsUpdate) -> wealthfolio_core::errors::Result<()> {
+        unreachable!()
+    }
+    fn get_base_currency(&self) -> wealthfolio_core::errors::Result<Option<String>> {
+        unreachable!()
+    }
+    fn is_auto_update_check_enabled(&self) -> wealthfolio_core::errors::Result<bool> {
+        unreachable!()
+    }
+    fn is_sync_enabled(&self) -> wealthfolio_core::errors::Result<bool> {
+        unreachable!()
+    }
+    fn get_setting_value(&self, _: &str) -> wealthfolio_core::errors::Result<Option<String>> {
+        unreachable!()
+    }
+    async fn set_setting_value(&self, _: &str, _: &str) -> wealthfolio_core::errors::Result<()> {
+        unreachable!()
+    }
+}
+
+/// Plain YYYY-MM-DD bounds cover that day in the settings timezone. They
+/// failed with "premature end of input" before. `cash-a` posted at
+/// 2024-06-15T00:00Z: June 15 in UTC, June 14 in Toronto. Explicit IDs take
+/// the path that filters dates in code (the mock search ignores them).
+#[tokio::test]
+async fn categorization_reads_plain_dates_as_local_days() {
+    let env_in = |timezone: &'static str| {
+        let mut env = Arc::into_inner(categorization_env()).expect("only fixture owner");
+        env.settings_service = Arc::new(TimezoneSettings(timezone));
+        Arc::new(env)
+    };
+    let filters = serde_json::json!({
+        "activityIds": ["cash-a"],
+        "status": "all",
+        "startDate": "2024-06-15",
+        "endDate": "2024-06-15",
+    });
+    let mut propose = filters.clone();
+    propose["aiProposals"] = serde_json::json!([]);
+    for (timezone, expected) in [("UTC", 1), ("America/Toronto", 0)] {
+        for result in [
+            call_json_dyn(ListCategorizationContext, env_in(timezone), filters.clone()).await,
+            call_json_dyn(ProposeCategories, env_in(timezone), propose.clone()).await,
+        ] {
+            assert_eq!(
+                result["ok"]["summary"]["total"], expected,
+                "{timezone}: {result}"
+            );
+        }
+    }
+    let bad = call_json_dyn(
+        ListCategorizationContext,
+        categorization_env(),
+        serde_json::json!({ "startDate": "Jan 1" }),
+    )
+    .await;
+    assert!(
+        bad["err"]
+            .as_str()
+            .is_some_and(|e| e.contains("startDate must be")),
+        "{bad}"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Draft/suggest tool outputs (migrated from `crates/ai/src/tools/*.rs` inline
@@ -694,6 +1141,18 @@ output_test_dyn_env!(
     RecordActivity,
     single_account_env(),
     { "activityType": "DEPOSIT", "activityDate": "2026-01-17", "amount": 5000.0 }
+);
+output_test_dyn_env!(
+    output_record_activity_foreign_currency,
+    RecordActivity,
+    single_account_env(),
+    {
+        "activityType": "DEPOSIT",
+        "activityDate": "2026-01-17",
+        "amount": 1000.0,
+        "currency": " eur ",
+        "fxRate": 1.08
+    }
 );
 output_test_dyn_env!(
     output_record_activity_dividend_drip,
@@ -766,12 +1225,16 @@ async fn live_ollama_each_assistant_tool() {
     use futures::StreamExt;
     use rig::{
         agent::MultiTurnStreamItem,
-        client::{AgentClientExt, Nothing},
-        streaming::StreamedAssistantContent,
-        tool::{DynamicTool, PortableTool, ToolOutput},
+        http_client::ReqwestClient,
+        message::ToolName,
+        providers::ollama::wire::OllamaConfig,
+        streaming::{Item, StreamEvent},
+        tool::{DynamicTool, Tool, ToolContext, ToolOutput},
+        AgentBuilder,
     };
     use std::sync::Mutex;
     use wealthfolio_ai::tools::{agent_catalog, ImportCsvTool};
+    use wealthfolio_ai::types::MessageAttachment;
     let thinking = std::env::var("WF_TEST_OLLAMA_THINKING").as_deref() == Ok("true");
     let model = std::env::var("WF_TEST_OLLAMA_MODEL").expect("set model");
     let mut names: Vec<_> = agent_catalog()
@@ -798,10 +1261,10 @@ async fn live_ollama_each_assistant_tool() {
                 serde_json::json!({"activities":[{"activityType":"DEPOSIT","activityDate":"2024-06-15","amount":100,"account":"acc-1"}]})
             }
             "create_categorization_rule" => {
-                serde_json::json!({"pattern":"COFFEE","matchType":"contains","categoryKey":"coffee","taxonomyId":"spending"})
+                serde_json::json!({"pattern":"COFFEE","matchType":"contains","categoryKey":"coffee","taxonomyId":"spending_categories"})
             }
             "propose_transaction_categories" => {
-                serde_json::json!({"activityIds":["cash-a"],"aiProposals":[{"activityId":"cash-a","taxonomyId":"spending","categoryKey":"coffee","confidence":0.95}]})
+                serde_json::json!({"activityIds":["cash-a"],"aiProposals":[{"activityId":"cash-a","taxonomyId":"spending_categories","categoryKey":"coffee","confidence":0.95}]})
             }
             "get_asset_taxonomy_assignments" => serde_json::json!({"assetQuery":"AAPL"}),
             "prepare_asset_classification" => {
@@ -809,7 +1272,7 @@ async fn live_ollama_each_assistant_tool() {
             }
             "get_performance" => serde_json::json!({"period":"ALL"}),
             "import_csv" => {
-                serde_json::json!({"csvContent":"Date,Type,Amount\n2024-06-15,DEPOSIT,100\n","accountId":"acc-1"})
+                serde_json::json!({"attachmentName":"deposits.csv","accountId":"acc-1"})
             }
             _ => serde_json::json!({}),
         };
@@ -820,7 +1283,7 @@ async fn live_ollama_each_assistant_tool() {
             let definition = adapter.definition();
             let tool_name = definition.name.clone();
             let observed = observations.clone();
-            tools.push(DynamicTool::new(definition.name, definition.description, definition.parameters, move |_, args| {
+            tools.push(DynamicTool::new(definition.name, definition.description, definition.parameters, move |args| {
                 let adapter=adapter.clone(); let observed=observed.clone(); let tool_name=tool_name.clone();
                 Box::pin(async move {
                     let result=adapter.call(args).await;
@@ -829,42 +1292,46 @@ async fn live_ollama_each_assistant_tool() {
                 })
             }));
         }
-        let csv = Arc::new(ImportCsvTool::new(test_env.clone(), "USD".into()));
-        let def = rig::completion::ToolDefinition {
-            name: "import_csv".into(),
-            description: csv.description(),
-            parameters: csv.parameters(),
-        };
+        let csv = Arc::new(ImportCsvTool::new(
+            test_env.clone(),
+            "USD".into(),
+            vec![MessageAttachment {
+                name: "deposits.csv".into(),
+                content_type: "text/csv".into(),
+                data: "Date,Type,Amount\n2024-06-15,DEPOSIT,100\n".into(),
+            }],
+        ));
+        let def = rig::completion::ToolDefinition::new(
+            ToolName::new("import_csv").unwrap(),
+            csv.description(),
+            csv.parameters(),
+        );
         let observed = observations.clone();
-        tools.push(DynamicTool::new(def.name,def.description,def.parameters,move |_,args| {
+        tools.push(DynamicTool::new(def.name,def.description,def.parameters,move |args| {
             let csv=csv.clone();let observed=observed.clone();
             Box::pin(async move {
                 let parsed=serde_json::from_value(args).map_err(rig::tool::ToolExecutionError::from_error)?;
-                let result=csv.call(parsed).await.map_err(rig::tool::ToolExecutionError::from_error);
+                let result=csv.call(&mut ToolContext::new(), parsed).await.map_err(rig::tool::ToolExecutionError::from_error);
                 observed.lock().unwrap().push(serde_json::json!({"tool":"import_csv","ok":result.is_ok(),"result":result.as_ref().ok(),"error":result.as_ref().err().map(ToString::to_string)}));
                 result.map(|r| ToolOutput::json(serde_json::to_value(r).unwrap()))
             })
         }));
-        let client = rig::providers::ollama::Client::builder()
-            .api_key(Nothing)
-            .http_client(wealthfolio_http::client())
-            .build()
-            .unwrap();
-        let agent=client.agent(&model).temperature(0.0)
+        let client = OllamaConfig::new().connect(ReqwestClient::from(wealthfolio_http::client()));
+        let agent=AgentBuilder::new(client.native_completion(&model)).temperature(0.0)
             .preamble("You are testing tool integration against synthetic fixtures. Call the specifically requested tool once with the supplied arguments. Do not call other tools. After its response, briefly report the result and stop.")
             .additional_params(serde_json::json!({"think":thinking,"options":{"num_ctx":32768,"num_predict":1024}}))
             .dynamic_tools(tools).build();
         let prompt =
             format!("Call {name} with these arguments: {args}. Then briefly report its result.");
-        let mut stream = agent.runner(prompt).max_turns(2).stream().await;
+        let mut stream = agent.prompt(prompt).max_turns(2).stream();
         let mut text = String::new();
         let mut stream_error = None;
         let finished = tokio::time::timeout(std::time::Duration::from_secs(120), async {
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(t),
-                    )) => text.push_str(&t.text),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                        StreamEvent::Text { text: t, .. },
+                    ))) => text.push_str(&t),
                     Err(e) => {
                         stream_error = Some(e.to_string());
                         break;

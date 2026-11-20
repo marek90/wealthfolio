@@ -1,3 +1,5 @@
+import { localizeAllocation } from "@/lib/taxonomy-labels";
+import type { TFunction } from "i18next";
 import { useAccountsSimplePerformance } from "@/hooks/use-accounts-simple-performance";
 import type {
   Account,
@@ -7,9 +9,22 @@ import type {
   TaxonomyAllocation,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { Card, CardTitle, Icons, PrivacyAmount, Skeleton } from "@wealthfolio/ui";
-import { useMemo, useState } from "react";
+import {
+  Card,
+  CardTitle,
+  Icons,
+  PrivacyAmount,
+  Skeleton,
+  useNumberFormatting,
+} from "@wealthfolio/ui";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  fallbackPalette,
+  getTreemapPaletteSnapshot,
+  readableLabelColors,
+  subscribeToTreemapTheme,
+} from "@/pages/holdings/components/treemap-palette";
 import {
   accountTreeWeights,
   buildBreakdownTree,
@@ -18,6 +33,7 @@ import {
   toBreakdownNodes,
   type BreakdownNode,
 } from "./allocation-derivations";
+import { LensSwitcher } from "./lens-switcher";
 
 interface PortfolioExplorerProps {
   allocations?: PortfolioAllocations;
@@ -46,6 +62,9 @@ function sumOfCategories(allocation: TaxonomyAllocation | undefined): number {
   return (allocation?.categories ?? []).reduce((s, c) => s + (c.value > 0 ? c.value : 0), 0);
 }
 
+/** Rows kept before the rest collapse into one "Other" row; the labels count rows, not underlying items. */
+const COLLAPSED_TOP_N = 5;
+
 function sumValue(nodes: BreakdownNode[]): number {
   return nodes.reduce((s, n) => s + n.value, 0);
 }
@@ -73,6 +92,22 @@ function collapseWeights(
 }
 
 function SegmentedBar({ nodes }: { nodes: BreakdownNode[] }) {
+  const numbers = useNumberFormatting();
+  // Each label takes the theme's dark or light label colour, whichever reads better on
+  // its segment, as the treemap's tiles do; both follow the theme and mode.
+  const palette = useSyncExternalStore(
+    subscribeToTreemapTheme,
+    getTreemapPaletteSnapshot,
+    () => fallbackPalette,
+  );
+  const labelColors = useMemo(
+    () =>
+      readableLabelColors(
+        nodes.map((node) => node.color),
+        palette,
+      ),
+    [nodes, palette],
+  );
   return (
     <div className="bg-muted flex h-6 w-full overflow-hidden rounded-lg">
       {nodes.map((node, index) => (
@@ -84,10 +119,15 @@ function SegmentedBar({ nodes }: { nodes: BreakdownNode[] }) {
             background: node.color,
             boxShadow: index === 0 ? undefined : "inset 2px 0 0 var(--card)",
           }}
-          title={`${node.name} · ${node.percentage.toFixed(1)}%`}
+          title={`${node.name} · ${numbers.formatPercent(node.percentage / 100, { digits: 1 })}`}
         >
           {node.percentage >= 8 && (
-            <span className="truncate text-[10.5px] font-bold text-white/95">{node.name}</span>
+            <span
+              className="text-2xs truncate font-bold text-white/95"
+              style={{ color: labelColors[index] }}
+            >
+              {node.name}
+            </span>
           )}
         </div>
       ))}
@@ -100,13 +140,18 @@ function taxonomyLens(
   label: string,
   unit: string,
   allocation: TaxonomyAllocation | undefined,
-  residualName: (categoryName: string) => string,
+  t: TFunction,
 ): Lens {
+  const displayAllocation = allocation ? localizeAllocation(t, allocation) : undefined;
   return {
     key,
     label,
     unit,
-    nodes: buildBreakdownTree(allocation?.categories, sumOfCategories(allocation), residualName),
+    nodes: buildBreakdownTree(
+      displayAllocation?.categories,
+      sumOfCategories(allocation),
+      (categoryName) => t("common:allocation_other_in_category", { category: categoryName }),
+    ),
     allocation,
   };
 }
@@ -122,6 +167,7 @@ function accountsLens(label: string, unit: string, nodes: BreakdownNode[]): Lens
   };
 }
 
+/** Lens-based breakdown of the portfolio: allocation, accounts, sectors, regions, risk, types, currency, custom groups. */
 export function PortfolioExplorer({
   allocations,
   holdings,
@@ -133,6 +179,7 @@ export function PortfolioExplorer({
   onOpenAllocation,
 }: PortfolioExplorerProps) {
   const { t } = useTranslation();
+  const numbers = useNumberFormatting();
   const [activeKey, setActiveKey] = useState("allocation");
   const [showAll, setShowAll] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -147,15 +194,13 @@ export function PortfolioExplorer({
   const accountValues = accountValuations ?? performance;
 
   const lenses = useMemo<Lens[]>(() => {
-    const residualName = (categoryName: string) =>
-      t("common:allocation_other_in_category", { category: categoryName });
     const list: Lens[] = [
       taxonomyLens(
         "allocation",
         t("insights:insights.explorer.lens_allocation"),
         t("insights:insights.explorer.unit_categories"),
         allocations?.assetClasses,
-        residualName,
+        t,
       ),
       accountsLens(
         t("insights:insights.explorer.lens_accounts"),
@@ -167,28 +212,28 @@ export function PortfolioExplorer({
         t("insights:insights.explorer.lens_sectors"),
         t("insights:insights.explorer.unit_sectors"),
         allocations?.sectors,
-        residualName,
+        t,
       ),
       taxonomyLens(
         "regions",
         t("insights:insights.explorer.lens_regions"),
         t("insights:insights.explorer.unit_regions"),
         allocations?.regions,
-        residualName,
+        t,
       ),
       taxonomyLens(
         "risk",
         t("insights:insights.explorer.lens_risk"),
         t("insights:insights.explorer.unit_levels"),
         allocations?.riskCategory,
-        residualName,
+        t,
       ),
       taxonomyLens(
         "security",
         t("insights:insights.explorer.lens_security"),
         t("insights:insights.explorer.unit_types"),
         allocations?.securityTypes,
-        residualName,
+        t,
       ),
       {
         key: "currency",
@@ -206,7 +251,7 @@ export function PortfolioExplorer({
             taxonomy.taxonomyName,
             t("insights:insights.explorer.unit_groups"),
             taxonomy,
-            residualName,
+            t,
           ),
         );
       }
@@ -242,11 +287,17 @@ export function PortfolioExplorer({
   }
 
   const total = sumValue(active.nodes);
-  const collapsible = active.nodes.length > 6;
-  const otherLabel = t("insights:insights.explorer.other_units", { unit: active.unit });
-  const barWeights = collapsible ? collapseWeights(active.nodes, 5, otherLabel) : active.nodes;
+  const collapsible = active.nodes.length > COLLAPSED_TOP_N + 1;
+  const otherLabel = t("insights:insights.explorer.other_units", {
+    count: active.nodes.length - COLLAPSED_TOP_N,
+  });
+  const barWeights = collapsible
+    ? collapseWeights(active.nodes, COLLAPSED_TOP_N, otherLabel)
+    : active.nodes;
   const listWeights =
-    collapsible && !showAll ? collapseWeights(active.nodes, 5, otherLabel) : active.nodes;
+    collapsible && !showAll
+      ? collapseWeights(active.nodes, COLLAPSED_TOP_N, otherLabel)
+      : active.nodes;
 
   function renderNode(node: BreakdownNode): React.ReactNode[] {
     const hasChildren = !!node.children?.length;
@@ -270,7 +321,7 @@ export function PortfolioExplorer({
           interactive &&
             "hover:bg-muted/60 -mx-1.5 cursor-pointer rounded-lg px-1.5 transition-colors",
         )}
-        style={{ paddingLeft: node.depth ? node.depth * 18 : undefined }}
+        style={{ paddingInlineStart: node.depth ? node.depth * 18 : undefined }}
         onClick={onActivate}
         role={interactive ? "button" : undefined}
         tabIndex={interactive ? 0 : undefined}
@@ -287,7 +338,7 @@ export function PortfolioExplorer({
             <Icons.ChevronRight
               className={cn(
                 "text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform",
-                isOpen && "rotate-90",
+                isOpen ? "rotate-90" : "rtl:rotate-180",
               )}
             />
           ) : (
@@ -296,7 +347,7 @@ export function PortfolioExplorer({
           <span className="h-3 w-3 shrink-0 rounded-sm" style={{ background: node.color }} />
           <span
             className={cn(
-              "truncate text-[13px]",
+              "truncate text-sm",
               node.depth ? "text-muted-foreground font-medium" : "text-foreground font-semibold",
               isOther && "text-muted-foreground font-medium",
             )}
@@ -304,14 +355,14 @@ export function PortfolioExplorer({
             {node.name}
           </span>
         </span>
-        <span className="text-foreground w-[62px] text-right text-[13px] font-bold tabular-nums">
-          {node.percentage.toFixed(1)}%
+        <span className="text-foreground w-15.5 text-end text-sm font-bold tabular-nums">
+          {numbers.formatPercent(node.percentage / 100, { digits: 1 })}
         </span>
-        <span className="text-muted-foreground w-[84px] text-right text-[12px] tabular-nums">
+        <span className="text-muted-foreground w-21 text-end text-xs tabular-nums">
           <PrivacyAmount value={node.value} currency={currency} />
         </span>
         <span className="text-muted-foreground w-3.5 text-center">
-          {canOpenSheet ? <Icons.ChevronRight className="h-3.5 w-3.5" /> : null}
+          {canOpenSheet ? <Icons.ChevronRight className="h-3.5 w-3.5 rtl:rotate-180" /> : null}
         </span>
       </div>
     );
@@ -325,50 +376,45 @@ export function PortfolioExplorer({
   return (
     <div>
       <Card className="overflow-hidden p-0">
-        {/* Title and lens tabs */}
-        <div className="bg-muted/30 flex flex-wrap items-center gap-1 border-b px-6 py-2.5">
-          <CardTitle className="text-muted-foreground mr-5 flex shrink-0 items-center gap-4 py-2 text-sm font-medium uppercase tracking-wider">
-            {t("insights:insights.explorer.breakdown")}
-            <Icons.ChevronRight className="h-4 w-4 opacity-40" aria-hidden="true" />
-          </CardTitle>
-          {lenses.map((lens) => (
-            <button
-              key={lens.key}
-              type="button"
-              onClick={() => selectLens(lens.key)}
-              className={cn(
-                "rounded-lg px-4 py-2 text-[13px] transition-colors",
-                lens.key === active.key
-                  ? "bg-foreground text-background font-semibold"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {lens.label}
-            </button>
-          ))}
+        {/* Title and lens switcher; narrow cards give the switcher its own row. */}
+        <div className="@container px-6 pt-5 pb-1">
+          <div className="flex flex-col gap-3 @[34rem]:flex-row @[34rem]:items-center @[34rem]:gap-4">
+            <CardTitle className="text-muted-foreground shrink-0 text-sm font-medium tracking-wider uppercase">
+              {t("insights:insights.explorer.breakdown")}
+            </CardTitle>
+            <LensSwitcher
+              lenses={lenses}
+              activeKey={active.key}
+              onSelect={selectLens}
+              aria-label={t("insights:insights.explorer.breakdown")}
+              className="w-full @[34rem]:justify-end"
+            />
+          </div>
         </div>
 
         {/* Full-width breakdown */}
         <div className="p-6">
           <div className="mb-3.5 flex items-baseline justify-between gap-3.5">
-            <span className="text-[13.5px] font-bold">{active.label}</span>
-            <span className="text-muted-foreground text-[12.5px] tabular-nums">
+            <span className="text-sm font-bold">{active.label}</span>
+            <span className="text-muted-foreground text-xs tabular-nums">
               <PrivacyAmount value={total} currency={currency} /> ·{" "}
               {active.count ?? active.nodes.length} {active.unit}
             </span>
           </div>
           <SegmentedBar nodes={barWeights} />
-          <div className="mb-1 mt-4 flex items-baseline justify-between">
-            <span className="text-muted-foreground text-[10.5px] font-semibold uppercase tracking-wider">
+          <div className="mt-4 mb-1 flex items-baseline justify-between">
+            <span className="text-muted-foreground text-2xs font-semibold tracking-wider uppercase">
               {collapsible && !showAll
-                ? t("insights:insights.explorer.top_units", { unit: active.unit })
+                ? t("insights:insights.explorer.top_units", {
+                    count: COLLAPSED_TOP_N,
+                  })
                 : active.label}
             </span>
             {collapsible && (
               <button
                 type="button"
                 onClick={() => setShowAll((v) => !v)}
-                className="text-muted-foreground hover:text-foreground text-[12px] font-semibold"
+                className="text-muted-foreground hover:text-foreground text-xs font-semibold"
               >
                 {showAll
                   ? t("insights:insights.explorer.show_less")

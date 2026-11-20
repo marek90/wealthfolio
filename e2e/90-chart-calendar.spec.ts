@@ -1,5 +1,6 @@
 import { expect, Page, test } from "@playwright/test";
 import {
+  BASE_URL,
   completeOnboardingIfNeeded,
   createAccount,
   fillDateField,
@@ -11,8 +12,11 @@ import {
 } from "./helpers";
 
 /**
- * Custom-fork spec: the dashboard history-chart calendar range picker
- * (apps/frontend/src/components/chart-range-picker.tsx).
+ * Custom-fork spec: the history-chart calendar range picker
+ * (apps/frontend/src/components/chart-range-picker.tsx) on the ACCOUNT page.
+ * Since the v3.13.1 merge the dashboard uses upstream's own date picker
+ * (SpendingDatePicker); ours lives only on the account page. The dashboard
+ * test below only guards that our brush survives next to upstream's controls.
  *
  * Guards the two mobile bugs fixed in July 2026:
  *  1. numberOfMonths must be 1 on mobile (3 stacked months overflowed the viewport)
@@ -44,8 +48,17 @@ async function seedPortfolio(page: Page) {
   }
 }
 
-async function openDashboardCalendar(page: Page) {
-  await gotoAppPath(page, "/");
+async function gotoCalendarAccount(page: Page) {
+  const response = await page.request.get(`${BASE_URL}/api/v1/accounts`);
+  expect(response.ok()).toBeTruthy();
+  const accounts = (await response.json()) as { id: string; name: string }[];
+  const account = accounts.find((a) => a.name === "Calendar E2E");
+  expect(account).toBeDefined();
+  await gotoAppPath(page, `/accounts/${account!.id}`);
+}
+
+async function openAccountCalendar(page: Page) {
+  await gotoCalendarAccount(page);
   const trigger = page.getByTestId(CALENDAR_TRIGGER).first();
   await expect(trigger).toBeVisible({ timeout: 30000 });
   await trigger.scrollIntoViewIfNeeded();
@@ -72,10 +85,18 @@ test.describe("Chart calendar range picker", () => {
     await seedPortfolio(page);
   });
 
+  test("dashboard: brush renders beside upstream's period controls; no fork picker", async ({
+    page,
+  }) => {
+    await gotoAppPath(page, "/");
+    await expect(page.locator(".history-brush").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.getByTestId(CALENDAR_TRIGGER)).toHaveCount(0);
+  });
+
   test("desktop: shows 3 months; partial selection never unmounts the chart UI", async ({
     page,
   }) => {
-    const trigger = await openDashboardCalendar(page);
+    const trigger = await openAccountCalendar(page);
 
     // Desktop (>=768px viewport) renders three month grids.
     await expect(page.getByRole("grid")).toHaveCount(3);
@@ -102,7 +123,7 @@ test.describe("Chart calendar range picker", () => {
     }) => {
       // Open via TAP, not click — the July 2026 regression (dead month-nav buttons on
       // iOS) only reproduces through the touch event path.
-      await gotoAppPath(page, "/");
+      await gotoCalendarAccount(page);
       const trigger = page.getByTestId(CALENDAR_TRIGGER).first();
       await expect(trigger).toBeVisible({ timeout: 30000 });
       await trigger.scrollIntoViewIfNeeded();

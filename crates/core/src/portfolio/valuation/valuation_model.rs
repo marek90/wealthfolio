@@ -509,6 +509,18 @@ pub struct NegativeBalanceInfo {
     pub account_currency: String,
 }
 
+/// A day's cash from an account's valuation, without the rest of the row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyCashBalance {
+    pub valuation_date: NaiveDate,
+    /// In `account_currency`.
+    pub cash_balance: Decimal,
+    pub account_currency: String,
+    /// `Unavailable` when the engine could not complete the day, which
+    /// includes cash it could not convert and so left out of `cash_balance`.
+    pub value_status: ValuationStatus,
+}
+
 /// Domain model for daily account valuation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -548,6 +560,14 @@ pub struct DailyAccountValuation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentAccountValuation {
+    /// Base amounts are known subtotals unless this status is complete.
+    #[serde(default)]
+    pub value_status: ValuationStatus,
+    /// Completeness of the independently valued account-currency amounts.
+    #[serde(default)]
+    pub account_value_status: ValuationStatus,
+    #[serde(default)]
+    pub missing_fx: Vec<crate::fx::FxConversionIssue>,
     pub account_id: String,
     pub account_currency: String,
     pub base_currency: String,
@@ -579,6 +599,11 @@ pub struct CurrentValuationSplit {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentValuationSummary {
+    /// Base amounts and currency splits are known subtotals unless complete.
+    #[serde(default)]
+    pub value_status: ValuationStatus,
+    #[serde(default)]
+    pub missing_fx: Vec<crate::fx::FxConversionIssue>,
     pub scope_id: String,
     pub base_currency: String,
     pub cash_balance_base: Decimal,

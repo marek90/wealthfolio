@@ -250,10 +250,7 @@ async fn browsers_databases_credentials_and_stale_scopes_are_isolated() {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            body.to_string().contains("Profile operations are running"),
-            "{body}"
-        );
+        assert_eq!(body["errorCode"], "PROFILE_BUSY");
     }
     send(
         &router,
@@ -909,6 +906,69 @@ async fn runtime_startup_failure_is_retryable_without_revoking_the_profile() {
     assert_eq!(response.status(), StatusCode::LOCKED);
 }
 
+#[tokio::test]
+async fn mcp_requests_do_not_disclose_profile_startup_errors() {
+    use wealthfolio_storage_sqlite::db::DbAccess;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.mcp_enabled = true;
+    let database = DbAccess::plaintext(&config.db_path);
+    database.prepare().unwrap();
+    database.run_migrations().unwrap();
+    // Same deterministic startup failure as the retry test above.
+    database
+        .connect_rusqlite()
+        .unwrap()
+        .execute(
+            "DELETE FROM app_settings WHERE setting_key = 'instance_id'",
+            [],
+        )
+        .unwrap();
+    let router = wealthfolio_server::api::app_router_from_config(&config)
+        .await
+        .unwrap();
+    let mcp = |authorization: Option<String>| {
+        let mut request = Request::builder()
+            .uri("/mcp")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(request.body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#)).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+
+    // Requests that cannot authenticate are rejected before the profile
+    // starts: a startup attempt would answer 500.
+    for authorization in [None, Some("Bearer not-a-token".to_string())] {
+        let (status, body) = mcp(authorization).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("personal access token"), "{body}");
+    }
+
+    // A well-formed but unknown token needs the profile's database, so the
+    // profile starts and fails; the response keeps the details out.
+    let token = wealthfolio_server::mcp::auth::generate_token();
+    let (status, body) = mcp(Some(format!("Bearer {token}"))).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body,
+        "PROFILE_STARTUP_FAILED: The profile could not start. See the server log."
+    );
+    assert!(!body.contains("instance ID"), "{body}");
+    assert!(!body.contains(&*dir.path().to_string_lossy()), "{body}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cold_profile_startup_does_not_block_cached_runtime_or_initialize_twice() {
     use wealthfolio_storage_sqlite::db::DbAccess;
@@ -971,6 +1031,88 @@ async fn cold_profile_startup_does_not_block_cached_runtime_or_initialize_twice(
             .expect("Cached profile waited for cold initialization")
             .unwrap()
     ));
+}
+
+#[tokio::test]
+async fn cancelled_profile_startup_finishes_for_the_next_open() {
+    use wealthfolio_storage_sqlite::db::DbAccess;
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    let state = build_state(&config).await.unwrap();
+    let root = WebProfiles::new(state, &config).unwrap();
+    let cold = root.registry.create("Cold", "clay-fluff-animated").unwrap();
+    let path = root
+        .registry
+        .paths(&root.registry.profile(cold.id).unwrap())
+        .database;
+    let database = DbAccess::plaintext(path.to_str().unwrap());
+    // A fresh WAL database whose migration history table already exists: opening
+    // it and listing pending migrations only read, so startup waits at the first
+    // migration write, inside the blocking task that holds database ownership.
+    database.prepare().unwrap();
+    let connection = database.connect_rusqlite().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE __diesel_schema_migrations (
+                 version VARCHAR(50) PRIMARY KEY NOT NULL,
+                 run_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             BEGIN IMMEDIATE;",
+        )
+        .unwrap();
+
+    // A client that disconnects mid-startup drops its request future.
+    let cancelled = tokio::spawn({
+        let root = root.clone();
+        async move { root.runtime(cold.id).await }
+    });
+    // On this executor, ownership is observed after startup yields at the
+    // migration task's await, having passed that task its own owner clone.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.with_file_name("app.db.lock").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancelled.abort();
+    let outcome = cancelled.await;
+    assert!(
+        outcome.as_ref().is_err_and(|error| error.is_cancelled()),
+        "{:?}",
+        outcome.map(|result| result.err())
+    );
+
+    // An open cancelled while it waits for startup leaves nothing queued behind.
+    let references = Arc::strong_count(&root);
+    let queued = tokio::spawn({
+        let root = root.clone();
+        async move { root.runtime(cold.id).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    queued.abort();
+    let outcome = queued.await;
+    assert!(
+        outcome.as_ref().is_err_and(|error| error.is_cancelled()),
+        "{:?}",
+        outcome.map(|result| result.err())
+    );
+    assert_eq!(Arc::strong_count(&root), references);
+
+    let next = root.runtime(cold.id);
+    tokio::pin!(next);
+    let next_waiting = tokio::time::timeout(Duration::from_millis(50), &mut next).await;
+    connection.execute_batch("ROLLBACK;").unwrap();
+    drop(connection);
+    assert!(
+        next_waiting.is_err(),
+        "The next open must wait for startup: {:?}",
+        next_waiting.map(|result| result.err())
+    );
+    let next = tokio::time::timeout(Duration::from_secs(10), next)
+        .await
+        .unwrap();
+    assert!(next.is_ok(), "{:?}", next.err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

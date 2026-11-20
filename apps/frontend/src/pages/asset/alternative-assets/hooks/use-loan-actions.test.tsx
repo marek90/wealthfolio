@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
   apply: vi.fn<(assetId: string, action: unknown) => Promise<void>>(),
   create: vi.fn<(activity: Record<string, unknown>) => Promise<{ id: string }>>(),
   link: vi.fn<(activityId: string, link: unknown) => Promise<void>>(),
-  invalidateQuotes: vi.fn(),
   invalidateAssets: vi.fn(),
   toast: vi.fn(),
   balanceSheet: vi.fn<(props: ComponentProps<Dialogs["LoanBalanceEventDialog"]>) => void>(),
@@ -28,6 +27,12 @@ const mocks = vi.hoisted(() => ({
     vi.fn<
       (
         props: ComponentProps<typeof import("../components/renew-loan-dialog").RenewLoanDialog>,
+      ) => void
+    >(),
+  rateSheet:
+    vi.fn<
+      (
+        props: ComponentProps<typeof import("../components/change-rate-sheet").ChangeRateSheet>,
       ) => void
     >(),
 }));
@@ -49,9 +54,6 @@ vi.mock("@/hooks/use-accounts", () => ({
   }),
 }));
 vi.mock("@wealthfolio/ui/components/ui/use-toast", () => ({ toast: mocks.toast }));
-vi.mock("../../hooks/use-quote-mutations", () => ({
-  useQuoteMutations: () => ({ invalidateQuoteQueries: mocks.invalidateQuotes }),
-}));
 vi.mock("./use-alternative-asset-mutations", () => ({
   invalidateAlternativeAssetQueries: mocks.invalidateAssets,
 }));
@@ -87,6 +89,14 @@ vi.mock("../components/loan-action-dialogs", () => ({
   },
   RecalculateScheduleDialog: (props: ComponentProps<Dialogs["RecalculateScheduleDialog"]>) => {
     mocks.recalcSheet(props);
+    return null;
+  },
+}));
+vi.mock("../components/change-rate-sheet", () => ({
+  ChangeRateSheet: (
+    props: ComponentProps<typeof import("../components/change-rate-sheet").ChangeRateSheet>,
+  ) => {
+    mocks.rateSheet(props);
     return null;
   },
 }));
@@ -170,7 +180,6 @@ describe("loan actions are single backend calls", () => {
       },
     ]);
     expect(mocks.invalidateAssets).toHaveBeenCalled();
-    expect(mocks.invalidateQuotes).toHaveBeenCalled();
   });
 
   it("deletes a balance without a replacement", async () => {
@@ -198,7 +207,6 @@ describe("loan actions are single backend calls", () => {
     act(() => actions.editEvent(0));
     await expect(saveSheet({ ...extra, amount: 150 })).rejects.toBe("LOAN_EVENT_CHANGED");
     expect(mocks.invalidateAssets).toHaveBeenCalled();
-    expect(mocks.invalidateQuotes).toHaveBeenCalled();
   });
 
   it("names the edited event by position and stored value", async () => {
@@ -245,6 +253,37 @@ describe("loan actions are single backend calls", () => {
         balance: 640,
       },
     ]);
+  });
+
+  it("sends a rate change with the payment only when one was entered", async () => {
+    show();
+    expect(availability.changeRate).toBe(true);
+    act(() => actions.changeRate());
+    expect(mocks.rateSheet.mock.lastCall![0].open).toBe(true);
+    await act(async () => {
+      await mocks.rateSheet.mock.lastCall![0].onSubmit({
+        effectiveDate: new Date(2026, 5, 1),
+        annualRate: 5.25,
+      });
+    });
+    expect(sent()).toEqual(["loan", { type: "change_rate", date: "2026-06-01", annualRate: 5.25 }]);
+    expect(mocks.rateSheet.mock.lastCall![0].open).toBe(false);
+    await act(async () => {
+      await mocks.rateSheet.mock.lastCall![0].onSubmit({
+        effectiveDate: new Date(2026, 5, 1),
+        annualRate: 5.25,
+        paymentAmount: 512.4,
+      });
+    });
+    expect(sent()).toEqual([
+      "loan",
+      { type: "change_rate", date: "2026-06-01", annualRate: 5.25, paymentAmount: 512.4 },
+    ]);
+  });
+
+  it("offers a rate change only while the loan is calculated", () => {
+    show(holding({ tracking_mode: "manual" }));
+    expect(availability.changeRate).toBe(false);
   });
 
   it("sends recalculation, confirmation and repayment on their calendar day", async () => {

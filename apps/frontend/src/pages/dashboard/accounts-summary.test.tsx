@@ -120,7 +120,6 @@ function createAccount(overrides: Partial<Account>): Account {
     name: overrides.name ?? "Account 1",
     accountType,
     group: overrides.group,
-    balance: overrides.balance ?? 0,
     currency: overrides.currency ?? "USD",
     isDefault: overrides.isDefault ?? false,
     isActive: overrides.isActive ?? true,
@@ -186,6 +185,8 @@ function createCurrentValuation(
     sourceDataAsOf: overrides.sourceDataAsOf ?? "2026-03-17T11:59:00Z",
     calculatedAt: overrides.calculatedAt ?? "2026-03-17T12:00:00Z",
     warnings: overrides.warnings ?? [],
+    valueStatus: overrides.valueStatus ?? "complete",
+    accountValueStatus: overrides.accountValueStatus ?? "complete",
   };
 }
 
@@ -384,6 +385,39 @@ describe("AccountsSummary", () => {
     vi.clearAllMocks();
   });
 
+  it("keeps a group total unavailable while retaining complete local balances", async () => {
+    const user = userEvent.setup();
+    renderAccountsSummary({
+      accounts: [
+        createAccount({ id: "cop", name: "COP account", currency: "COP", group: "FX group" }),
+        createAccount({ id: "aed", name: "AED account", currency: "AED", group: "FX group" }),
+      ],
+      valuations: [],
+      currentValuations: [
+        createCurrentValuation({
+          accountId: "cop",
+          accountCurrency: "COP",
+          baseCurrency: "AED",
+          valueStatus: "unavailable",
+          accountValueStatus: "complete",
+          totalValue: 100000,
+          totalValueBase: 0,
+        }),
+        createCurrentValuation({
+          accountId: "aed",
+          accountCurrency: "AED",
+          baseCurrency: "AED",
+          totalValue: 20,
+          totalValueBase: 20,
+        }),
+      ],
+    });
+    expect(screen.getByText("N/A")).toBeInTheDocument();
+    expect(screen.queryByText("value:AED:20")).not.toBeInTheDocument();
+    await user.click(screen.getByText("FX group"));
+    expect(screen.getByText("value:COP:100000")).toBeInTheDocument();
+  });
+
   it("requests performance for visible grouped dashboard rows only", async () => {
     const user = userEvent.setup();
 
@@ -430,6 +464,28 @@ describe("AccountsSummary", () => {
     // The group header renders instead of a bare account link, so group-wide stats stay visible.
     expect(screen.getByText("Solo Group")).toBeInTheDocument();
     expect(screen.queryByText("Solo Account")).not.toBeInTheDocument();
+  });
+
+  it("draws account and group cards without a backdrop filter", async () => {
+    const user = userEvent.setup();
+
+    const { container } = renderAccountsSummary({
+      accounts: [
+        createAccount({ id: "group-a-1", name: "Group A One", group: "Group A" }),
+        createAccount({ id: "group-a-2", name: "Group A Two", group: "Group A" }),
+        createAccount({ id: "standalone", name: "Standalone" }),
+      ],
+      valuations: [
+        createValuation({ accountId: "group-a-1", totalValue: 100 }),
+        createValuation({ accountId: "group-a-2", totalValue: 200 }),
+        createValuation({ accountId: "standalone", totalValue: 300 }),
+      ],
+    });
+    await user.click(screen.getByText("Group A"));
+
+    expect(screen.getByText("Group A One")).toBeInTheDocument();
+    expect(screen.getByText("Standalone")).toBeInTheDocument();
+    expect(container.querySelector('[class*="backdrop-"]')).toBeNull();
   });
 
   it("counts hidden accounts in group totals without rendering them", async () => {

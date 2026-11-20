@@ -9,12 +9,14 @@ import type { Holding } from "@/lib/types";
 interface UseHoldingsResult {
   holdings: Holding[];
   isLoading: boolean;
+  isComplete: boolean;
 }
 
 const holdingsHook = vi.hoisted(() => ({
   useHoldings: vi.fn<() => UseHoldingsResult>(() => ({
     holdings: [],
     isLoading: false,
+    isComplete: true,
   })),
 }));
 
@@ -35,6 +37,8 @@ vi.mock("@/hooks/use-holdings", () => ({
 vi.mock("../fields", async () => {
   const { useFormContext } =
     await vi.importActual<typeof import("react-hook-form")>("react-hook-form");
+  // Like MoneyInput, an empty amount is undefined rather than NaN.
+  const emptyAsUndefined = (value: string) => (value === "" ? undefined : Number(value));
 
   return {
     AccountSelect: ({ name, accounts }: { name: string; accounts: AccountSelectOption[] }) => {
@@ -57,16 +61,49 @@ vi.mock("../fields", async () => {
     DatePicker: ({ name, label }: { name: string; label: string }) => (
       <div data-testid={`date-picker-${name}`}>{label}</div>
     ),
-    AmountInput: ({ name, label }: { name: string; label: string }) => {
+    AmountInput: ({
+      name,
+      label,
+      maxDecimalPlaces,
+    }: {
+      name: string;
+      label: string;
+      maxDecimalPlaces?: number;
+    }) => {
       const { register } = useFormContext();
       return (
         <div>
           <label htmlFor={name}>{label}</label>
           <input
             data-testid={`input-${name}`}
+            data-max-decimal-places={maxDecimalPlaces}
             type="number"
             id={name}
-            {...register(name, { valueAsNumber: true })}
+            {...register(name, { setValueAs: emptyAsUndefined })}
+          />
+        </div>
+      );
+    },
+    // The lines editor is left out; its total renders like an amount input.
+    ChargeLinesField: ({
+      totalName: name,
+      label,
+      maxDecimalPlaces,
+    }: {
+      totalName: string;
+      label: string;
+      maxDecimalPlaces?: number;
+    }) => {
+      const { register } = useFormContext();
+      return (
+        <div>
+          <label htmlFor={name}>{label}</label>
+          <input
+            data-testid={`input-${name}`}
+            data-max-decimal-places={maxDecimalPlaces}
+            type="number"
+            id={name}
+            {...register(name, { setValueAs: emptyAsUndefined })}
           />
         </div>
       );
@@ -144,15 +181,18 @@ vi.mock("../fields", async () => {
     TradeTotalInput: ({
       calculatedAmount,
       onCustomChange,
+      maxDecimalPlaces,
     }: {
       calculatedAmount?: number;
       onCustomChange: (isCustom: boolean) => void;
+      maxDecimalPlaces?: number;
     }) => {
       const { register } = useFormContext();
       return (
         <input
           data-testid="input-amount"
           data-calculated-amount={calculatedAmount ?? ""}
+          data-max-decimal-places={maxDecimalPlaces}
           type="number"
           {...register("amount", {
             setValueAs: (value) => (value === "" ? undefined : Number(value)),
@@ -228,6 +268,7 @@ describe("BuyForm", () => {
     holdingsHook.useHoldings.mockReturnValue({
       holdings: [],
       isLoading: false,
+      isComplete: true,
     });
   });
 
@@ -517,6 +558,50 @@ describe("BuyForm", () => {
       expect(screen.getByTestId("input-unitPrice")).toBeInTheDocument();
       expect(screen.getByTestId("input-fee")).toBeInTheDocument();
     });
+
+    it("gives fee, tax and total 8 decimals in a crypto account or for a crypto asset", () => {
+      const accounts: AccountSelectOption[] = [
+        { value: "acc-crypto", label: "Exchange", currency: "USD", accountType: "CRYPTOCURRENCY" },
+        { value: "acc-1", label: "Brokerage", currency: "USD", accountType: "SECURITIES" },
+      ];
+      const moneyDecimals = () =>
+        ["input-fee", "input-tax", "input-amount"].map((id) =>
+          screen.getByTestId(id).getAttribute("data-max-decimal-places"),
+        );
+
+      const { unmount } = render(
+        <BuyForm
+          accounts={accounts}
+          onSubmit={mockOnSubmit}
+          defaultValues={{ accountId: "acc-crypto" }}
+        />,
+      );
+      expect(moneyDecimals()).toEqual(["8", "8", "8"]);
+      unmount();
+
+      render(
+        <BuyForm
+          accounts={accounts}
+          onSubmit={mockOnSubmit}
+          defaultValues={{ accountId: "acc-1", symbolInstrumentType: "CRYPTO" }}
+        />,
+      );
+      expect(moneyDecimals()).toEqual(["8", "8", "8"]);
+    });
+
+    it("leaves fee, tax and total to the currency otherwise", () => {
+      render(<BuyForm accounts={mockAccounts} onSubmit={mockOnSubmit} />);
+
+      for (const id of ["input-fee", "input-tax", "input-amount"]) {
+        expect(screen.getByTestId(id)).not.toHaveAttribute("data-max-decimal-places");
+      }
+    });
+
+    it("lets the price take up to 8 decimals", () => {
+      render(<BuyForm accounts={mockAccounts} onSubmit={mockOnSubmit} />);
+
+      expect(screen.getByTestId("input-unitPrice")).toHaveAttribute("data-max-decimal-places", "8");
+    });
   });
 
   describe("Loading State", () => {
@@ -551,6 +636,7 @@ describe("BuyForm", () => {
           } as Holding,
         ],
         isLoading: false,
+        isComplete: true,
       });
 
       render(
@@ -595,6 +681,7 @@ describe("BuyForm", () => {
           } as Holding,
         ],
         isLoading: false,
+        isComplete: true,
       });
 
       render(

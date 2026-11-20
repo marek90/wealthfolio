@@ -1,7 +1,8 @@
 //! Activity domain models.
 
 use crate::activities::activities_constants::{
-    ACTIVITY_SUBTYPE_BONUS, ACTIVITY_SUBTYPE_DIVIDEND_IN_KIND, ACTIVITY_SUBTYPE_DRIP,
+    ACTIVITY_SUBTYPE_BONUS, ACTIVITY_SUBTYPE_CONVERSION_IN, ACTIVITY_SUBTYPE_CONVERSION_OUT,
+    ACTIVITY_SUBTYPE_DIVIDEND_IN_KIND, ACTIVITY_SUBTYPE_DRIP,
     ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION, ACTIVITY_SUBTYPE_OPTION_EXPIRY,
     ACTIVITY_SUBTYPE_POSITION_CLOSE, ACTIVITY_SUBTYPE_POSITION_OPEN, ACTIVITY_SUBTYPE_REBATE,
     ACTIVITY_SUBTYPE_REFUND, ACTIVITY_SUBTYPE_REIMBURSEMENT, ACTIVITY_SUBTYPE_RETURN_OF_CAPITAL,
@@ -248,6 +249,25 @@ impl Activity {
         self.status == ActivityStatus::Posted
     }
 
+    /// Whether a broker sync created this activity, so a later sync may send
+    /// it again: a source other than MANUAL or CSV, with an import run or a
+    /// source record id. Matches the storage outbox's broker-origin rule.
+    pub fn is_broker_synced(&self) -> bool {
+        let manual = self
+            .source_system
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|source| {
+                source.eq_ignore_ascii_case("MANUAL") || source.eq_ignore_ascii_case("CSV")
+            });
+        let non_empty = |value: &Option<String>| {
+            value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        };
+        !manual && (non_empty(&self.import_run_id) || non_empty(&self.source_record_id))
+    }
+
     /// The explicit external-transfer marker (`metadata.flow.is_external`),
     /// when the row carries one.
     pub fn explicit_external_transfer(&self) -> Option<bool> {
@@ -439,6 +459,10 @@ impl NewActivity {
             ACTIVITY_SUBTYPE_RETURN_OF_CAPITAL
         } else if normalized.eq_ignore_ascii_case(ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION) {
             ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION
+        } else if normalized.eq_ignore_ascii_case(ACTIVITY_SUBTYPE_CONVERSION_OUT) {
+            ACTIVITY_SUBTYPE_CONVERSION_OUT
+        } else if normalized.eq_ignore_ascii_case(ACTIVITY_SUBTYPE_CONVERSION_IN) {
+            ACTIVITY_SUBTYPE_CONVERSION_IN
         } else {
             subtype
         };
@@ -662,10 +686,29 @@ pub struct ActivityUpdatePreview {
     pub linked: Option<PreviewedActivityUpdate>,
 }
 
+/// Transient review of the existing financial writer's split invalidation.
+/// The fingerprint is opaque: it contains no category or financial details.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivitySplitEffect {
+    pub activity_id: String,
+    pub removed_splits: usize,
+    pub has_retained_category_assignment: bool,
+    pub fingerprint: String,
+}
+
 /// Input model for updating an existing activity
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityUpdate {
+    /// ID of the other leg to unlink atomically with this financial edit.
+    /// That leg is unlink-only, with both legs reviewed before commit.
+    /// Transient; never persisted. Sync/import callers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlink_transfer_pair_id: Option<String>,
+    /// User review only; omitted by non-interactive sync/import callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_review: Option<Vec<ActivitySplitEffect>>,
     pub id: String,
     pub account_id: String,
 
@@ -848,6 +891,12 @@ pub struct ActivityFinalCashMigrationResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InternalTransferPairRequest {
+    /// Optional native review of both existing legs; validated by the shared writer.
+    #[serde(default)]
+    pub split_review: Option<Vec<ActivitySplitEffect>>,
+    /// The record whose date and notes the existing activity form is editing.
+    #[serde(default)]
+    pub edited_activity_id: Option<String>,
     #[serde(default)]
     pub transfer_out_id: Option<String>,
     #[serde(default)]
@@ -899,15 +948,107 @@ pub struct TransferMatchCandidateRequest {
     pub limit: Option<usize>,
 }
 
+/// Turns a cash deposit or withdrawal (or an unlinked cash transfer) into one
+/// leg of an internal transfer. The other leg is either an existing activity in
+/// another account (`counterpart_activity_id`) or a new one created in
+/// `counterpart_account_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertToTransferRequest {
+    pub activity_id: String,
+    #[serde(default)]
+    pub counterpart_activity_id: Option<String>,
+    #[serde(default)]
+    pub counterpart_account_id: Option<String>,
+    /// Amount for a new leg whose account currency differs from the source's.
+    #[serde(
+        default,
+        deserialize_with = "decimal_input_format::deserialize_option_decimal"
+    )]
+    pub counterpart_amount: Option<Decimal>,
+    /// Native review of the rows the conversion retypes; validated by the shared writer.
+    #[serde(default)]
+    pub split_review: Option<Vec<ActivitySplitEffect>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferMatchCandidate {
     pub activity: Activity,
     pub match_kind: String,
+    /// "high" only for a certain match: two transfers that match each other
+    /// and nothing else, at the same instant or on the same day, with no
+    /// warnings and neither marked external. Otherwise "medium" within three
+    /// days, else "low".
     pub confidence: String,
     pub score: i32,
     pub reasons: Vec<String>,
     pub warnings: Vec<String>,
+    /// `reasons` as codes the app translates, in the same order.
+    #[serde(default)]
+    pub reason_codes: Vec<TransferMatchReason>,
+    /// `warnings` as codes the app translates, in the same order.
+    #[serde(default)]
+    pub warning_codes: Vec<TransferMatchWarning>,
+}
+
+/// Why a candidate matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferMatchReason {
+    SameAsset,
+    SameQuantity,
+    SameAmount,
+    SameCurrency,
+    SameDate,
+    /// Booked at the same instant, to the sub-second.
+    SameTime,
+    SameAccount,
+    CashFxConversion,
+}
+
+impl TransferMatchReason {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::SameAsset => "Same asset",
+            Self::SameQuantity => "Same quantity",
+            Self::SameAmount => "Same amount",
+            Self::SameCurrency => "Same currency",
+            Self::SameDate => "Same date",
+            Self::SameTime => "Same time",
+            Self::SameAccount => "Same account",
+            Self::CashFxConversion => "Cash FX conversion",
+        }
+    }
+}
+
+/// What makes a candidate less certain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum TransferMatchWarning {
+    DatesDiffer {
+        days: i64,
+    },
+    CurrenciesDiffer {
+        source: String,
+        candidate: String,
+    },
+    PricesDiffer,
+    /// Another transfer matches either side as well as this one.
+    AnotherMatch,
+}
+
+impl TransferMatchWarning {
+    pub fn text(&self) -> String {
+        match self {
+            Self::DatesDiffer { days } => format!("Dates differ by {days} day(s)."),
+            Self::CurrenciesDiffer { source, candidate } => {
+                format!("Currencies differ ({source} vs {candidate}).")
+            }
+            Self::PricesDiffer => "Prices differ by more than 1%.".to_string(),
+            Self::AnotherMatch => "Another transfer matches as well.".to_string(),
+        }
+    }
 }
 
 /// Scope of a scan for posted transfers with no linked other side.
@@ -970,6 +1111,51 @@ pub struct LinkedTransfer {
     pub link_state: TransferLinkState,
 }
 
+/// The Match transfers review: every unlinked transfer the Health Center
+/// reports, sorted into pairs certain enough to link together and rows that
+/// need a look. Each transfer appears once, newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferMatchReview {
+    /// One row per certain pair, its only candidate the other side.
+    pub certain: Vec<UnlinkedTransfer>,
+    /// The rest, each with its best candidates (possibly none). Candidates
+    /// include deposits and withdrawals that would become the other side,
+    /// never a leg of a certain pair. Two transfers that are each other's
+    /// best candidate share one row.
+    pub needs_review: Vec<UnlinkedTransfer>,
+}
+
+/// One pair to link; the two sides may come in either order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPairLinkRequest {
+    pub activity_a_id: String,
+    pub activity_b_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedTransferPair {
+    pub transfer_in_id: String,
+    pub transfer_out_id: String,
+}
+
+/// A pair that could not be linked, by its index in the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPairLinkError {
+    pub index: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkTransferPairsResult {
+    pub linked: Vec<LinkedTransferPair>,
+    pub errors: Vec<TransferPairLinkError>,
+}
+
 /// Structured error reported for a single bulk mutation entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -985,6 +1171,17 @@ pub struct ActivityBulkMutationError {
 pub struct ActivityBulkIdentifierMapping {
     pub temp_id: Option<String>,
     pub activity_id: String,
+}
+
+/// What a row's `cash_balance` measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CashBalanceScope {
+    /// The account's cash in the row's currency after this row.
+    Row,
+    /// The account's cash at the end of the row's day, in the account
+    /// currency: the same figure as that day's valuation.
+    Day,
 }
 
 /// Model for activity details including related data
@@ -1027,6 +1224,17 @@ pub struct ActivityDetails {
     pub import_run_id: Option<String>,
     pub is_user_modified: bool,
     pub metadata: Option<Value>,
+    /// Currency the asset is quoted in, which can differ from the activity
+    /// currency. Kept after the released fields so exports keep their column
+    /// positions.
+    pub asset_quote_ccy: Option<String>,
+    /// The cash of the row's account, in `cash_balance_currency`, as
+    /// `cash_balance_scope` says: filled only when the search asked for
+    /// balances and the account's holdings come from its activities.
+    /// Serialized as null otherwise, so every export has the columns.
+    pub cash_balance: Option<String>,
+    pub cash_balance_currency: Option<String>,
+    pub cash_balance_scope: Option<CashBalanceScope>,
 }
 
 impl ActivityDetails {
@@ -1185,6 +1393,45 @@ pub struct ActivityImport {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_external: Option<bool>,
+    /// Links this row to the others of one event, such as a conversion's two
+    /// rows (rules R7.5) or a transfer's two legs. Rows that carry one keep
+    /// it; the transfer linker never regroups them.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_group_id: Option<String>,
+    /// Labelled lines that make up `fee` and `tax`, such as commission and
+    /// stamp duty. They must add up to both totals; stored in the
+    /// activity's metadata.
+    #[serde(
+        default,
+        deserialize_with = "super::charges::deserialize_import_charges"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charges: Option<Vec<super::ActivityCharge>>,
+    /// The source's own ID for this row, such as a statement's transaction
+    /// reference. A row with one matches an activity imported with the same
+    /// ID into the same account, whatever its values or comment; the source
+    /// keeps it stable across imports and gives every transaction its own.
+    /// Stored as the activity's `source_record_id`.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_record_id: Option<String>,
+    /// Details the source keeps with the row, stored in the activity's
+    /// metadata. `flow` and `charges` come from `is_external` and `charges`
+    /// only, so a row's own keys of those names are dropped.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, Value>>,
+}
+
+impl ActivityImport {
+    /// The row's source record ID, trimmed; none when blank.
+    pub fn source_record_id(&self) -> Option<&str> {
+        self.source_record_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
 }
 
 /// Model for sorting activities
@@ -1357,6 +1604,9 @@ pub struct ImportAssetCandidate {
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_symbol: Option<String>,
+    /// Instrument name from the import file, used when no provider names a new asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1919,7 +2169,8 @@ mod optional_decimal_format {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncomeData {
-    pub date: String,
+    /// When the income was received.
+    pub activity_date: DateTime<Utc>,
     pub income_type: String,
     pub asset_id: String,
     pub asset_kind: String,
@@ -1935,12 +2186,23 @@ pub struct IncomeData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportActivitiesResult {
+    /// Actual writer-assigned IDs in source row order. Review row IDs remain
+    /// untouched; metadata follow-up must use these persisted identities.
+    #[serde(default)]
+    pub persisted_rows: Vec<ImportedActivityIdentity>,
     /// The validated/imported activities
     pub activities: Vec<ActivityImport>,
     /// Import run ID for tracking this batch
     pub import_run_id: String,
     /// Summary statistics for the import
     pub summary: ImportActivitiesSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedActivityIdentity {
+    pub index: usize,
+    pub activity_id: String,
 }
 
 /// Summary statistics for an activity import
@@ -2030,6 +2292,7 @@ pub struct PrepareActivitiesResult {
 
 impl From<ActivityImport> for NewActivity {
     fn from(import: ActivityImport) -> Self {
+        let source_record_id = import.source_record_id().map(str::to_string);
         let asset = if import.symbol.is_empty() {
             import
                 .asset_id
@@ -2067,19 +2330,47 @@ impl From<ActivityImport> for NewActivity {
             Some(ActivityStatus::Posted)
         };
 
+        // Only a conversion row brings its group (rules R7.5); a transfer's is
+        // set when the import links its legs, so no imported row joins a
+        // group already stored.
+        let is_conversion_row = import
+            .activity_type
+            .eq_ignore_ascii_case(ACTIVITY_TYPE_ADJUSTMENT)
+            && matches!(
+                NewActivity::canonicalize_subtype(import.subtype.as_deref()).as_deref(),
+                Some(ACTIVITY_SUBTYPE_CONVERSION_OUT | ACTIVITY_SUBTYPE_CONVERSION_IN)
+            );
+        let source_group_id = import
+            .source_group_id
+            .filter(|_| is_conversion_row)
+            .map(|group| group.trim().to_string())
+            .filter(|group| !group.is_empty());
+
         // Persist boundary metadata so imported activities and manually entered activities
         // have the same net-contribution and flow-classification semantics.
         let is_transfer = import.activity_type == ACTIVITY_TYPE_TRANSFER_IN
             || import.activity_type == ACTIVITY_TYPE_TRANSFER_OUT;
-        let metadata = match (import.activity_type.as_str(), import.is_external) {
+        let mut metadata = import.metadata.unwrap_or_default();
+        metadata.remove("flow");
+        metadata.remove(super::charges::CHARGES_METADATA_KEY);
+        match (import.activity_type.as_str(), import.is_external) {
             (ACTIVITY_TYPE_CREDIT, Some(is_external)) => {
-                Some(serde_json::json!({ "flow": { "is_external": is_external } }).to_string())
+                metadata.insert(
+                    "flow".to_string(),
+                    serde_json::json!({ "is_external": is_external }),
+                );
             }
             (_, Some(true)) if is_transfer => {
-                Some(serde_json::json!({ "flow": { "is_external": true } }).to_string())
+                metadata.insert(
+                    "flow".to_string(),
+                    serde_json::json!({ "is_external": true }),
+                );
             }
-            _ => None,
-        };
+            _ => {}
+        }
+        let metadata = (!metadata.is_empty()).then_some(Value::Object(metadata));
+        let metadata = super::charges::metadata_with_charges(metadata, import.charges)
+            .map(|metadata| metadata.to_string());
 
         NewActivity {
             id: import.id,
@@ -2100,8 +2391,8 @@ impl From<ActivityImport> for NewActivity {
             metadata,
             needs_review: None,
             source_system: Some("CSV".to_string()),
-            source_record_id: None,
-            source_group_id: None,
+            source_record_id,
+            source_group_id,
             idempotency_key: None,
             import_run_id: None,
         }

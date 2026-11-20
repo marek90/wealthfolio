@@ -17,6 +17,7 @@ import { useState, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ActivityTypePicker } from "./activity-type-picker";
 import { ActivityFormRenderer } from "./activity-form-renderer";
+import { CashActivityReclassification } from "./cash-activity-reclassification";
 import type { AccountSelectOption } from "./forms/fields";
 import { useActivityForm } from "../hooks/use-activity-form";
 import { mapActivityTypeToPicker } from "../utils/activity-form-utils";
@@ -60,6 +61,7 @@ export function ActivityForm({
   const isEditing = !!activity?.id;
   const storedType: PickerActivityType | undefined = mapActivityTypeToPicker(
     activity?.activityType,
+    activity?.subtype,
   );
 
   // Not every persisted type has an editor. Sync stores a needs-review row as
@@ -128,7 +130,7 @@ export function ActivityForm({
     <Sheet open={open} onOpenChange={handleOpenChange}>
       <SheetContent
         data-testid="activity-form-dialog"
-        className="flex w-full flex-col overflow-hidden sm:max-w-[625px]"
+        className="flex w-full flex-col overflow-hidden sm:max-w-[39.0625rem]"
       >
         <SheetHeader>
           <SheetTitle>
@@ -148,6 +150,11 @@ export function ActivityForm({
         </SheetHeader>
 
         <div className="flex-1 space-y-6 overflow-y-auto py-4">
+          <CashActivityReclassification
+            activity={activity}
+            onSuccess={onClose}
+            disabled={isLoading}
+          />
           {/* When editing, report the type the activity is stored under. Shown
               alongside the picker for a row that still needs one, so it is clear
               what is being reclassified. */}
@@ -180,6 +187,7 @@ export function ActivityForm({
             onCancel={onClose}
             isLoading={isLoading}
             isEditing={isEditing}
+            originalActivity={activity}
           />
 
           {/* Display mutation error inside sheet */}

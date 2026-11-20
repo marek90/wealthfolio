@@ -1,3 +1,4 @@
+import { ExternalLink } from "@/components/external-link";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -16,8 +17,7 @@ import {
   RadioGroup,
   RadioGroupItem,
   ResponsiveSelect,
-  ToggleGroup,
-  ToggleGroupItem,
+  AnimatedToggleGroup,
   type ResponsiveSelectOption,
 } from "@wealthfolio/ui";
 import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
@@ -40,13 +40,15 @@ import {
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
-  FormMessage,
+  useFormField,
 } from "@wealthfolio/ui/components/ui/form";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Input } from "@wealthfolio/ui/components/ui/input";
+import { Label } from "@wealthfolio/ui/components/ui/label";
 
 import { useAccountMutations } from "./use-account-mutations";
 
@@ -143,9 +145,6 @@ const formSectionLabelClassName =
   "text-muted-foreground text-xs font-semibold uppercase tracking-[0.18em]";
 const trackingOptionClassName =
   "hover:bg-accent/50 relative flex cursor-pointer gap-3 rounded-xl border bg-card p-4 transition-colors dark:bg-muted/20 dark:hover:bg-muted/30";
-const cashClassificationItemClassName =
-  "data-[state=on]:bg-primary data-[state=on]:text-primary-foreground h-9 rounded-md text-sm data-[state=on]:shadow-sm dark:data-[state=on]:bg-secondary dark:data-[state=on]:text-foreground";
-
 // Input type (what the form receives)
 type AccountFormInput = z.input<typeof newAccountSchema>;
 // Output type after zod parsing (with defaults applied)
@@ -153,10 +152,16 @@ type AccountFormOutput = z.output<typeof newAccountSchema>;
 
 interface AccountFormlProps {
   defaultValues?: AccountFormInput;
+  /** A broker-synced account: its number comes from the broker and is only shown. */
+  isSynced?: boolean;
   onSuccess?: () => void;
 }
 
-export function AccountForm({ defaultValues, onSuccess = () => undefined }: AccountFormlProps) {
+export function AccountForm({
+  defaultValues,
+  isSynced = false,
+  onSuccess = () => undefined,
+}: AccountFormlProps) {
   const { t } = useTranslation();
   const { createAccountMutation, updateAccountMutation } = useAccountMutations({ onSuccess });
 
@@ -185,6 +190,8 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
       ...defaultValues,
       // Don't default to any mode if account needs setup (must come after spread)
       trackingMode: needsSetup ? undefined : defaultValues?.trackingMode,
+      // A synced account's number is never sent, so the backend keeps the broker's.
+      accountNumber: isSynced ? undefined : defaultValues?.accountNumber,
     },
   });
 
@@ -339,7 +346,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
         onSubmit={form.handleSubmit(onSubmit)}
         className="flex flex-col gap-6 p-5 sm:p-6"
       >
-        <DialogHeader className="pr-10 text-left">
+        <DialogHeader className="pe-10 text-start">
           <div className="flex items-start gap-3">
             <div className="bg-muted flex h-11 w-11 shrink-0 items-center justify-center rounded-xl">
               <AccountTypeIcon className="text-muted-foreground h-5 w-5" />
@@ -351,9 +358,9 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
           </div>
         </DialogHeader>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.9fr)]">
           <input type="hidden" name="id" />
-          <div className="contents lg:grid lg:content-start lg:gap-4">
+          <div className="grid content-start gap-4">
             <section className={formCardClassName}>
               <h3 className={formSectionLabelClassName}>{t("settings:accounts.form_identity")}</h3>
               <div className="mt-4 grid gap-4">
@@ -370,7 +377,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                           {...field}
                         />
                       </FormControl>
-                      <FormMessage />
+                      <AccountFormMessage />
                     </FormItem>
                   )}
                 />
@@ -379,17 +386,69 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                   name="group"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("settings:accounts_form_group_label")}</FormLabel>
+                      <FormLabel>
+                        {t("settings:accounts_form_group_label")}
+                        <span className="text-muted-foreground ms-1 text-xs font-normal">
+                          {t("settings:accounts.form_optional")}
+                        </span>
+                      </FormLabel>
                       <FormControl>
                         <Input
                           placeholder={t("settings:accounts_form_group_placeholder")}
                           {...field}
+                          value={field.value ?? ""}
                         />
                       </FormControl>
-                      <FormMessage />
+                      <AccountFormMessage />
                     </FormItem>
                   )}
                 />
+                {isSynced ? (
+                  <div className="grid gap-2">
+                    <Label htmlFor="account-number-synced">
+                      {t("settings:accounts.form_account_number_label")}
+                    </Label>
+                    <Input
+                      id="account-number-synced"
+                      data-testid="account-number-input"
+                      value={defaultValues?.accountNumber ?? ""}
+                      readOnly
+                      disabled
+                      aria-describedby="account-number-synced-hint"
+                    />
+                    <p id="account-number-synced-hint" className="text-muted-foreground text-sm">
+                      {t("settings:accounts.form_account_number_synced")}
+                    </p>
+                  </div>
+                ) : (
+                  <FormField
+                    control={form.control}
+                    name="accountNumber"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>
+                          {t("settings:accounts.form_account_number_label")}
+                          <span className="text-muted-foreground ms-1 text-xs font-normal">
+                            {t("settings:accounts.form_optional")}
+                          </span>
+                        </FormLabel>
+                        <FormControl>
+                          <Input
+                            data-testid="account-number-input"
+                            autoComplete="off"
+                            spellCheck={false}
+                            {...field}
+                            value={field.value ?? ""}
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t("settings:accounts.form_account_number_hint")}
+                        </FormDescription>
+                        <AccountFormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 <FormField
                   control={form.control}
@@ -408,7 +467,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                           triggerClassName="h-11"
                         />
                       </FormControl>
-                      <FormMessage />
+                      <AccountFormMessage />
                     </FormItem>
                   )}
                 />
@@ -418,7 +477,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                     name="currency"
                     render={({ field }) => (
                       <FormItem className="flex flex-col">
-                        <FormLabel>{t("settings:accounts_form_currency_label")}</FormLabel>
+                        <FormLabel>{t("common:currency")}</FormLabel>
                         <FormControl>
                           <CurrencyInput
                             data-testid="account-currency-select"
@@ -426,7 +485,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                             onChange={(value: string) => field.onChange(value)}
                           />
                         </FormControl>
-                        <FormMessage />
+                        <AccountFormMessage />
                       </FormItem>
                     )}
                   />
@@ -442,12 +501,11 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                         {t("settings:accounts.form_cash_classification_description")}
                       </p>
                     </div>
-                    <ToggleGroup
-                      type="single"
+                    <AnimatedToggleGroup
+                      size="md"
                       aria-label={t("settings:accounts.form_cash_classification_aria")}
                       value={getSelectableCashCategoryFromMeta(form.watch("meta"))}
                       onValueChange={(v) => {
-                        if (!v) return;
                         const categoryId = v === CASH_ALLOCATION_DEFAULT_VALUE ? null : v;
                         const updatedMeta = setCashCategoryInMeta(
                           form.getValues("meta"),
@@ -455,75 +513,16 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                         );
                         form.setValue("meta", updatedMeta, { shouldDirty: true });
                       }}
-                      className="bg-muted grid h-11 grid-cols-2 rounded-lg p-1"
-                    >
-                      <ToggleGroupItem
-                        value={CASH_ALLOCATION_DEFAULT_VALUE}
-                        className={cashClassificationItemClassName}
-                      >
-                        {t("settings:accounts.form_cash_classification_cash")}
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value={CASH_FIXED_INCOME_CATEGORY_ID}
-                        className={cashClassificationItemClassName}
-                      >
-                        {fixedIncomeCategoryName}
-                      </ToggleGroupItem>
-                    </ToggleGroup>
+                      className="grid w-full grid-cols-2"
+                      items={[
+                        {
+                          value: CASH_ALLOCATION_DEFAULT_VALUE,
+                          label: t("settings:accounts.form_cash_classification_cash"),
+                        },
+                        { value: CASH_FIXED_INCOME_CATEGORY_ID, label: fixedIncomeCategoryName },
+                      ]}
+                    />
                   </div>
-                )}
-              </div>
-            </section>
-            <section className={cn(formCardClassName, "order-last lg:order-none")}>
-              <h3 className={formSectionLabelClassName}>
-                {t("settings:accounts.form_visibility")}
-              </h3>
-              <div className="mt-4 grid gap-4">
-                <FormField
-                  control={form.control}
-                  name="isActive"
-                  render={({ field }) => (
-                    <FormItem className="flex items-center justify-between gap-4 space-y-0">
-                      <div className="min-w-0">
-                        <FormLabel className="text-sm font-normal">
-                          {t("settings:accounts.form_hide_label")}
-                          <span className="text-muted-foreground ml-1 text-xs font-normal">
-                            {t("settings:accounts.form_hide_hint")}
-                          </span>
-                        </FormLabel>
-                        <FormMessage />
-                      </div>
-                      <FormControl>
-                        <Switch
-                          checked={!field.value}
-                          onCheckedChange={(checked) => field.onChange(!checked)}
-                        />
-                      </FormControl>
-                    </FormItem>
-                  )}
-                />
-
-                {defaultValues?.id && (
-                  <FormField
-                    control={form.control}
-                    name="isArchived"
-                    render={({ field }) => (
-                      <FormItem className="flex items-center justify-between gap-4 space-y-0">
-                        <div className="min-w-0">
-                          <FormLabel className="text-sm font-normal">
-                            {t("settings:accounts.form_archive_label")}
-                            <span className="text-muted-foreground ml-1 text-xs font-normal">
-                              {t("settings:accounts.form_archive_hint")}
-                            </span>
-                          </FormLabel>
-                          <FormMessage />
-                        </div>
-                        <FormControl>
-                          <Switch checked={field.value} onCheckedChange={field.onChange} />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
                 )}
               </div>
             </section>
@@ -534,26 +533,23 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
               control={form.control}
               name="trackingMode"
               render={({ field }) => (
-                <FormItem className={cn(formCardClassName, "space-y-4")}>
+                <FormItem className={cn(formCardClassName, "gap-4")}>
                   <FormLabel className={formSectionLabelClassName}>
                     {t("settings:accounts.form_tracking_mode_label")}
                   </FormLabel>
                   {needsSetup && !currentTrackingMode && (
-                    <Alert
-                      variant="warning"
-                      className="px-3 py-2.5 [&>svg]:left-3 [&>svg]:top-2.5 [&>svg~*]:pl-6"
-                    >
+                    <Alert variant="warning" className="px-3 py-2.5">
                       <Icons.AlertTriangle className="h-4 w-4" />
                       <AlertDescription className="text-xs">
                         {t("settings:accounts.form_tracking_setup_hint")}{" "}
-                        <a
-                          href="https://wealthfolio.app/docs/concepts/activity-types"
+                        <ExternalLink
+                          href="https://wealthfolio.app/docs/concepts/tracking-modes/"
                           target="_blank"
                           rel="noopener noreferrer"
                           className="hover:text-foreground underline"
                         >
                           {t("settings:accounts.form_learn_more")}
-                        </a>
+                        </ExternalLink>
                       </AlertDescription>
                     </Alert>
                   )}
@@ -606,25 +602,22 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                     </RadioGroup>
                   </FormControl>
                   {field.value === "HOLDINGS" && (
-                    <Alert
-                      variant="warning"
-                      className="px-3 py-2.5 [&>svg]:left-3 [&>svg]:top-2.5 [&>svg~*]:pl-6"
-                    >
+                    <Alert variant="warning" className="px-3 py-2.5">
                       <Icons.AlertTriangle className="h-4 w-4" />
                       <AlertDescription className="text-xs">
                         {t("settings:accounts.form_tracking_holdings_warning")}{" "}
-                        <a
-                          href="https://wealthfolio.app/docs/concepts/activity-types"
+                        <ExternalLink
+                          href="https://wealthfolio.app/docs/concepts/tracking-modes/"
                           target="_blank"
                           rel="noopener noreferrer"
                           className="hover:text-foreground underline"
                         >
                           {t("settings:accounts.form_learn_more")}
-                        </a>
+                        </ExternalLink>
                       </AlertDescription>
                     </Alert>
                   )}
-                  <FormMessage />
+                  <AccountFormMessage />
                   {showsCostBasisMethod && (
                     <div className="border-border border-t pt-4">
                       <button
@@ -632,7 +625,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                         aria-expanded={costBasisOpen}
                         aria-controls="account-cost-basis"
                         onClick={() => setCostBasisOpen((open) => !open)}
-                        className="flex w-full items-center justify-between gap-3 text-left"
+                        className="flex w-full items-center justify-between gap-3 text-start"
                       >
                         <span className="text-sm font-medium">
                           {t("settings:accounts.form_cost_basis_method_label")}
@@ -686,13 +679,66 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
                 </FormItem>
               )}
             />
+            <section className={formCardClassName}>
+              <h3 className={formSectionLabelClassName}>
+                {t("settings:accounts.form_visibility")}
+              </h3>
+              <div className="mt-4 grid gap-4">
+                <FormField
+                  control={form.control}
+                  name="isActive"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <FormLabel className="text-sm font-normal">
+                          {t("settings:accounts.form_hide_label")}
+                          <span className="text-muted-foreground ms-1 text-xs font-normal">
+                            {t("settings:accounts.form_hide_hint")}
+                          </span>
+                        </FormLabel>
+                        <AccountFormMessage />
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={!field.value}
+                          onCheckedChange={(checked) => field.onChange(!checked)}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+
+                {defaultValues?.id && (
+                  <FormField
+                    control={form.control}
+                    name="isArchived"
+                    render={({ field }) => (
+                      <FormItem className="flex items-center justify-between gap-4">
+                        <div className="min-w-0">
+                          <FormLabel className="text-sm font-normal">
+                            {t("settings:accounts.form_archive_label")}
+                            <span className="text-muted-foreground ms-1 text-xs font-normal">
+                              {t("settings:accounts.form_archive_hint")}
+                            </span>
+                          </FormLabel>
+                          <AccountFormMessage />
+                        </div>
+                        <FormControl>
+                          <Switch checked={field.value} onCheckedChange={field.onChange} />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                )}
+              </div>
+            </section>
           </div>
         </div>
         <DialogFooter className="gap-2">
-          <DialogClose asChild>
-            <Button data-testid="account-cancel-button" type="button" variant="outline">
-              {t("settings:accounts_cancel_button")}
-            </Button>
+          <DialogClose
+            render={<Button data-testid="account-cancel-button" type="button" variant="outline" />}
+          >
+            {t("common:cancel")}
           </DialogClose>
           <Button
             data-testid="account-submit-button"
@@ -716,11 +762,11 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
       {/* Mode Switch Confirmation Dialog */}
       <AlertDialog open={showModeConfirmation} onOpenChange={setShowModeConfirmation}>
         <AlertDialogContent className="max-w-105 gap-0 overflow-hidden p-0">
-          <div className="px-5 pb-4 pt-5">
+          <div className="px-5 pt-5 pb-4">
             <AlertDialogHeader className="space-y-3">
               <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-orange-100/30 dark:bg-orange-100/20">
-                  <Icons.ArrowRightLeft className="h-4 w-4 text-orange-500 dark:text-orange-300" />
+                <div className="bg-warning-subtle flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+                  <Icons.ArrowRightLeft className="text-warning h-4 w-4" />
                 </div>
                 <AlertDialogTitle className="text-base font-semibold">
                   {t("settings:accounts.mode_switch_title")}
@@ -732,26 +778,26 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
             </AlertDialogHeader>
 
             {/* Checklist */}
-            <div className="mt-4 rounded-lg border border-orange-100/40 bg-orange-100/30 p-3 dark:border-orange-100/20 dark:bg-orange-100/20">
-              <p className="mb-2 text-xs font-medium text-orange-600 dark:text-orange-200">
+            <div className="border-warning-subtle-border bg-warning-subtle mt-4 rounded-lg border p-3">
+              <p className="text-warning mb-2 text-xs font-medium">
                 {t("settings:accounts.mode_switch_checklist_title")}
               </p>
-              <ul className="space-y-2 text-[13px]">
+              <ul className="space-y-2 text-sm">
                 <li className="flex items-start gap-2">
-                  <Icons.Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-500 dark:text-orange-300" />
-                  <span className="text-orange-500 dark:text-orange-200">
+                  <Icons.Check className="text-warning mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="text-warning">
                     {t("settings:accounts.mode_switch_checklist_recorded")}
                   </span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <Icons.Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-500 dark:text-orange-300" />
-                  <span className="text-orange-500 dark:text-orange-200">
+                  <Icons.Check className="text-warning mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="text-warning">
                     {t("settings:accounts.mode_switch_checklist_accurate")}
                   </span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <Icons.AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-orange-600 dark:text-orange-300" />
-                  <span className="text-orange-500 dark:text-orange-200">
+                  <Icons.AlertTriangle className="text-warning mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="text-warning">
                     {t("settings:accounts.mode_switch_checklist_gaps")}
                   </span>
                 </li>
@@ -780,7 +826,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
-              <Icons.AlertTriangle className="h-5 w-5 text-amber-500" />
+              <Icons.AlertTriangle className="text-warning h-5 w-5" />
               {t("settings:accounts.archive_title")}
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -788,7 +834,7 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("settings:accounts_cancel_button")}</AlertDialogCancel>
+            <AlertDialogCancel>{t("common:cancel")}</AlertDialogCancel>
             <Button onClick={handleConfirmArchive}>
               {t("settings:accounts.operations_archive")}
             </Button>
@@ -796,5 +842,18 @@ export function AccountForm({ defaultValues, onSuccess = () => undefined }: Acco
         </AlertDialogContent>
       </AlertDialog>
     </Form>
+  );
+}
+
+/** Translate stored schema message keys at render time, without revalidating the draft. */
+function AccountFormMessage() {
+  const { t } = useTranslation();
+  const { error, formMessageId } = useFormField();
+  const message = error?.message;
+  if (!message) return null;
+  return (
+    <p id={formMessageId} className="text-destructive text-xs font-light">
+      {message.startsWith("common:validation.") ? t(message) : message}
+    </p>
   );
 }

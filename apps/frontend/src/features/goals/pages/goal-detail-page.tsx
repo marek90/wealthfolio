@@ -1,3 +1,4 @@
+import { useBackNavigation } from "@/pages/layouts/mobile-stack/use-mobile-stack";
 import { formatZonedDateKey } from "@/features/spending/lib/timezone";
 import { parseLocalDate } from "@/lib/utils";
 import {
@@ -17,12 +18,14 @@ import {
   Skeleton,
   Tabs,
   TabsContent,
+  Spinner,
 } from "@wealthfolio/ui";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffectEvent } from "react";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionPalette, type ActionPaletteGroup } from "@/components/action-palette";
 import {
   useGoalDetail,
@@ -30,7 +33,8 @@ import {
   useRetirementOverview,
   useSaveUpOverview,
 } from "../hooks/use-goal-detail";
-import { useGoalMutations } from "../hooks/use-goals";
+import { useGoalProjectionExport, type GoalProjection } from "../hooks/use-goal-projection-export";
+import { useGoalMutations, useGoals } from "../hooks/use-goals";
 import { useSettingsContext } from "@/lib/settings-provider";
 import type { PlannerMode, RetirementOverview } from "@/lib/types";
 import type { RetirementPlan } from "@/features/goals/retirement-planner/types";
@@ -38,12 +42,15 @@ import {
   parseSettingsJson,
   normalizeRetirementPlan,
   createDefaultRetirementPlan,
+  inferBirthYearMonthFromAge,
 } from "@/features/goals/retirement-planner/lib/plan-adapter";
+import { buildGoalMilestones } from "@/features/goals/retirement-planner/lib/goal-milestones";
 import { usePortfolioData } from "@/features/goals/retirement-planner/hooks/use-portfolio";
 import DashboardPage from "@/features/goals/retirement-planner/pages/dashboard-page";
 import RiskLabPage from "@/features/goals/retirement-planner/pages/risk-lab-page";
 import SaveUpDetailPage from "../save-up/components/save-up-detail";
 import { GoalEditDialog } from "../components/goal-edit-dialog";
+import { GoalFundingEditor } from "../components/goal-funding-editor";
 
 const GOAL_TYPE_KEYS: Record<string, string> = {
   retirement: "type.retirement",
@@ -58,11 +65,21 @@ export default function GoalDetailPage() {
   const { t } = useTranslation();
   const { goalId } = useParams<{ goalId: string }>();
   const navigate = useNavigate();
+  const goBack = useBackNavigation("/goals");
 
   const { goal, plan, fundingRules, isLoading, error } = useGoalDetail(goalId);
   const { savePlanMutation } = useGoalPlanMutations(goalId ?? "");
   const { mutate: savePlan } = savePlanMutation;
   const { deleteMutation } = useGoalMutations();
+  // Back to the list once the goal is deleted, from the result rather than the
+  // delete's own callback: React Query skips that callback while a phone screen
+  // is out of sight, which left the deleted goal's page open. Only a change of
+  // the result steps back, so a screen still on its way out can't step twice.
+  const leaveDeletedGoal = useEffectEvent(() => goBack());
+  const goalDeleted = deleteMutation.isSuccess;
+  useEffectOnChange(() => {
+    if (goalDeleted) leaveDeletedGoal();
+  }, [goalDeleted]);
   const { settings } = useSettingsContext();
   const todayISO = formatZonedDateKey(new Date(), settings?.timezone);
   const today = useMemo(() => parseLocalDate(todayISO), [todayISO]);
@@ -127,11 +144,25 @@ export default function GoalDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [actionPaletteOpen, setActionPaletteOpen] = useState(false);
 
+  // The deterministic projection the screen shows: the year-by-year retirement
+  // trajectory, or the save-up plan as saved.
+  const projection: GoalProjection | null =
+    goal?.summaryCurrentValue == null
+      ? null
+      : isRetirement && plan && retirementOverview
+        ? { kind: "retirement", trajectory: retirementOverview.trajectory }
+        : isSaveUp && saveUpOverview
+          ? { kind: "save_up", trajectory: saveUpOverview.trajectory }
+          : null;
+  const exportProjection = useGoalProjectionExport(projection, {
+    goalName: goal?.title ?? "",
+    currency: baseCurrency,
+    exportedOn: todayISO,
+  });
+
   const handleDelete = () => {
     if (!goalId) return;
-    deleteMutation.mutate(goalId, {
-      onSuccess: () => navigate("/goals"),
-    });
+    deleteMutation.mutate(goalId);
   };
 
   if (isLoading) {
@@ -152,7 +183,7 @@ export default function GoalDetailPage() {
         <PageContent>
           <div className="flex flex-col items-center gap-4 py-24">
             <p className="text-muted-foreground">{t("goals:detail.not_found_body")}</p>
-            <Button onClick={() => navigate("/goals")}>{t("goals:detail.back_to_goals")}</Button>
+            <Button onClick={goBack}>{t("goals:detail.back_to_goals")}</Button>
           </div>
         </PageContent>
       </Page>
@@ -169,6 +200,15 @@ export default function GoalDetailPage() {
           label: t("goals:detail.edit_goal"),
           onClick: () => setEditOpen(true),
         },
+        ...(exportProjection
+          ? [
+              {
+                icon: Icons.Download,
+                label: t("goals:export.action"),
+                onClick: () => void exportProjection(),
+              },
+            ]
+          : []),
         {
           icon: Icons.Trash,
           label: t("goals:detail.delete_goal"),
@@ -265,7 +305,7 @@ export default function GoalDetailPage() {
               })
             : t("goals:detail.header", { type: typeLabel })
         }
-        onBack={() => navigate("/goals")}
+        onBack={goBack}
         actions={headerActions}
       />
       {goal && <GoalEditDialog goal={goal} open={editOpen} onClose={() => setEditOpen(false)} />}
@@ -284,11 +324,11 @@ export default function GoalDetailPage() {
             <AlertDialogAction
               onClick={handleDelete}
               disabled={deleteMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              variant="destructive"
             >
               {deleteMutation.isPending ? (
                 <>
-                  <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                  <Spinner className="me-2 h-4 w-4" />
                   {t("goals:detail.deleting")}
                 </>
               ) : (
@@ -299,7 +339,22 @@ export default function GoalDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
       <PageContent>
-        {isRetirement ? (
+        {goal.summaryCurrentValue == null ? (
+          <div className="space-y-6">
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <p className="text-2xl font-semibold">N/A</p>
+              <p className="text-muted-foreground text-sm">{t("common:valuation_incomplete")}</p>
+              <Link to="/health" className="text-sm underline underline-offset-4">
+                {t("common:notifications.review_the_details_in_the_health_center")}
+              </Link>
+            </div>
+            <GoalFundingEditor
+              goalId={goal.id}
+              goalType={goal.goalType}
+              dcLinkedAccountIds={dcLinkedAccountIds}
+            />
+          </div>
+        ) : isRetirement ? (
           plan ? (
             <>
               {mobileRetirementTabs}
@@ -369,6 +424,18 @@ function RetirementDetail({
   retirementOverviewError?: Error | null;
   retirementOverviewIsFetching?: boolean;
 }) {
+  const navigate = useNavigate();
+  const { goals } = useGoals();
+  const goalMilestones = useMemo(
+    () =>
+      buildGoalMilestones(goals, {
+        birthYearMonth:
+          plan.personal.birthYearMonth ?? inferBirthYearMonthFromAge(plan.personal.currentAge),
+        startAge: plan.personal.currentAge,
+        endAge: plan.personal.planningHorizonAge,
+      }),
+    [goals, plan.personal],
+  );
   return (
     <>
       <TabsContent value="overview">
@@ -384,6 +451,8 @@ function RetirementDetail({
           retirementOverviewIsFetching={retirementOverviewIsFetching}
           goalId={goalId}
           dcLinkedAccountIds={dcLinkedAccountIds}
+          goalMilestones={goalMilestones}
+          onOpenGoal={(id) => navigate(`/goals/${id}`)}
         />
       </TabsContent>
 

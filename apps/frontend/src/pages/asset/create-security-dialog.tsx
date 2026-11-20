@@ -5,7 +5,7 @@ import { useSettingsContext } from "@/lib/settings-provider";
 import type { NewAsset, SymbolSearchResult } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery } from "@tanstack/react-query";
-import { CurrencyInput, SearchableSelect } from "@wealthfolio/ui";
+import { CurrencyInput, SearchableSelect, Spinner } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import {
   Dialog,
@@ -23,7 +23,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@wealthfolio/ui/components/ui/form";
-import { Icons } from "@wealthfolio/ui/components/ui/icons";
+
 import { Input } from "@wealthfolio/ui/components/ui/input";
 import {
   Select,
@@ -33,11 +33,12 @@ import {
   SelectValue,
 } from "@wealthfolio/ui/components/ui/select";
 import { Textarea } from "@wealthfolio/ui/components/ui/textarea";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { z } from "zod";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 
 /** Map search result quoteType to our InstrumentType form values.
  *  Returns null for unrecognized types so the caller can fall back to manual mode. */
@@ -71,7 +72,7 @@ const createSecuritySchema = (t: TFunction) =>
     name: z
       .string()
       .min(1, t("asset:createSecurity.errors.name_required"))
-      .max(100, t("asset:createSecurity.errors.name_max")),
+      .max(200, t("asset:createSecurity.errors.name_max")),
     instrumentType: z.string().min(1, t("asset:createSecurity.errors.instrument_type_required")),
     quoteCcy: z.string().min(1, t("asset:createSecurity.errors.currency_required")),
     quoteMode: z.enum(["MANUAL", "MARKET"]),
@@ -172,7 +173,7 @@ export function CreateSecurityDialog({
     defaultValues,
   });
 
-  useEffect(() => {
+  useEffectOnChange(() => {
     resolveRequestSeq.current += 1;
     selectedCurrencyBaselineRef.current = undefined;
     quoteCcyUserEditedAfterSelectionRef.current = false;
@@ -207,9 +208,7 @@ export function CreateSecurityDialog({
       if (provisionalCurrency) {
         form.setValue("quoteCcy", provisionalCurrency, { shouldValidate: true });
       }
-      if (canonicalExchangeMic) {
-        form.setValue("instrumentExchangeMic", normalizeMic(canonicalExchangeMic));
-      }
+      form.setValue("instrumentExchangeMic", normalizeMic(canonicalExchangeMic));
 
       const selectedQuoteMode = mappedType ? quoteModeFromSearchResult(result) : "MANUAL";
 
@@ -292,6 +291,16 @@ export function CreateSecurityDialog({
       (!initialInstrumentType || initialInstrumentType === values.instrumentType)
         ? initialAsset.providerConfig
         : undefined;
+    // The quote type stays only while the symbol, exchange and type still match it.
+    const instrumentTypeLabel =
+      selectedProviderRef && selectedInstrumentType === values.instrumentType
+        ? selectedResult?.quoteType
+        : !selectedResult &&
+            initialSymbol === values.symbol &&
+            initialMic === normalizeMic(values.instrumentExchangeMic) &&
+            initialInstrumentType === values.instrumentType
+          ? initialAsset?.instrumentTypeLabel
+          : undefined;
     let resolvedQuoteCcy = values.quoteCcy;
 
     if (selectedResult && selectedProviderRef && values.quoteMode === "MARKET") {
@@ -325,6 +334,7 @@ export function CreateSecurityDialog({
       quoteMode: values.quoteMode,
       quoteCcy: resolvedQuoteCcy,
       instrumentType: values.instrumentType,
+      instrumentTypeLabel: instrumentTypeLabel || undefined,
       instrumentSymbol: values.symbol,
       instrumentExchangeMic: values.instrumentExchangeMic || undefined,
       providerId: selectedProviderRef?.providerId,
@@ -340,7 +350,7 @@ export function CreateSecurityDialog({
     if (isPending || isResolvingSubmit) return;
     if ((e.target as HTMLElement).tagName === "TEXTAREA") return;
     // Don't submit when interacting with the ticker search popover
-    const inPopover = (e.target as HTMLElement).closest("[data-radix-popper-content-wrapper]");
+    const inPopover = (e.target as HTMLElement).closest('[data-slot="popover-content"]');
     if (inPopover) return;
     e.preventDefault();
     void form.handleSubmit(handleSubmit)();
@@ -413,7 +423,11 @@ export function CreateSecurityDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>{t("asset:createSecurity.type")}</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      items={INSTRUMENT_TYPE_OPTIONS}
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder={t("asset:createSecurity.select_type")} />
@@ -479,7 +493,11 @@ export function CreateSecurityDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>{t("asset:createSecurity.quote_mode")}</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      items={QUOTE_MODE_OPTIONS}
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue />
@@ -517,6 +535,7 @@ export function CreateSecurityDialog({
                       onValueChange={field.onChange}
                       placeholder={t("asset:createSecurity.select_exchange")}
                       searchPlaceholder={t("asset:createSecurity.search_exchanges")}
+                      sheetTitle={t("asset:createSecurity.exchange")}
                     />
                   </FormControl>
                   <FormMessage />
@@ -563,8 +582,7 @@ export function CreateSecurityDialog({
               >
                 {isPending || isResolvingSubmit ? (
                   <span className="flex items-center gap-2">
-                    <Icons.Spinner className="h-4 w-4 animate-spin" />{" "}
-                    {t("asset:createSecurity.creating")}
+                    <Spinner className="h-4 w-4" /> {t("asset:createSecurity.creating")}
                   </span>
                 ) : (
                   resolvedSubmitLabel

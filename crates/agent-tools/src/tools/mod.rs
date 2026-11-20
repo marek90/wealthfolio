@@ -4,24 +4,35 @@
 //! existing name, schema, and output shape (guarded by the parity
 //! snapshots in `crates/ai/tests/`).
 
+pub mod account_changes;
+pub(crate) mod account_scope;
 pub mod accounts;
 pub mod activities;
+pub mod activity_deletions;
 pub mod activity_import;
 pub mod activity_updates;
 pub mod allocation;
+pub mod alternative_assets;
 pub mod asset_classification;
+pub mod asset_lookup;
+pub mod asset_market_data;
 pub mod asset_taxonomies;
+pub mod asset_update;
 pub mod cash_balances;
 pub mod categorization_context;
+pub mod categorization_rules;
 pub mod commit_activity;
 pub mod commit_asset_classification;
 pub mod commit_categorization_rule;
 pub mod commit_transaction_categories;
 pub mod contribution_limits;
 pub mod create_categorization_rule;
+pub(crate) mod date_bounds;
+pub mod exchange_rates;
 pub mod goals;
 pub mod health;
 pub mod holdings;
+pub mod holdings_snapshots;
 pub mod income;
 pub mod net_worth;
 pub mod performance;
@@ -30,6 +41,16 @@ pub mod propose_categories;
 pub mod quote_import;
 pub mod record_activities;
 pub mod record_activity;
+pub mod refresh_market_data;
+pub mod spending_budgets;
+pub mod spending_events;
+pub mod spending_import_metadata;
+pub mod spending_reads;
+pub mod spending_rule_management;
+pub mod spending_splits;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub mod transaction_categories;
 pub mod transfer_links;
 pub mod valuation;
 
@@ -40,11 +61,12 @@ pub use activities::{ActivityDto, SearchActivities, SearchActivitiesArgs, Search
 pub use allocation::{
     AllocationDto, GetAssetAllocation, GetAssetAllocationArgs, GetAssetAllocationOutput,
 };
+pub use asset_lookup::ResolvedAssetDto;
 pub use asset_taxonomies::{
     AssetTaxonomyAssignmentDto, AssetTaxonomyCategoryDto, AssetTaxonomyDto,
     GetAssetTaxonomyAssignments, GetAssetTaxonomyAssignmentsArgs,
     GetAssetTaxonomyAssignmentsOutput, ListAssetTaxonomies, ListAssetTaxonomiesArgs,
-    ListAssetTaxonomiesOutput, ResolvedAssetDto,
+    ListAssetTaxonomiesOutput,
 };
 pub use cash_balances::{
     AccountCashSummary, CashBalanceEntry, GetCashBalances, GetCashBalancesArgs,
@@ -113,6 +135,13 @@ pub use commit_transaction_categories::{
     CommitTransactionCategories, CommitTransactionCategoriesArgs, CommitTransactionCategoriesOutput,
 };
 
+// MCP-only categorization rule tools.
+pub use categorization_rules::{
+    CategorizationRuleDto, ListCategorizationRules, ListCategorizationRulesArgs,
+    ListCategorizationRulesOutput, RerunCategorizationRules, RerunCategorizationRulesArgs,
+    RerunCategorizationRulesOutput,
+};
+
 // MCP-only transfer linking tools.
 pub use transfer_links::{
     FindTransferMatches, FindTransferMatchesArgs, FindTransferMatchesOutput,
@@ -132,6 +161,19 @@ pub use activity_updates::{
     ActivityUpdateError, ActivityUpdatePreviewRow, ActivityUpdatePreviewSummary,
     CommitActivityUpdates, CommitActivityUpdatesOutput, FieldChange, PrepareActivityUpdates,
     PrepareActivityUpdatesOutput, StoredChange, UpdatedActivity,
+};
+
+pub use transaction_categories::{
+    CommitTransactionCategory, CommitTransactionCategoryArgs, ListTransactionCategories,
+    ListTransactionCategoriesArgs, PrepareTransactionCategory, PrepareTransactionCategoryArgs,
+    TransactionCategoryDraft,
+};
+
+// MCP-only activity deletion tools (preview, then delete).
+pub use activity_deletions::{
+    ActivityDeletionError, ActivityDeletionPreviewRow, ActivityDeletionPreviewSummary,
+    CommitActivityDeletions, CommitActivityDeletionsOutput, DeletedActivity,
+    PrepareActivityDeletions, PrepareActivityDeletionsOutput,
 };
 
 // MCP-only CSV import tools (validate + dedup-safe import pipeline).
@@ -194,6 +236,22 @@ pub fn commit_tools() -> Vec<Arc<dyn AgentTool>> {
     ]
 }
 
+/// The MCP-only categorization rule tools: list the saved rules, then re-apply
+/// them to the spending accounts. Not exposed to the in-app assistant, whose
+/// categorization flow applies rules through list_categorization_context.
+pub fn categorization_rule_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(ListCategorizationRules),
+        Arc::new(RerunCategorizationRules),
+        Arc::new(categorization_rules::PreviewCategorizationRules),
+        Arc::new(spending_rule_management::PrepareCategorizationRuleChange),
+        Arc::new(spending_rule_management::CommitCategorizationRuleChange),
+        Arc::new(spending_rule_management::ListCategorizationPresets),
+        Arc::new(spending_rule_management::PrepareCategorizationPreset),
+        Arc::new(spending_rule_management::CommitCategorizationPreset),
+    ]
+}
+
 /// The MCP-only CSV import tools: fetch an account's mapping, preview rows
 /// (validate + duplicate detection), and import through the real pipeline.
 /// Not exposed to the in-app assistant (which has its own `import_csv` flow).
@@ -223,19 +281,153 @@ pub fn quote_import_tools() -> Vec<Arc<dyn AgentTool>> {
     vec![Arc::new(PrepareQuoteImport), Arc::new(CommitQuoteImport)]
 }
 
-/// The MCP-only activity update tools: preview corrections to existing
-/// activities, then apply them in place. Not exposed to the in-app assistant,
-/// which has no confirmation step for them; users edit in the activity grid.
+/// The MCP-only activity update tools: preview corrections (or a void) to
+/// existing activities, then apply them in place; and preview deletions, then
+/// delete. Not exposed to the in-app assistant, which has no confirmation step
+/// for them; users edit and delete in the activity grid.
 pub fn activity_update_tools() -> Vec<Arc<dyn AgentTool>> {
     vec![
         Arc::new(PrepareActivityUpdates),
         Arc::new(CommitActivityUpdates),
+        Arc::new(PrepareActivityDeletions),
+        Arc::new(CommitActivityDeletions),
     ]
+}
+
+/// The read-only Spending tools, shared by the in-app assistant and MCP.
+pub fn spending_read_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(spending_reads::GetSpendingContext),
+        Arc::new(spending_reads::SearchSpendingTransactions),
+        Arc::new(spending_reads::GetBudget),
+        Arc::new(spending_reads::ListSpendingEvents),
+        Arc::new(spending_reads::GetSpendingReport),
+        Arc::new(spending_reads::GetSpendingInsight),
+        Arc::new(spending_reads::GetEventSpendingSummaries),
+    ]
+}
+
+/// Spending reads plus the reviewed Spending workflows. The workflows remain
+/// MCP-only until assistant review renderers support them. Every tool
+/// declares its own read/write scopes.
+pub fn spending_access_tools() -> Vec<Arc<dyn AgentTool>> {
+    let mut tools = spending_read_tools();
+    tools.extend::<[Arc<dyn AgentTool>; 11]>([
+        Arc::new(spending_splits::PrepareSpendingSplits),
+        Arc::new(spending_splits::CommitSpendingSplits),
+        Arc::new(spending_splits::PrepareSpendingAllocationClear),
+        Arc::new(spending_splits::CommitSpendingAllocationClear),
+        Arc::new(spending_budgets::PrepareBudgetChange),
+        Arc::new(spending_budgets::CommitBudgetChange),
+        Arc::new(spending_events::PrepareSpendingEvent),
+        Arc::new(spending_events::CommitSpendingEvent),
+        Arc::new(spending_events::PrepareSpendingEventTag),
+        Arc::new(spending_events::CommitSpendingEventTag),
+        Arc::new(spending_import_metadata::PrepareSpendingImportMetadata),
+    ]);
+    tools
+}
+
+/// MCP-only category discovery and creation; the assistant has no category
+/// creation confirmation widget.
+pub fn transaction_category_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(ListTransactionCategories),
+        Arc::new(PrepareTransactionCategory),
+        Arc::new(CommitTransactionCategory),
+        Arc::new(transaction_categories::PrepareTransactionCategoryChange),
+        Arc::new(transaction_categories::CommitTransactionCategoryChange),
+    ]
+}
+
+/// MCP-only asset and market-data tools: one asset's market-data setup and
+/// price state, its stored quotes, the providers, price refreshes, and fixes
+/// to an asset's listing, currency or provider. Not
+/// exposed to the in-app assistant, which has no confirmation step for them.
+pub fn asset_market_data_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(asset_market_data::GetAsset),
+        Arc::new(asset_market_data::GetQuoteHistory),
+        Arc::new(asset_market_data::GetMarketDataProviders),
+        Arc::new(refresh_market_data::RefreshMarketData),
+        Arc::new(asset_update::PrepareAssetUpdate),
+        Arc::new(asset_update::CommitAssetUpdate),
+    ]
+}
+
+/// The MCP-only portfolio setup tools: preview and save account creates and
+/// updates, read, preview and save holdings snapshots, read exchange rates,
+/// and preview and create alternative assets and liabilities. Not exposed to the
+/// in-app assistant, which has no confirmation card for them; users manage
+/// accounts in Settings and holdings in the holdings editor.
+pub fn portfolio_setup_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(account_changes::PrepareAccountChange),
+        Arc::new(account_changes::CommitAccountChange),
+        Arc::new(holdings_snapshots::GetHoldingsSnapshots),
+        Arc::new(holdings_snapshots::PrepareHoldingsSnapshot),
+        Arc::new(holdings_snapshots::CommitHoldingsSnapshot),
+        Arc::new(exchange_rates::GetExchangeRates),
+        Arc::new(alternative_assets::PrepareAlternativeAsset),
+        Arc::new(alternative_assets::CommitAlternativeAsset),
+    ]
+}
+
+/// A currency code as core reads it: letters only, any length (USDT is one
+/// too). A minor unit such as GBp or ZAc keeps its spelling, since GBp
+/// (pence) and GBP (pounds) differ a hundredfold; any other code is
+/// uppercased. `None` when the code is empty or not letters.
+pub(crate) fn currency_code(code: &str) -> Option<String> {
+    let code = code.trim();
+    if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(
+        if wealthfolio_core::fx::currency::get_normalization_rule(code).is_some() {
+            code.to_string()
+        } else {
+            code.to_ascii_uppercase()
+        },
+    )
+}
+
+/// Nullable destructive choices must be explicit: missing is not an instruction
+/// to delete or clear, even when a client bypasses JSON Schema validation.
+pub(crate) fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spending_workflow_audits_omit_private_payloads_even_when_malformed() {
+        let mut tools = spending_access_tools();
+        tools.extend(categorization_rule_tools());
+        tools.extend(transaction_category_tools());
+        tools.extend([
+            Arc::new(categorization_context::ListCategorizationContext) as Arc<dyn AgentTool>,
+            Arc::new(propose_categories::ProposeCategories),
+            Arc::new(activities::SearchActivities),
+        ]);
+        let args = serde_json::json!({"query":"private-financial-detail","symbol":"private-financial-detail","notes":"private-financial-detail","pattern":"private-financial-detail",
+            "aiProposals":[{"reason":"private-financial-detail"}],"unexpected-private-financial-detail":"private-financial-detail"});
+        for tool in tools {
+            assert!(
+                !tool
+                    .sanitize_args_for_audit(&args)
+                    .to_string()
+                    .contains("private-financial-detail"),
+                "{}",
+                tool.name()
+            );
+        }
+    }
 
     /// The catalog order is LLM-visible (tool listing) and mirrors the
     /// read tools' historical relative order — append-only.

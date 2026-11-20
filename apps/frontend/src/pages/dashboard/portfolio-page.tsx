@@ -1,6 +1,5 @@
 import { HealthStatusIndicator } from "@/components/health-status-icon";
 import { SwipablePage, SwipablePageView } from "@/components/page";
-import { PrivacyToggle } from "@/components/privacy-toggle";
 import { AlternativeAssetQuickAddModal } from "@/pages/asset/alternative-assets/components";
 import { useNavigationMode } from "@/pages/layouts/navigation/navigation-mode-context";
 import { AlternativeAssetKind } from "@/lib/types";
@@ -48,7 +47,12 @@ const PageLoader = () => (
 export default function PortfolioPage() {
   const { t } = useTranslation();
   const dashboardPortfolio = useDashboardPortfolio();
+  const { isEnabled: spendingEnabled } = useSpendingSettings();
   const { isFocusMode, toggleFocusMode } = useNavigationMode();
+  const [spendingCompareEnabled, setSpendingCompareEnabled] = useState(false);
+  const toggleSpendingComparison = useCallback(() => {
+    setSpendingCompareEnabled((enabled) => !enabled);
+  }, []);
 
   // Alternative asset quick-add modal state
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
@@ -80,13 +84,13 @@ export default function PortfolioPage() {
 
   const commonActions = (
     <>
-      <HealthStatusIndicator />
       {isFocusMode && (
         <Button
           variant="secondary"
           size="icon-xs"
-          className="bg-secondary/50 rounded-full"
+          className="rounded-full"
           onClick={toggleFocusMode}
+          aria-label={t("common:component.exit_focus_mode")}
         >
           <Icons.Fullscreen className="size-5" />
         </Button>
@@ -101,19 +105,21 @@ export default function PortfolioPage() {
         scope={dashboardPortfolio.scope}
         onSelect={dashboardPortfolio.setPortfolioId}
       />
-      <DashboardActions />
+      <DashboardActions spendingEnabled={spendingEnabled} />
     </>
   );
 
   const netWorthActions = (
     <>
       {commonActions}
-      <PrivacyToggle />
-      <DashboardActions onAddAsset={handleAddAsset} onAddLiability={handleAddLiability} />
+      <DashboardActions
+        spendingEnabled={spendingEnabled}
+        view="net-worth"
+        onAddAsset={handleAddAsset}
+        onAddLiability={handleAddLiability}
+      />
     </>
   );
-
-  const { isEnabled: spendingEnabled } = useSpendingSettings();
 
   const views: SwipablePageView[] = useMemo(() => {
     const items: SwipablePageView[] = [
@@ -128,9 +134,12 @@ export default function PortfolioPage() {
             ) : dashboardPortfolio.error ? (
               <div role="alert" className="space-y-3 p-6">
                 <p>{t("dashboard:portfolio_filter.load_error")}</p>
-                <Button variant="outline" onClick={() => void dashboardPortfolio.refetch()}>
-                  {t("common:retry")}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" onClick={() => void dashboardPortfolio.refetch()}>
+                    {t("common:retry")}
+                  </Button>
+                  <HealthStatusIndicator />
+                </div>
               </div>
             ) : (
               <DashboardContent
@@ -163,13 +172,18 @@ export default function PortfolioPage() {
         icon: SpendingTabIcon,
         content: (
           <Suspense fallback={<PageLoader />}>
-            <SpendingTabContent />
+            <SpendingTabContent compareEnabled={spendingCompareEnabled} />
           </Suspense>
         ),
         actions: (
           <>
             {commonActions}
-            <PrivacyToggle />
+            <DashboardActions
+              view="spending"
+              spendingEnabled={spendingEnabled}
+              compareEnabled={spendingCompareEnabled}
+              onCompareToggle={toggleSpendingComparison}
+            />
           </>
         ),
       });
@@ -183,6 +197,8 @@ export default function PortfolioPage() {
     handleAddAsset,
     handleAddLiability,
     spendingEnabled,
+    spendingCompareEnabled,
+    toggleSpendingComparison,
     dashboardPortfolio,
   ]);
 

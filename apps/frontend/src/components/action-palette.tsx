@@ -13,6 +13,7 @@ export interface ActionPaletteItem {
   testId?: string;
   variant?: "default" | "destructive";
   disabled?: boolean;
+  checked?: boolean;
 }
 
 export interface ActionPaletteGroup {
@@ -25,7 +26,7 @@ interface ActionPaletteProps {
   onOpenChange: (open: boolean) => void;
   title?: string;
   groups: ActionPaletteGroup[];
-  trigger?: React.ReactNode;
+  trigger?: React.ReactElement;
   align?: "start" | "center" | "end";
   side?: "top" | "bottom" | "left" | "right";
 }
@@ -57,33 +58,38 @@ export function ActionPalette({
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
-      <PopoverTrigger asChild>
-        {trigger ?? (
-          <Button variant="outline" size="icon" className="h-9 w-9">
-            <Icons.DotsThreeVertical className="h-5 w-5" weight="fill" />
-          </Button>
-        )}
-      </PopoverTrigger>
+      <PopoverTrigger
+        render={
+          trigger ?? (
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-9 w-9"
+              aria-label={t("common:layout.more_options")}
+            >
+              <Icons.DotsThreeVertical className="h-5 w-5" weight="fill" />
+            </Button>
+          )
+        }
+      />
+      {/* Keep touch-sized rows unless the viewport is lg+ and the primary pointer is fine. */}
       <PopoverContent
         align={align}
         side={side}
         sideOffset={8}
-        className={cn(
-          "w-auto min-w-[260px] max-w-[320px] p-0",
-          "rounded-2xl",
-          "border-border/50 border dark:border-white/10",
-          "bg-card backdrop-blur-xl",
-          "shadow-lg",
-        )}
+        aria-label={title ?? t("common:actions")}
+        className="w-auto max-w-80 min-w-65 p-0 lg:pointer-fine:min-w-56"
       >
         {/* Header - only show if title provided */}
         {title && (
-          <div className="flex items-center justify-between px-5 pb-3 pt-5">
-            <h3 className="text-foreground text-lg font-bold">{title}</h3>
+          <div className="flex items-center justify-between gap-2 px-5 pt-5 pb-3 lg:pointer-fine:px-4 lg:pointer-fine:pt-3 lg:pointer-fine:pb-1">
+            <h3 className="text-foreground text-lg font-bold lg:pointer-fine:text-sm lg:pointer-fine:font-semibold">
+              {title}
+            </h3>
             <button
               onClick={handleClose}
               className={cn(
-                "flex h-8 w-8 items-center justify-center rounded-full",
+                "flex size-8 shrink-0 items-center justify-center rounded-full lg:pointer-fine:size-7",
                 "bg-muted/80 hover:bg-muted",
                 "text-muted-foreground hover:text-foreground",
                 "transition-colors duration-150",
@@ -91,17 +97,22 @@ export function ActionPalette({
               )}
               aria-label={t("common:close")}
             >
-              <Icons.X className="h-4 w-4" />
+              <Icons.X className="size-4 lg:pointer-fine:size-3.5" />
             </button>
           </div>
         )}
 
         {/* Action Groups */}
-        <div className={cn("px-3 pb-4", !title && "pt-3")}>
+        <div
+          className={cn(
+            "px-3 pb-4 lg:pointer-fine:px-1.5 lg:pointer-fine:pb-1.5",
+            !title && "pt-3 lg:pointer-fine:pt-1.5",
+          )}
+        >
           {groups.map((group, groupIndex) => (
             <div key={groupIndex}>
               {group.title && (
-                <div className="text-muted-foreground px-2 py-1.5 text-xs font-medium uppercase tracking-wider">
+                <div className="text-muted-foreground px-2 py-1.5 text-xs font-medium tracking-wider uppercase">
                   {group.title}
                 </div>
               )}
@@ -115,24 +126,28 @@ export function ActionPalette({
                       <button
                         data-testid={item.testId}
                         disabled={item.disabled}
+                        aria-pressed={item.checked}
                         onClick={() => handleItemClick(item)}
                         className={cn(
                           "disabled:pointer-events-none disabled:opacity-50",
-                          "flex w-full items-center gap-4 rounded-xl px-3 py-3",
+                          "flex w-full items-center gap-4 rounded-xl px-3 py-3 lg:pointer-fine:gap-2.5 lg:pointer-fine:rounded-lg lg:pointer-fine:py-2",
                           "transition-colors duration-150",
                           isDestructive
-                            ? "text-destructive hover:bg-destructive/10 active:bg-destructive/15"
+                            ? "text-destructive hover:bg-destructive-subtle hover:text-destructive-subtle-foreground active:bg-destructive-subtle/70"
                             : "text-foreground hover:bg-accent active:bg-accent/80",
                           "focus-visible:ring-ring focus:outline-none focus-visible:ring-2 focus-visible:ring-inset",
                         )}
                       >
                         <IconComponent
                           className={cn(
-                            "h-5 w-5 shrink-0",
+                            "size-5 shrink-0 lg:pointer-fine:size-4",
                             isDestructive ? "text-destructive" : "text-muted-foreground",
                           )}
                         />
-                        <span className="text-[15px] font-medium">{item.label}</span>
+                        <span className="text-base font-medium lg:pointer-fine:text-sm lg:pointer-fine:font-normal">
+                          {item.label}
+                        </span>
+                        {item.checked && <Icons.Check className="ms-auto size-4 shrink-0" />}
                       </button>
                     </React.Fragment>
                   );

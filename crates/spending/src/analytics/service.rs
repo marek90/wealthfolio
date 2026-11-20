@@ -22,7 +22,7 @@ use crate::activity_allocations::{
 use crate::activity_assignments::ActivityTaxonomyAssignmentRepositoryTrait;
 use crate::activity_classification::{
     activity_abs_amount, classify_activity, classify_activity_for_aggregation, decimal_to_f64,
-    within_spending_transfer_groups, SpendingClassification,
+    neutral_transfer_groups, SpendingClassification,
 };
 use crate::activity_splits::ActivitySplitRepositoryTrait;
 use crate::budget::service::category_meta;
@@ -204,7 +204,12 @@ impl AnalyticsService {
             .get_activities_by_account_ids(&all_spending_accounts)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let transfer_context_acts: Vec<&Activity> = activities.iter().collect();
-        let transfer_groups = within_spending_transfer_groups(&transfer_context_acts);
+        let transfer_groups = neutral_transfer_groups(
+            &transfer_context_acts,
+            &account_types,
+            self.activity_repo.as_ref(),
+            self.account_repo.as_ref(),
+        )?;
 
         let in_window = |a: &Activity, lo: DateTime<Utc>, hi: DateTime<Utc>| {
             a.activity_date >= lo && a.activity_date <= hi
@@ -511,21 +516,26 @@ fn summarize(
     let mut income = Decimal::ZERO;
     let mut outflow = Decimal::ZERO;
     let mut saved = Decimal::ZERO;
+    let mut from_savings = Decimal::ZERO;
     let mut count = 0;
+    let mut calculation_quality = crate::CalculationQuality::default();
     for a in acts {
         let Some(account_type) = account_types.get(&a.account_id) else {
             continue;
         };
         // Income-pattern buckets: classification decides spend/income/saving;
-        // a cross-boundary transfer-out → Saving. Amounts never overlap.
+        // a cross-boundary transfer-out → Saving, a cross-boundary
+        // transfer-in → FromSavings. Amounts never overlap.
         let classification = classify_activity_for_aggregation(a, account_type, within_groups);
         let amt = activity_abs_amount(a);
         let income_native = classification.income_amount(amt);
         let spending_native = classification.spending_amount(amt);
         let saving_native = classification.saving_amount(amt);
+        let from_savings_native = classification.savings_withdrawal_amount(amt);
         if income_native == Decimal::ZERO
             && spending_native == Decimal::ZERO
             && saving_native == Decimal::ZERO
+            && from_savings_native == Decimal::ZERO
         {
             continue;
         }
@@ -543,17 +553,36 @@ fn summarize(
         if income_native == Decimal::ZERO
             && spending_native == Decimal::ZERO
             && saving_native == Decimal::ZERO
+            && from_savings_native == Decimal::ZERO
         {
             continue;
         }
         // FX-convert each activity to the report currency at `fx_as_of`,
         // matching insight::aggregate_spend so the two services agree.
-        income += crate::fx::convert(fx, income_native, &a.currency, target_currency, fx_as_of)
-            .unwrap_or(Decimal::ZERO);
-        outflow += crate::fx::convert(fx, spending_native, &a.currency, target_currency, fx_as_of)
-            .unwrap_or(Decimal::ZERO);
-        saved += crate::fx::convert(fx, saving_native, &a.currency, target_currency, fx_as_of)
-            .unwrap_or(Decimal::ZERO);
+        let income_converted =
+            crate::fx::convert(fx, income_native, &a.currency, target_currency, fx_as_of);
+        let spending_converted =
+            crate::fx::convert(fx, spending_native, &a.currency, target_currency, fx_as_of);
+        let saving_converted =
+            crate::fx::convert(fx, saving_native, &a.currency, target_currency, fx_as_of);
+        let from_savings_converted = crate::fx::convert(
+            fx,
+            from_savings_native,
+            &a.currency,
+            target_currency,
+            fx_as_of,
+        );
+        if income_converted.is_none()
+            || spending_converted.is_none()
+            || saving_converted.is_none()
+            || from_savings_converted.is_none()
+        {
+            calculation_quality.record_missing(&a.currency);
+        }
+        income += income_converted.unwrap_or(Decimal::ZERO);
+        outflow += spending_converted.unwrap_or(Decimal::ZERO);
+        saved += saving_converted.unwrap_or(Decimal::ZERO);
+        from_savings += from_savings_converted.unwrap_or(Decimal::ZERO);
         // `count` is "activities that contributed income OR outflow" — it
         // counts each activity once, regardless of how many spending/income
         // category assignments it carries. Consumers that need spending-only
@@ -562,15 +591,19 @@ fn summarize(
         // two fields measure different things; they're not expected to match.
         count += 1;
     }
-    // Monetary fields are signed so `current.net == income - outflow - saved`
-    // holds by construction, matching the insight pipeline's
-    // `Headline.net_cashflow`. `outflow` is consumption-only (savings excluded);
-    // UI that wants a non-negative "Spent" badge clamps at render time.
+    // Monetary fields are signed so
+    // `current.net == income - outflow - saved + from_savings` holds by
+    // construction, matching the insight pipeline's `Headline.net_cashflow`.
+    // `outflow` is consumption-only (savings excluded); UI that wants a
+    // non-negative "Spent" badge clamps at render time. `saved` and
+    // `from_savings` stay gross so the savings breakdown still sums to `saved`.
     PeriodSummary {
+        calculation_quality,
         income: decimal_to_f64(income),
         outflow: decimal_to_f64(outflow),
         saved: decimal_to_f64(saved),
-        net: decimal_to_f64(income - outflow - saved),
+        from_savings: decimal_to_f64(from_savings),
+        net: decimal_to_f64(income - outflow - saved + from_savings),
         count,
     }
 }
@@ -876,17 +909,23 @@ fn event_overlaps_window(
     event_end: &str,
     window_start: Option<&DateTime<Utc>>,
     window_end: Option<&DateTime<Utc>>,
+    timezone: &str,
 ) -> bool {
     // Events have YYYY-MM-DD date strings; compare date keys lexicographically.
+    // Window bounds are instants, so read them as days in the user's timezone:
+    // the app sends local-day bounds, which fall on other UTC days.
+    let day_key = |instant: &DateTime<Utc>| {
+        wealthfolio_core::utils::time_utils::activity_date_in_user_timezone(*instant, timezone)
+            .format("%Y-%m-%d")
+            .to_string()
+    };
     if let Some(ws) = window_start {
-        let window_start_key = format!("{}-{:02}-{:02}", ws.year(), ws.month(), ws.day());
-        if event_end < window_start_key.as_str() {
+        if event_end < day_key(ws).as_str() {
             return false;
         }
     }
     if let Some(we) = window_end {
-        let window_end_key = format!("{}-{:02}-{:02}", we.year(), we.month(), we.day());
-        if event_start > window_end_key.as_str() {
+        if event_start > day_key(we).as_str() {
             return false;
         }
     }
@@ -1338,6 +1377,7 @@ impl AnalyticsService {
                     &ev.event.end_date,
                     window_start.as_ref(),
                     window_end.as_ref(),
+                    timezone,
                 )
             })
             .collect();
@@ -1434,6 +1474,7 @@ impl AnalyticsService {
             let acts = by_event.remove(&ev.event.id).unwrap_or_default();
 
             let mut total = Decimal::ZERO;
+            let mut calculation_quality = crate::CalculationQuality::default();
             let mut by_category: HashMap<String, CategoryAccumulator> = HashMap::new();
             let mut daily: HashMap<String, Decimal> = HashMap::new();
             let mut transaction_count = 0;
@@ -1466,6 +1507,7 @@ impl AnalyticsService {
                 let Some(amt) =
                     crate::fx::convert(fx, amt_native, &a.currency, &currency, fx_as_of)
                 else {
+                    calculation_quality.record_missing(&a.currency);
                     continue;
                 };
                 if amt == Decimal::ZERO {
@@ -1541,6 +1583,7 @@ impl AnalyticsService {
                 .collect();
 
             out.push(EventSpendingSummary {
+                calculation_quality,
                 event_id: ev.event.id,
                 event_name: ev.event.name,
                 event_type_id: ev.event.event_type_id.clone(),
@@ -1567,6 +1610,7 @@ impl AnalyticsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity_classification::within_spending_transfer_groups;
     use async_trait::async_trait;
     use chrono::TimeZone;
     use rust_decimal::Decimal;
@@ -1977,6 +2021,125 @@ mod tests {
         assert_eq!(summary.count, 2);
     }
 
+    fn cash_leg(id: &str, activity_type: &str, amount: i64, group: Option<&str>) -> Activity {
+        let (activity, _) = spending_activity(id, activity_type, amount, "unused", 1);
+        Activity {
+            account_id: "cash-account".to_string(),
+            source_group_id: group.map(str::to_string),
+            ..activity
+        }
+    }
+
+    fn summarize_cash(
+        acts: &[&Activity],
+        context: &[&Activity],
+        exclusions: &ExclusionIndex,
+        fx: &dyn wealthfolio_core::fx::FxServiceTrait,
+    ) -> PeriodSummary {
+        let account_types = HashMap::from([
+            ("cash-account".to_string(), account_types::CASH.to_string()),
+            (
+                "card-account".to_string(),
+                account_types::CREDIT_CARD.to_string(),
+            ),
+        ]);
+        summarize(
+            acts,
+            &account_types,
+            &within_spending_transfer_groups(context),
+            &HashMap::new(),
+            &SplitsByActivity::new(),
+            exclusions,
+            fx,
+            "USD",
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        )
+    }
+
+    /// Living off investments: more came back from savings than went in, and
+    /// net still equals the change in cash rather than going negative.
+    #[test]
+    fn summarize_adds_back_money_brought_back_from_savings() {
+        let salary = cash_leg("salary", "DEPOSIT", 1000, None);
+        let (rent, _) = spending_activity("rent", "WITHDRAWAL", 1500, "housing", 1);
+        let to_savings = cash_leg("to-savings", "TRANSFER_OUT", 200, Some("g-out"));
+        let back = cash_leg("back", "TRANSFER_IN", 900, Some("g-in"));
+        let acts = vec![&salary, &rent, &to_savings, &back];
+        // An excluded spending category leaves the money brought back alone.
+        let exclusions = ExclusionIndex::from_parent_pairs(
+            &["housing".to_string()],
+            [("housing", None)].into_iter(),
+        );
+
+        let summary = summarize_cash(&acts, &acts, &ExclusionIndex::empty(), &PassthroughFx);
+        assert_eq!(summary.income, 1000.0);
+        assert_eq!(summary.outflow, 1500.0);
+        assert_eq!(summary.saved, 200.0);
+        assert_eq!(summary.from_savings, 900.0);
+        assert_eq!(summary.net, 1000.0 - 1500.0 - 200.0 + 900.0);
+        assert_eq!(summary.count, 4);
+
+        let with_exclusion = summarize_cash(&acts, &acts, &exclusions, &PassthroughFx);
+        assert_eq!(with_exclusion.from_savings, 900.0);
+        assert_eq!(with_exclusion.saved, 200.0);
+    }
+
+    #[test]
+    fn summarize_counts_money_brought_back_without_any_saving() {
+        let back = cash_leg("back", "TRANSFER_IN", 400, Some("g-in"));
+        let (groceries, _) = spending_activity("groceries", "WITHDRAWAL", 150, "food", 1);
+        let acts = vec![&back, &groceries];
+
+        let summary = summarize_cash(&acts, &acts, &ExclusionIndex::empty(), &PassthroughFx);
+        assert_eq!(summary.income, 0.0);
+        assert_eq!(summary.saved, 0.0);
+        assert_eq!(summary.from_savings, 400.0);
+        assert_eq!(summary.net, 250.0);
+    }
+
+    /// A report filtered to one account still sees the full spending context,
+    /// so a transfer from another spending account is not money from savings.
+    #[test]
+    fn summarize_keeps_a_transfer_from_another_spending_account_neutral() {
+        let inbound = cash_leg("in", "TRANSFER_IN", 500, Some("g-pair"));
+        let outbound = Activity {
+            account_id: "card-account".to_string(),
+            ..cash_leg("out", "TRANSFER_OUT", 500, Some("g-pair"))
+        };
+
+        let summary = summarize_cash(
+            &[&inbound],
+            &[&inbound, &outbound],
+            &ExclusionIndex::empty(),
+            &PassthroughFx,
+        );
+        assert_eq!(summary.from_savings, 0.0);
+        assert_eq!(summary.net, 0.0);
+        assert_eq!(summary.count, 0);
+    }
+
+    #[test]
+    fn summarize_converts_money_brought_back_and_flags_missing_rates() {
+        let back = Activity {
+            currency: "EUR".to_string(),
+            ..cash_leg("back", "TRANSFER_IN", 100, Some("g-in"))
+        };
+        let acts = vec![&back];
+
+        let converted = summarize_cash(&acts, &acts, &ExclusionIndex::empty(), &DoubleEurFx);
+        assert_eq!(converted.from_savings, 200.0);
+        assert_eq!(converted.net, 200.0);
+        assert_eq!(converted.calculation_quality.missing_fx_transactions, 0);
+
+        let missing = summarize_cash(&acts, &acts, &ExclusionIndex::empty(), &FailingFx);
+        assert_eq!(missing.from_savings, 0.0);
+        assert_eq!(missing.calculation_quality.missing_fx_transactions, 1);
+        assert!(missing
+            .calculation_quality
+            .missing_fx_currencies
+            .contains("EUR"));
+    }
+
     fn build_credit_card_summary(activities: &[Activity]) -> SpendingSummary {
         build_credit_card_summary_in_timezone(activities, "")
     }
@@ -2066,26 +2229,59 @@ mod tests {
             "2024-01-30",
             "2024-02-02",
             Some(&start),
-            Some(&end)
+            Some(&end),
+            "UTC"
         ));
         assert!(event_overlaps_window(
             "2024-02-10",
             "2024-02-12",
             Some(&start),
-            Some(&end)
+            Some(&end),
+            "UTC"
         ));
         assert!(!event_overlaps_window(
             "2024-01-01",
             "2024-01-31",
             Some(&start),
-            Some(&end)
+            Some(&end),
+            "UTC"
         ));
         assert!(!event_overlaps_window(
             "2024-03-01",
             "2024-03-03",
             Some(&start),
-            Some(&end)
+            Some(&end),
+            "UTC"
         ));
+    }
+
+    /// A local-day window (as the app and the assistant tools send) selects
+    /// events on that day only, west and east of UTC.
+    #[test]
+    fn event_window_reads_bounds_as_local_days() {
+        let instant = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let cases = [
+            // Jan 1 in Toronto ends at 04:59Z on Jan 2.
+            (
+                "America/Toronto",
+                "2026-01-01T05:00:00Z",
+                "2026-01-02T04:59:59.999Z",
+            ),
+            // Jan 1 in Madrid starts at 23:00Z on Dec 31.
+            (
+                "Europe/Madrid",
+                "2025-12-31T23:00:00Z",
+                "2026-01-01T22:59:59.999Z",
+            ),
+        ];
+        for (timezone, start, end) in cases {
+            let (start, end) = (instant(start), instant(end));
+            let overlaps =
+                |day: &str| event_overlaps_window(day, day, Some(&start), Some(&end), timezone);
+            assert!(overlaps("2026-01-01"), "{timezone}");
+            assert!(!overlaps("2025-12-31"), "{timezone}");
+            assert!(!overlaps("2026-01-02"), "{timezone}");
+        }
     }
 
     #[test]
@@ -2181,6 +2377,35 @@ mod tests {
 
         assert_eq!(summary.total_spending, 200.0);
         assert_eq!(summary.by_category["groceries"].amount, 200.0);
+    }
+
+    #[test]
+    fn report_summary_counts_missing_fx_once_per_included_transaction() {
+        let (mut foreign, _) = spending_activity("foreign", "WITHDRAWAL", 100, "groceries", 1);
+        foreign.currency = "EUR".into();
+        let (domestic, _) = spending_activity("domestic", "WITHDRAWAL", 25, "groceries", 2);
+        let types = HashMap::from([("card-account".into(), account_types::CREDIT_CARD.into())]);
+        let summary = summarize(
+            &[&foreign, &domestic],
+            &types,
+            &HashSet::new(),
+            &HashMap::new(),
+            &SplitsByActivity::new(),
+            &ExclusionIndex::empty(),
+            &FailingFx,
+            "USD",
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        );
+        assert_eq!(summary.outflow, 25.0);
+        assert_eq!(summary.calculation_quality.missing_fx_transactions, 1);
+        assert_eq!(
+            summary
+                .calculation_quality
+                .missing_fx_currencies
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["EUR"]
+        );
     }
 
     #[test]

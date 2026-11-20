@@ -1,4 +1,21 @@
 {
+  "budgetGroupNames": {
+    "032ecb02-5912-42e8-9724-2cd566fc08d5": "必要支出",
+    "a409e0d6-9152-49c8-a5b4-a147a8ac636e": "非必要支出",
+    "1fb6f2a3-3245-4702-83e8-ab116458d13e": "储蓄",
+    "8cbd26c8-e3b2-4176-8c61-e5c11e10b808": "捐赠",
+    "3ff71753-5dd5-4372-9ca2-63d8d9a04851": "个人",
+    "6e25d097-0c73-4521-9407-d47e8dfb73e2": "其他"
+  },
+  "eventTypeNames": {
+    "255600dc-c2a3-47e0-979d-a602c21fc337": "旅行",
+    "51e3eedb-5484-45ba-a525-6b88209c46ed": "假期",
+    "d9871ccb-5396-4c70-ac08-5b07ed90e64a": "商务",
+    "22442173-c794-45bf-97ee-9b3f9a7c8ba3": "教育",
+    "94fc13ed-ac40-466b-8071-64f1e3c72204": "医疗",
+    "1aaab8fb-8fd9-4543-bd46-d9ee4a5a8564": "特殊场合",
+    "fa4812ee-e06e-4117-a819-e4d88b7acbaf": "其他"
+  },
   "common": {
     "amount": "金额",
     "min": "最小",
@@ -21,6 +38,9 @@
     "nameRequired": "名称为必填项",
     "namePlaceholder": "类别名称",
     "icon": "图标",
+    "parent": "父类别",
+    "topLevel": "无（顶级）",
+    "parentLockedByBudget": "移动前请先删除此类别的预算目标。预算仅适用于顶级类别。",
     "color": "颜色",
     "hex": "十六进制",
     "create": "创建类别",
@@ -61,6 +81,11 @@
     "editTitle": "编辑规则",
     "addTitle": "添加规则",
     "editDescription": "按名称模式自动标记活动。当多条规则匹配时，优先级较高的规则生效。",
+    "categoryCompatibilityHint": "分类遵循交易的现金流类型。储蓄分类仅适用于已关联且转出支出跟踪账户范围的转账。",
+    "runIncompatible": "不兼容的分类：{{count}}。分类遵循交易的现金流类型。储蓄分类仅适用于已关联且转出支出跟踪账户范围的转账。",
+    "runProtected": "保留现有分类或拆分：{{count}}。",
+    "runUnchanged": "已按要求分类：{{count}}。",
+    "runWithoutTarget": "无目标分类的匹配项：{{count}}。",
     "matchContains": "包含",
     "matchStartsWith": "开头为",
     "matchExact": "精确",
@@ -105,6 +130,7 @@
     "selectCategory": "选择类别",
     "priorityLabel": "优先级",
     "priorityHint": "优先级较高的规则会被优先检查（0-100）。",
+    "priorityInvalid": "优先级必须是大于或等于 0 的整数",
     "updateRule": "更新规则",
     "createRule": "创建规则",
     "scopeLabel": "适用于",
@@ -161,12 +187,14 @@
     "duplicate": "复制",
     "unlinkTransfer": "取消关联转账",
     "linkTransfer": "关联转账……",
-    "deleteConfirmMany_other": "确定要删除 {{count}} 笔交易吗？"
+    "deleteConfirmMany_other": "确定要删除 {{count}} 笔交易吗？",
+    "convertToTransfer": "转为转账..."
   },
   "cashFlow": {
     "income": "收入",
     "spending": "支出",
     "saving": "储蓄",
+    "netSaved": "净储蓄",
     "net": "净额"
   },
   "insights": {
@@ -222,6 +250,12 @@
     "filteredNet": "筛选净额"
   },
   "period": {
+    "month": "月",
+    "year": "年",
+    "previousPeriod": "上一个期间",
+    "nextPeriod": "下一个期间",
+    "previousYears": "更早年份",
+    "nextYears": "更晚年份",
     "thisMonth": "本月",
     "mtdShort": "MTD",
     "lastMonth": "上月",
@@ -410,6 +444,7 @@
     "customSubtitle": "所选期间内的交易"
   },
   "split": {
+    "staleTaxonomy": "这些拆分使用之前的类别类型，已不再适用于此交易。",
     "title": "拆分交易",
     "transactionFallback": "交易",
     "remainingOf": "剩余，共 {{amount}}",
@@ -418,7 +453,11 @@
     "removeLine": "移除拆分行 {{number}}",
     "addLine": "添加行",
     "distributeEvenly": "平均分配",
-    "clearSplit": "清除拆分"
+    "clearSplit": "清除拆分",
+    "replaceWithCategory": "将拆分替换为一个类别",
+    "replaceDescription_one": "将 {{count}} 个拆分分配替换为 {{category}}？这将删除现有拆分。",
+    "replaceDescription_other": "将 {{count}} 个拆分分配替换为 {{category}}？这将删除现有拆分。",
+    "categoryProtected": "拆分分配受到保护。请在拆分编辑器中编辑或明确替换。"
   },
   "hierarchy": {
     "noCategorizedSpending": "此周期内没有已归类的支出。",
@@ -710,8 +749,6 @@
     "overspentBy": "超支 {{pct}}",
     "noIncome": "此周期内所选账户没有收入。",
     "spent": "已花费",
-    "saved": "已储蓄",
-    "setAside": "预留",
     "sortSpent": "支出",
     "sortChange": "变化",
     "sortName": "名称",
@@ -755,6 +792,8 @@
       "total": "总额",
       "shortfall": "缺口",
       "refunds": "净退款",
+      "fromSavings": "来自储蓄",
+      "toSavings": "转入储蓄",
       "surplus": "剩余",
       "uncategorizedIncome": "未归类收入",
       "netSpending": "净支出"
@@ -765,6 +804,7 @@
       "shortfall": "超出流入的支出与储蓄。",
       "refunds": "退款超过支出的类别。",
       "saved": "转入储蓄和投资账户的资金。",
+      "fromSavings": "从储蓄和投资账户转回的资金。",
       "surplus": "已流入但未支出或预留的资金。",
       "uncategorized": "尚未归类的支出。",
       "net": "扣除退款后该类别的花费。",
@@ -810,6 +850,9 @@
     "manage": "管理 →"
   },
   "cashForm": {
+    "none": "无",
+    "addExpense": "添加支出",
+    "addIncome": "添加收入",
     "accountRequired": "请选择一个账户。",
     "pickDate": "选择日期",
     "amountNonNegative": "金额不能为负数。",
@@ -827,6 +870,8 @@
     "spendingCategory": "支出类别",
     "activityUpdated": "活动已更新。",
     "activityCreated": "活动已创建。",
+    "expenseAdded": "已添加支出。",
+    "incomeAdded": "已添加收入。",
     "saveFailed": "保存活动失败：{{message}}",
     "editTitle": "编辑交易",
     "addTitle": "添加交易",
@@ -886,6 +931,11 @@
     "deselectDay": "取消选择 {{date}} 的所有交易"
   },
   "tabContent": {
+    "comparePriorPeriod": "与上一期间比较",
+    "comparisonDays": "期间内天数",
+    "comparisonWeeks": "期间内周数",
+    "comparisonMonths": "期间内月份",
+    "comparisonDifference": "差额",
     "stageWhereLabel": "我的现状",
     "stageWhereSub": "进度、预算及类别明细",
     "stageChangedLabel": "发生了什么变化",
@@ -893,7 +943,7 @@
     "stageWhenLabel": "何时与何地",
     "stageWhenSub": "何时消费及支出事件",
     "spendingAbovePrefix": "支出",
-    "pctAbove": "高出 {{pct}}%",
+    "pctAbove": "高出 {{pct}}",
     "thePriorPeriod": "较上一周期。",
     "moreThan": "比 {{prior}} 多 {{more}}",
     "uncategorizedCount_one": "{{count}} 笔未归类交易",
@@ -929,12 +979,11 @@
     "uncategorizedReview": "未归类——审核",
     "uncategorizedImprove": "未归类——审核以改善明细分解",
     "plusMore": "+ {{count}} 项",
-    "down": "下降",
-    "up": "上升",
     "aboutSame": "与上一周期基本持平",
     "fromPriorPeriod": "较上一周期",
     "intervalMtd": "本月",
     "intervalLastMonth": "上月",
+    "interval1W": "过去7天",
     "interval3M": "过去 3 个月",
     "interval6M": "过去 6 个月",
     "intervalYtd": "年初至今",
@@ -958,9 +1007,15 @@
     "categoryCount_one": "{{count}} 个类别",
     "categoryCount_other": "{{count}} 个类别",
     "groupRollover": "分组结转",
+    "removeGroupRollover": "移除结转设置",
+    "removeGroupRolloverTitle": "移除{{name}}的结转设置？",
+    "removeGroupRolloverDescription": "这将清除已保存的期初余额，并重新计算所有月份的结转余额。分类和预算目标将予以保留。",
     "on": "开",
     "off": "关",
     "deleteGroup": "删除分组",
+    "deleteGroupDescription": "其类别和每月缓冲预算将移至所选分组。此操作无法撤销。",
+    "deleteGroupRollover": "删除此分组前，请先移除其结转设置。",
+    "deleteGroupDestinationRollover": "移入预算前，请先禁用目标分组的结转。",
     "deleteGroupTitle": "删除 {{name}}？",
     "deleteGroupWithCategories_one": "其 {{count}} 个类别将被移至另一个分组。此操作无法撤销。",
     "deleteGroupWithCategories_other": "其 {{count}} 个类别将被移至另一个分组。此操作无法撤销。",
@@ -984,6 +1039,7 @@
     "revertOverride": "还原覆盖设置",
     "monthOverrideRevert": "月度覆盖 · 点击还原",
     "spentOf": "已花费，共",
+    "savedOf": "已储蓄，共",
     "ofGroup": "（占分组的 {{pct}}）",
     "rowOptions": "行选项",
     "moveToGroup": "移至分组",
@@ -1014,12 +1070,38 @@
     "totals": "合计",
     "planned": "计划",
     "actual": "实际",
+    "saved": "已储蓄",
+    "savingsGoal": "储蓄目标",
     "remaining": "剩余",
     "unassigned": "未分配",
     "rolloverIn": "结转流入",
+    "carriedIn": "已结转",
+    "left": "剩余",
+    "over": "超出",
+    "toGo": "待储蓄",
+    "ahead": "超前",
     "dataUnavailable": "预算数据不可用",
     "migrationNeeded": "当前的本地数据库是在更新后的支出迁移之前创建的。",
     "addSource_other": "添加来源（{{count}} 个可用）",
-    "overridesTitle_other": "覆盖设置 · {{count}}"
+    "overridesTitle_other": "覆盖设置 · {{count}}",
+    "sourceMonth": "源月份"
+  },
+  "splitEditReview": {
+    "title": "确认删除拆分",
+    "hiddenCategory": "已有分类分配会保留，删除拆分后可能会应用。",
+    "confirm": "保存并删除拆分",
+    "removed_other": "此更改将删除 {{count}} 个拆分分配。"
+  },
+  "budgetErrors": {
+    "deleteGroup": "删除预算分组失败。",
+    "copyPlan": "复制计划失败。"
+  },
+  "grid": {
+    "transferInForm": "请通过“编辑”在转账表单中修改转账类型。",
+    "noCategory": "此活动既不属于支出、收入，也不属于储蓄，因此没有类别。",
+    "saveTypeFirst": "请先保存新的类型或账户，再选择类别。",
+    "saveCategoryFirst": "请先保存类别，再修改类型或账户。",
+    "typeNotForAccount": "此账户不支持该类型。",
+    "amountRequired": "金额为必填项。"
   }
 }

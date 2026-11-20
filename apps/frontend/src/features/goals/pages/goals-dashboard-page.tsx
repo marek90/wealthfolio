@@ -20,8 +20,8 @@ import { useGoals } from "../hooks/use-goals";
 function StatBlock({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline gap-2.5">
-      <span className="text-muted-foreground text-[10px] tracking-[0.15em]">{label}</span>
-      <span className="text-foreground font-serif text-[15px] font-semibold tabular-nums">
+      <span className="text-muted-foreground text-2xs tracking-[0.15em]">{label}</span>
+      <span className="text-foreground font-serif text-base font-semibold tabular-nums">
         {value}
       </span>
     </div>
@@ -37,6 +37,7 @@ function SummaryStats({ goals }: { goals: Goal[] }) {
   const { settings } = useSettingsContext();
   const currency = settings?.baseCurrency ?? goals[0]?.currency ?? "USD";
 
+  const hasCompleteValues = goals.every((goal) => goal.summaryCurrentValue != null);
   const saved = goals.reduce((s, g) => s + (g.summaryCurrentValue ?? 0), 0);
   const target = goals.reduce((s, g) => s + (g.summaryTargetAmount ?? g.targetAmount ?? 0), 0);
   const overall = target > 0 ? saved / target : 0;
@@ -46,7 +47,9 @@ function SummaryStats({ goals }: { goals: Goal[] }) {
 
   const savedDisplay = isBalanceHidden
     ? "••••"
-    : amountFormatting.formatCompactAmount(saved, currency);
+    : hasCompleteValues
+      ? amountFormatting.formatCompactAmount(saved, currency)
+      : "N/A";
   const targetDisplay = isBalanceHidden
     ? "••••"
     : amountFormatting.formatCompactAmount(target, currency);
@@ -57,7 +60,7 @@ function SummaryStats({ goals }: { goals: Goal[] }) {
       <StatBlock label={t("goals:dashboard.stat_target")} value={targetDisplay} />
       <StatBlock
         label={t("goals:dashboard.stat_overall")}
-        value={numberFormatting.formatPercent(overall)}
+        value={hasCompleteValues ? numberFormatting.formatPercent(overall) : "N/A"}
       />
       <StatBlock
         label={t("goals:dashboard.stat_on_track")}
@@ -114,7 +117,7 @@ export default function GoalsDashboardPage() {
         actions={
           <Link to="/goals/new">
             <Button size="sm">
-              <Icons.Plus className="mr-1 h-4 w-4" />
+              <Icons.Plus className="me-1 h-4 w-4" />
               {t("goals:dashboard.new_goal")}
             </Button>
           </Link>
@@ -134,7 +137,7 @@ export default function GoalsDashboardPage() {
             </div>
             <Link to="/goals/new">
               <Button size="lg" className="mt-2">
-                <Icons.Plus className="mr-2 h-4 w-4" />
+                <Icons.Plus className="me-2 h-4 w-4" />
                 {t("goals:dashboard.create_first_goal")}
               </Button>
             </Link>
@@ -155,7 +158,7 @@ export default function GoalsDashboardPage() {
                   className="text-muted-foreground hover:text-foreground flex items-center gap-2 text-xs font-medium transition-colors"
                 >
                   <Icons.ChevronRight
-                    className={`h-3.5 w-3.5 transition-transform ${archivedOpen ? "rotate-90" : ""}`}
+                    className={`h-3.5 w-3.5 transition-transform ${archivedOpen ? "rotate-90" : "rtl:rotate-180"}`}
                   />
                   {t("goals:dashboard.archived_count", { count: archived.length })}
                 </button>

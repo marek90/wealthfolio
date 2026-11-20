@@ -1,3 +1,4 @@
+import i18n from "i18next";
 import { getActivityCurrencyPatch } from "../../activity-currency";
 import {
   isAssetBackedIncomeSubtype,
@@ -19,6 +20,7 @@ import type {
   TransactionUpdateParams,
 } from "./types";
 import { generateTempActivityId } from "./use-activity-grid-state";
+import { isSameAccountCashFxConversion } from "../transfer-link-utils";
 import { calculateIncomeFinalAmount, calculateTradeFinalAmount } from "@/lib/activity-final-amount";
 
 export function isPairedInternalCashTransfer(transaction: LocalTransaction): boolean {
@@ -27,7 +29,6 @@ export function isPairedInternalCashTransfer(transaction: LocalTransaction): boo
     transaction.sourceGroupId &&
     transaction.counterpartActivityId &&
     transaction.counterpartAccountId &&
-    transaction.counterpartAccountId !== transaction.accountId &&
     transaction.isExternal !== true &&
     (transaction.activityType === ActivityType.TRANSFER_IN ||
       transaction.activityType === ActivityType.TRANSFER_OUT) &&
@@ -46,6 +47,8 @@ export function requiresTransferPairEditor(previous: LocalTransaction, next: Loc
  * Set of numeric field names for value comparison
  */
 const NUMERIC_FIELDS = new Set(["quantity", "unitPrice", "amount", "fee", "tax", "fxRate"]);
+// The calculation's inputs, plus what decides its rounding: the currency, and
+// the account, which can change the currency.
 const FINAL_AMOUNT_INPUT_FIELDS = new Set([
   "activityType",
   "subtype",
@@ -54,6 +57,8 @@ const FINAL_AMOUNT_INPUT_FIELDS = new Set([
   "fee",
   "tax",
   "instrumentType",
+  "currency",
+  "accountId",
 ]);
 const FINAL_CASH_ACTIVITY_TYPES = new Set<string>([
   ActivityType.BUY,
@@ -300,7 +305,7 @@ function applySplitDefaults(transaction: LocalTransaction): LocalTransaction {
  * of the asset's, which the grid does not have. That is why a trade preview is
  * NOT submitted (see `sendsAmount`): the backend re-derives from the asset.
  */
-function applyAutomaticFinalAmount(transaction: LocalTransaction): LocalTransaction {
+export function applyAutomaticFinalAmount(transaction: LocalTransaction): LocalTransaction {
   if (transaction._amountEdited) return transaction;
 
   let finalAmount: number | undefined;
@@ -316,14 +321,16 @@ function applyAutomaticFinalAmount(transaction: LocalTransaction): LocalTransact
       fee: transaction.fee,
       tax: transaction.tax,
       contractMultiplier: transaction.metadata?.contract_multiplier,
+      currency: transaction.currency,
     });
   } else if (isAssetBackedIncomeSubtype(transaction.activityType, transaction.subtype)) {
-    finalAmount = calculateIncomeFinalAmount(
-      transaction.quantity,
-      transaction.unitPrice,
-      transaction.pendingInstrumentType ?? transaction.instrumentType,
-      transaction.metadata?.contract_multiplier,
-    );
+    finalAmount = calculateIncomeFinalAmount({
+      quantity: transaction.quantity,
+      unitPrice: transaction.unitPrice,
+      instrumentType: transaction.pendingInstrumentType ?? transaction.instrumentType,
+      contractMultiplier: transaction.metadata?.contract_multiplier,
+      currency: transaction.currency,
+    });
   }
 
   if (finalAmount === undefined) return transaction;
@@ -384,6 +391,37 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     // For new activities, backend generates canonical assetId from symbol + exchangeMic
     // For existing activities, assetId is preserved from the original data
     updated = { ...updated, assetSymbol: upper };
+
+    // A new symbol (pasted, filled or cleared) is another asset than the one picked,
+    // so drop the pick's name, kind, quote currency and provider, and the quote mode:
+    // a manual mode lets the server create the symbol without a quote currency. The
+    // exchange stays, for matching an asset held there. A search pick sets these
+    // again right after (handleSymbolSelect).
+    if (upper !== (transaction.assetSymbol ?? "").trim().toUpperCase()) {
+      updated = {
+        ...updated,
+        assetQuoteMode: undefined,
+        pendingAssetName: undefined,
+        pendingAssetKind: undefined,
+        pendingQuoteCcy: undefined,
+        pendingProviderId: undefined,
+        pendingProviderSymbol: undefined,
+      };
+      // Drop the picked id, and an instrument type the user did not set: one
+      // from a pick or from the saved asset belongs to the old symbol, and a
+      // crypto or FX type lets the server create the new one without a quote
+      // currency. A saved row still sends its stored id, which the server keeps
+      // only while the symbol names that asset.
+      updated = { ...updated, pendingAssetId: undefined };
+      if (!hasUserInstrumentType(transaction)) {
+        updated = {
+          ...updated,
+          instrumentType: undefined,
+          pendingInstrumentType: undefined,
+          _instrumentTypeFromPick: undefined,
+        };
+      }
+    }
 
     // Auto-fill currency only if not already set (e.g., by handleSymbolSelect
     // which sets the correct currency from search result / quote resolution).
@@ -488,7 +526,12 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
   } else if (field === "instrumentType") {
     // Instrument type (EQUITY, OPTION, BOND, etc.) — also set pendingInstrumentType for save payload
     const instrumentType = typeof value === "string" && value ? value : undefined;
-    updated = { ...updated, instrumentType, pendingInstrumentType: instrumentType };
+    updated = {
+      ...updated,
+      instrumentType,
+      pendingInstrumentType: instrumentType,
+      _instrumentTypeFromPick: undefined,
+    };
   }
 
   if (FINAL_AMOUNT_INPUT_FIELDS.has(field)) {
@@ -666,6 +709,7 @@ export function buildSavePayload(
 
     if (isNew) {
       const createPayload: ActivityCreatePayload = {
+        sourceGroupId: transaction.sourceGroupId,
         ...basePayload,
         amount: sendsAmount ? basePayload.amount : undefined,
         ...(attestsCustomTotal && { needsReview: false }),
@@ -782,6 +826,11 @@ export function buildSavePayload(
   };
 }
 
+/** Whether the row's instrument type was set in the Instrument column, not by a pick or the saved asset. */
+export function hasUserInstrumentType(transaction: LocalTransaction): boolean {
+  return !!transaction.pendingInstrumentType && !transaction._instrumentTypeFromPick;
+}
+
 /**
  * Fields that are tracked for changes in the data grid
  */
@@ -807,7 +856,7 @@ export const TRACKED_FIELDS: (keyof LocalTransaction)[] = [
  * Column IDs that should be pinned to the left/right of the grid
  */
 export const PINNED_COLUMNS = {
-  left: ["select", "status", "date", "accountName", "activityType"] as const,
+  left: ["select", "date", "accountName", "activityType"] as const,
   right: ["actions"] as const,
 };
 
@@ -839,7 +888,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "accountId",
-      message: "Account is required",
+      message: i18n.t("activity:validation.account_is_required"),
     });
   }
 
@@ -848,7 +897,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "activityType",
-      message: "Activity type is required",
+      message: i18n.t("activity:validation.activity_type_is_required"),
     });
   }
 
@@ -857,7 +906,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "date",
-      message: "Date is required",
+      message: i18n.t("activity:validation.date_is_required"),
     });
   }
 
@@ -868,7 +917,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
       errors.push({
         transactionId: transaction.id,
         field: "assetSymbol",
-        message: "Symbol is required for this activity type",
+        message: i18n.t("activity:validation.symbol_is_required_for_this_activity_type"),
       });
     }
   }
@@ -883,14 +932,14 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
       errors.push({
         transactionId: transaction.id,
         field: "quantity",
-        message: "Received quantity is required",
+        message: i18n.t("activity:validation.received_quantity_is_required"),
       });
     }
     if (!(unitPrice > 0) && !(amount > 0)) {
       errors.push({
         transactionId: transaction.id,
         field: "unitPrice",
-        message: "Either income amount or FMV per unit is required",
+        message: i18n.t("activity:validation.either_income_amount_or_fmv_per_unit_is_required"),
       });
     }
   }
@@ -903,7 +952,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "amount",
-      message: "Final cash amount is required before approval",
+      message: i18n.t("activity:validation.final_cash"),
     });
   }
 
@@ -912,7 +961,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "fee",
-      message: "Fee cannot be negative",
+      message: i18n.t("activity:validation.fee_cannot_be_negative"),
     });
   }
 
@@ -920,7 +969,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "tax",
-      message: "Tax cannot be negative",
+      message: i18n.t("activity:validation.tax_cannot_be_negative"),
     });
   }
 
@@ -928,11 +977,29 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     errors.push({
       transactionId: transaction.id,
       field: "fxRate",
-      message: "FX rate cannot be negative",
+      message: i18n.t("activity:validation.fx_non_negative"),
     });
   }
 
   return errors;
+}
+
+/**
+ * A duplicated transfer pair is two new rows sharing a group: deleting either
+ * deletes both, as deleting one leg of a saved pair does.
+ */
+export function withNewPairPartners(
+  rows: LocalTransaction[],
+  localTransactions: LocalTransaction[],
+): LocalTransaction[] {
+  const ids = new Set(rows.map((row) => row.id));
+  const groups = new Set(
+    rows.filter((row) => row.isNew && row.sourceGroupId).map((row) => row.sourceGroupId),
+  );
+  const partners = localTransactions.filter(
+    (row) => row.isNew && row.sourceGroupId && groups.has(row.sourceGroupId) && !ids.has(row.id),
+  );
+  return [...rows, ...partners];
 }
 
 /**
@@ -951,6 +1018,35 @@ export function validateTransactionsForSave(
   for (const transaction of dirtyTransactions) {
     const transactionErrors = validateTransaction(transaction);
     errors.push(...transactionErrors);
+  }
+
+  // A duplicated transfer pair is saved as two new rows sharing a group. Edits
+  // or a partial delete must not store an orphan leg, or a same-account pair
+  // in one currency.
+  const newGroups = new Map<string, LocalTransaction[]>();
+  for (const transaction of dirtyTransactions) {
+    if (!transaction.isNew || !transaction.sourceGroupId) continue;
+    newGroups.set(transaction.sourceGroupId, [
+      ...(newGroups.get(transaction.sourceGroupId) ?? []),
+      transaction,
+    ]);
+  }
+  for (const legs of newGroups.values()) {
+    const [first, second] = legs;
+    const isPair =
+      legs.length === 2 &&
+      [first.activityType, second.activityType].sort().join() ===
+        [ActivityType.TRANSFER_IN, ActivityType.TRANSFER_OUT].join() &&
+      (first.accountId !== second.accountId || isSameAccountCashFxConversion(first, second));
+    if (!isPair) {
+      for (const leg of legs) {
+        errors.push({
+          transactionId: leg.id,
+          field: "activityType",
+          message: i18n.t("activity:validation.transfer_pair"),
+        });
+      }
+    }
   }
 
   return {

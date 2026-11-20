@@ -56,7 +56,7 @@ impl Default for NewTaxonomy {
 }
 
 /// A category within a taxonomy (hierarchical via parent_id)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Category {
     pub id: String,
@@ -197,4 +197,55 @@ pub struct CategoryAssignmentJson {
     pub key: String,
     pub path: Vec<String>,
     pub weight: f64,
+}
+
+/// References that must be reviewed before deleting a category. Untouched seeded
+/// group links are automatic defaults; all other references preserve user data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryReferences {
+    pub children: usize,
+    pub asset_assignments: usize,
+    pub spending_assignments: usize,
+    pub splits: usize,
+    pub rules: usize,
+    pub budget_targets: usize,
+    pub budget_rollovers: usize,
+    pub budget_group_assignments: usize,
+    pub allocation_targets: usize,
+    pub automatic_budget_links: usize,
+    #[serde(default)]
+    pub merged_categories: usize,
+}
+impl CategoryReferences {
+    /// Generic category identity/reference invariants, shared by spending merges.
+    pub fn validate_merge(
+        &self,
+        source: &Category,
+        destination: &Category,
+    ) -> Result<(), &'static str> {
+        if source.id == destination.id || source.taxonomy_id != destination.taxonomy_id {
+            return Err("invalid_destination");
+        }
+        if self.children > 0 {
+            return Err("children");
+        }
+        if self.asset_assignments > 0 || self.allocation_targets > 0 {
+            return Err("asset_references");
+        }
+        Ok(())
+    }
+
+    pub fn blocking_count(&self) -> usize {
+        self.children
+            + self.asset_assignments
+            + self.spending_assignments
+            + self.splits
+            + self.rules
+            + self.budget_targets
+            + self.budget_rollovers
+            + self.budget_group_assignments
+            + self.allocation_targets
+            + self.merged_categories
+    }
 }

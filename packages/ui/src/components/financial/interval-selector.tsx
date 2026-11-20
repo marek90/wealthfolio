@@ -90,8 +90,8 @@ interface IntervalSelectorProps {
   className?: string;
   isLoading?: boolean;
   defaultValue?: TimePeriod;
-  /** Controlled selection; the parent owns persistence when provided. */
-  value?: TimePeriod;
+  /** Controlled selection; the parent owns persistence when provided. Null highlights no period. */
+  value?: TimePeriod | null;
   /** LocalStorage key to persist selection. When provided, selection is persisted. */
   storageKey?: string;
   /** Optional callback for haptic feedback */
@@ -115,7 +115,7 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   );
   const [localValue, setLocalValue] = useState<TimePeriod>(defaultValue);
 
-  const currentValue = value ?? (storageKey ? persistedValue : localValue);
+  const currentValue = value !== undefined ? value : storageKey ? persistedValue : localValue;
 
   const handleValueChange = useCallback(
     (nextValue: TimePeriod) => {
@@ -151,7 +151,9 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    let startX = 0, startY = 0, startScrollLeft = 0;
+    let startX = 0,
+      startY = 0,
+      startScrollLeft = 0;
     const onTouchStart = (e: TouchEvent) => {
       // Stop the touch from reaching the parent Embla carousel's viewport listener,
       // so dragging the pills never triggers a tab swipe (data-no-swipe-drag is
@@ -177,7 +179,9 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   }, []);
 
   return (
-    <div className={cn("pointer-events-none relative w-full min-w-0", className)}>
+    // data-no-swipe-drag: on a swipe page, a sideways drag scrolls the intervals instead of
+    // switching the page's view.
+    <div className={cn("pointer-events-none relative w-full min-w-0", className)} data-no-swipe-drag>
       <div
         ref={scrollRef}
         // Prevents Embla Carousel (SwipableView) from intercepting horizontal drags
@@ -195,8 +199,7 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
           // they make programmatic scrollLeft animate, so per-touchmove assignments never track the finger.
           "touch-pan-y overscroll-x-contain",
           "px-2 md:px-0",
-          "[&::-webkit-scrollbar]:hidden",
-          "[scrollbar-width:none]",
+          "scrollbar-hide",
           "[-webkit-overflow-scrolling:touch]",
         )}
       >
@@ -209,7 +212,7 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
           // flex-none: keep the group at content width so the OUTER scroll div (above) is the
           // element that overflows and scrolls. Without it the group (it has its own overflow-x-auto)
           // shrinks to fit and scrolls internally, so scrollRef.scrollLeft would be a no-op.
-          className="pointer-events-auto bg-transparent flex-none"
+          className="pointer-events-auto flex-none bg-transparent"
         />
       </div>
     </div>

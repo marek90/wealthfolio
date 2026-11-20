@@ -25,6 +25,7 @@ import {
 import { resetAddonSandboxRuntimeAssetsForTest } from "./addon-sandbox-assets";
 import { setAddonLocalizationSnapshot } from "./addon-sandbox-localization";
 import { loadAddonAsset } from "@/adapters";
+import { backendError, BackendError } from "@/lib/backend-error";
 
 const input = {
   addonId: "test-addon",
@@ -80,6 +81,69 @@ function successfulRuntimeFetch() {
 }
 
 describe("AddonIframeManager", () => {
+  it.each(["SECRET_TOO_LARGE", "SECRET_STORE_UNAVAILABLE"])(
+    "preserves the reviewed %s code through secret RPC without private text",
+    async (code) => {
+      const manager = new AddonIframeManager();
+      const postMessage = vi.fn();
+      const error = backendError({ errorCode: code, message: "FAKE-SECRET credential-name" });
+      const runtime = {
+        addonId: input.addonId,
+        api: { secrets: { set: vi.fn().mockRejectedValue(error) } },
+        iframe: { contentWindow: { postMessage } },
+        nonce: "nonce-1",
+      };
+      const internals = manager as unknown as {
+        dispatchMessage: (runtime: unknown, message: unknown) => Promise<void>;
+      };
+      await internals.dispatchMessage(runtime, {
+        type: "api",
+        method: "secrets.set",
+        args: ["test", "dummy"],
+        requestId: "secret-write",
+      });
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "rpcResponse",
+          ok: false,
+          errorCode: code,
+          error: expect.any(String) as unknown,
+        }),
+        "*",
+      );
+      expect(JSON.stringify(postMessage.mock.calls)).not.toContain("FAKE-SECRET");
+      expect(JSON.stringify(postMessage.mock.calls)).not.toContain("credential-name");
+    },
+  );
+
+  it("does not forward arbitrary errorCode properties", () => {
+    const manager = new AddonIframeManager();
+    const postMessage = vi.fn();
+    const runtime = {
+      addonId: input.addonId,
+      iframe: { contentWindow: { postMessage } },
+      nonce: "nonce-1",
+    };
+    const internals = manager as unknown as {
+      respond: (
+        runtime: unknown,
+        requestId: string,
+        ok: boolean,
+        result: unknown,
+        error: unknown,
+      ) => void;
+    };
+    internals.respond(
+      runtime,
+      "failed",
+      false,
+      undefined,
+      Object.assign(new Error("Local failure"), { errorCode: "PRIVATE-CODE" }),
+    );
+    expect(postMessage.mock.calls[0][0].errorCode).toBeUndefined();
+    internals.respond(runtime, "normalized", false, undefined, new BackendError("PRIVATE-CODE"));
+    expect(postMessage.mock.calls[1][0].errorCode).toBe("internal_error");
+  });
   beforeEach(() => {
     resetAddonSandboxRuntimeAssetsForTest();
   });
@@ -93,6 +157,65 @@ describe("AddonIframeManager", () => {
     document.getElementById("addon-sandbox-parking")?.remove();
     vi.unstubAllGlobals();
   });
+
+  it("generates a secure nonce without randomUUID", async () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(0x12));
+    vi.stubGlobal("crypto", { getRandomValues });
+    const manager = new AddonIframeManager();
+    const starting = manager.startAddon(input);
+    const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    expect(getNonce(getSandboxFrame())).toBe("12121212-1212-4212-9212-121212121212");
+    expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint8Array));
+    await manager.stopAllAddons();
+    await cancelled;
+  });
+
+  it.each([undefined, {}])(
+    "creates distinct event subscription IDs without crypto (%j)",
+    async (crypto) => {
+      vi.stubGlobal("crypto", crypto);
+      const manager = new AddonIframeManager();
+      const postMessage = vi.fn();
+      const runtime = {
+        addonId: input.addonId,
+        nonce: "nonce-1",
+        iframe: { contentWindow: { postMessage } },
+        api: { events: { portfolio: { onUpdateStart: vi.fn().mockResolvedValue(vi.fn()) } } },
+        subscriptions: new Map(),
+      };
+      const internals = manager as unknown as {
+        dispatchMessage: (runtime: unknown, message: unknown) => Promise<void>;
+      };
+      for (const requestId of ["first", "second"]) {
+        await internals.dispatchMessage(runtime, {
+          type: "eventSubscribe",
+          method: "events.portfolio.onUpdateStart",
+          requestId,
+        });
+      }
+      expect(runtime.subscriptions.size).toBe(2);
+      expect(postMessage).toHaveBeenCalledTimes(2);
+      expect(postMessage.mock.calls[0][0].result.subscriptionId).not.toBe(
+        postMessage.mock.calls[1][0].result.subscriptionId,
+      );
+    },
+  );
+
+  it.each([undefined, {}])(
+    "does not bootstrap an addon without secure randomness (%j)",
+    async (crypto) => {
+      vi.stubGlobal("crypto", crypto);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const manager = new AddonIframeManager();
+      await expect(manager.startAddon(input)).rejects.toThrow("Secure randomness");
+      expect(document.querySelector("iframe")).toBeNull();
+      expect(manager.hasRuntime(input.addonId)).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await manager.stopAllAddons();
+    },
+  );
 
   it("awaits resource cleanup after failed boot before starting a replacement", async () => {
     const manager = new AddonIframeManager();
@@ -142,7 +265,12 @@ describe("AddonIframeManager", () => {
   });
 
   it("passes host localization into the sandbox and broadcasts updates", async () => {
-    setAddonLocalizationSnapshot({ locale: "ja-JP", uiLocale: "en", timezone: "Asia/Tokyo" });
+    setAddonLocalizationSnapshot({
+      locale: "ja-JP",
+      uiLocale: "en",
+      direction: "rtl",
+      timezone: "Asia/Tokyo",
+    });
     const manager = new AddonIframeManager();
     const starting = manager.startAddon(input);
     const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
@@ -152,6 +280,7 @@ describe("AddonIframeManager", () => {
     const bootstrap = new URLSearchParams(iframe.name);
     expect(bootstrap.get("locale")).toBe("ja-JP");
     expect(bootstrap.get("uiLocale")).toBe("en");
+    expect(bootstrap.get("direction")).toBe("rtl");
     expect(bootstrap.get("timezone")).toBe("Asia/Tokyo");
 
     const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(() => {});
@@ -165,6 +294,73 @@ describe("AddonIframeManager", () => {
       "*",
     );
 
+    const withCurrencyFormats = {
+      locale: "ko-KR",
+      uiLocale: "fr",
+      timezone: "Asia/Seoul",
+      currencyFormattingRegions: { INR: "IN", USD: "DE" },
+    };
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot(withCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: withCurrencyFormats, type: "localizationUpdate" }),
+      "*",
+    );
+
+    // Settings refetches may rebuild the same map in a different insertion order.
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot({
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "DE", INR: "IN" },
+    });
+    expect(postMessage).not.toHaveBeenCalled();
+
+    const changedCurrencyFormats = {
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "US", INR: "IN" },
+    };
+    setAddonLocalizationSnapshot(changedCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: changedCurrencyFormats, type: "localizationUpdate" }),
+      "*",
+    );
+
+    // A direction switch alone reaches the sandbox, so addons mirror with the host.
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot({ ...changedCurrencyFormats, direction: "ltr" });
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localization: { ...changedCurrencyFormats, direction: "ltr" },
+        type: "localizationUpdate",
+      }),
+      "*",
+    );
+
+    await manager.stopAllAddons();
+    await cancelled;
+  });
+
+  it("broadcasts a theme update when the gain and loss colours change", async () => {
+    const manager = new AddonIframeManager();
+    const starting = manager.startAddon(input);
+    const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+
+    const iframe = getSandboxFrame();
+    const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(() => {});
+    document.documentElement.setAttribute("data-gain-colors", "red-up");
+
+    await vi.waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          theme: expect.objectContaining({ gainColors: "red-up" }),
+          type: "themeUpdate",
+        }),
+        "*",
+      ),
+    );
+
+    document.documentElement.removeAttribute("data-gain-colors");
     await manager.stopAllAddons();
     await cancelled;
   });
@@ -655,6 +851,35 @@ describe("AddonIframeManager", () => {
           ok: true,
           result,
         }),
+        "*",
+      );
+    },
+  );
+
+  it.each(["assignCategory", "unassignCategory", "setEvent", "upsertBudgetTarget"])(
+    "dispatches explicitly permitted spending.%s calls through the sandbox allowlist",
+    async (method) => {
+      const manager = new AddonIframeManager();
+      const postMessage = vi.fn();
+      const invoke = vi.fn().mockResolvedValue({ saved: true });
+      const runtime = {
+        addonId: input.addonId,
+        api: { spending: { [method]: invoke } },
+        iframe: { contentWindow: { postMessage } },
+        nonce: "nonce-1",
+      };
+      const internals = manager as unknown as {
+        dispatchMessage: (runtime: unknown, message: unknown) => Promise<void>;
+      };
+      await internals.dispatchMessage(runtime, {
+        type: "api",
+        method: `spending.${method}`,
+        args: ["activity", null],
+        requestId: "write",
+      });
+      expect(invoke).toHaveBeenCalledExactlyOnceWith("activity", null);
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: true, result: { saved: true } }),
         "*",
       );
     },

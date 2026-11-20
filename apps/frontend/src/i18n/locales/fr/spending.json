@@ -1,4 +1,21 @@
 {
+  "budgetGroupNames": {
+    "032ecb02-5912-42e8-9724-2cd566fc08d5": "Besoins",
+    "a409e0d6-9152-49c8-a5b4-a147a8ac636e": "Envies",
+    "1fb6f2a3-3245-4702-83e8-ab116458d13e": "Épargne",
+    "8cbd26c8-e3b2-4176-8c61-e5c11e10b808": "Dons",
+    "3ff71753-5dd5-4372-9ca2-63d8d9a04851": "Personnel",
+    "6e25d097-0c73-4521-9407-d47e8dfb73e2": "Autre"
+  },
+  "eventTypeNames": {
+    "255600dc-c2a3-47e0-979d-a602c21fc337": "Voyage",
+    "51e3eedb-5484-45ba-a525-6b88209c46ed": "Vacances",
+    "d9871ccb-5396-4c70-ac08-5b07ed90e64a": "Affaires",
+    "22442173-c794-45bf-97ee-9b3f9a7c8ba3": "Éducation",
+    "94fc13ed-ac40-466b-8071-64f1e3c72204": "Santé",
+    "1aaab8fb-8fd9-4543-bd46-d9ee4a5a8564": "Occasion spéciale",
+    "fa4812ee-e06e-4117-a819-e4d88b7acbaf": "Autre"
+  },
   "common": {
     "amount": "Montant",
     "min": "Min",
@@ -21,6 +38,9 @@
     "nameRequired": "Le nom est requis",
     "namePlaceholder": "Nom de la catégorie",
     "icon": "Icône",
+    "parent": "Catégorie parente",
+    "topLevel": "Aucune (niveau supérieur)",
+    "parentLockedByBudget": "Supprimez d'abord les objectifs budgétaires de cette catégorie. Les budgets ne s'appliquent qu'aux catégories de niveau supérieur.",
     "color": "Couleur",
     "hex": "Hex",
     "create": "Créer la catégorie",
@@ -62,6 +82,11 @@
     "editTitle": "Modifier la règle",
     "addTitle": "Ajouter une règle",
     "editDescription": "Étiquetez automatiquement les activités par motif de nom. Les règles de priorité supérieure l'emportent en cas de correspondances multiples.",
+    "categoryCompatibilityHint": "Les catégories suivent le flux de trésorerie de la transaction. Les catégories d’épargne s’appliquent uniquement aux transferts liés sortant de vos comptes suivis pour les dépenses.",
+    "runIncompatible": "Catégories incompatibles : {{count}}. Les catégories suivent le flux de trésorerie de la transaction. Les catégories d’épargne s’appliquent uniquement aux transferts liés sortant de vos comptes suivis pour les dépenses.",
+    "runProtected": "Catégories ou ventilations existantes conservées : {{count}}.",
+    "runUnchanged": "Déjà catégorisées comme demandé : {{count}}.",
+    "runWithoutTarget": "Correspondances sans catégorie cible : {{count}}.",
     "matchContains": "contient",
     "matchStartsWith": "commence par",
     "matchExact": "exact",
@@ -106,6 +131,7 @@
     "selectCategory": "Sélectionner une catégorie",
     "priorityLabel": "Priorité",
     "priorityHint": "Les règles de priorité supérieure sont vérifiées en premier (0-100).",
+    "priorityInvalid": "La priorité doit être un nombre entier supérieur ou égal à 0",
     "updateRule": "Mettre à jour la règle",
     "createRule": "Créer la règle",
     "scopeLabel": "S'applique à",
@@ -167,12 +193,14 @@
     "linkTransfer": "Associer un virement...",
     "deleteConfirmMany_one": "Voulez-vous vraiment supprimer {{count}} transaction ?",
     "deleteConfirmMany_other": "Voulez-vous vraiment supprimer {{count}} transactions ?",
-    "deleteConfirmMany_many": "Voulez-vous vraiment supprimer {{count}} transactions ?"
+    "deleteConfirmMany_many": "Voulez-vous vraiment supprimer {{count}} transactions ?",
+    "convertToTransfer": "Convertir en virement..."
   },
   "cashFlow": {
     "income": "Revenus",
     "spending": "Dépenses",
     "saving": "Épargne",
+    "netSaved": "Épargne nette",
     "net": "Net"
   },
   "insights": {
@@ -231,6 +259,12 @@
     "filteredNet": "Net filtré"
   },
   "period": {
+    "month": "Mois",
+    "year": "Année",
+    "previousPeriod": "Période précédente",
+    "nextPeriod": "Période suivante",
+    "previousYears": "Années précédentes",
+    "nextYears": "Années suivantes",
     "thisMonth": "Ce mois-ci",
     "mtdShort": "Mois",
     "lastMonth": "Mois dernier",
@@ -435,6 +469,7 @@
     "customSubtitle": "Transactions sur la période sélectionnée"
   },
   "split": {
+    "staleTaxonomy": "Ces répartitions utilisent un ancien type de catégorie. Elles ne s’appliquent plus à cette transaction.",
     "title": "Ventiler la transaction",
     "transactionFallback": "Transaction",
     "remainingOf": "Restant sur {{amount}}",
@@ -443,7 +478,12 @@
     "removeLine": "Supprimer la ligne de ventilation {{number}}",
     "addLine": "Ajouter une ligne",
     "distributeEvenly": "Répartir équitablement",
-    "clearSplit": "Effacer la ventilation"
+    "clearSplit": "Effacer la ventilation",
+    "replaceWithCategory": "Remplacer les ventilations par une catégorie",
+    "replaceDescription_one": "Remplacer {{count}} ventilation par {{category}} ? Les ventilations existantes seront supprimées.",
+    "replaceDescription_other": "Remplacer {{count}} ventilations par {{category}} ? Les ventilations existantes seront supprimées.",
+    "replaceDescription_many": "Remplacer {{count}} ventilations par {{category}} ? Les ventilations existantes seront supprimées.",
+    "categoryProtected": "Les ventilations sont protégées. Modifiez-les ou remplacez-les explicitement dans leur éditeur."
   },
   "hierarchy": {
     "noCategorizedSpending": "Aucune dépense catégorisée sur cette période.",
@@ -756,8 +796,6 @@
     "overspentBy": "Dépassement de {{pct}}",
     "noIncome": "Aucun revenu dans les comptes sélectionnés pour cette période.",
     "spent": "Dépensé",
-    "saved": "Épargné",
-    "setAside": "Mis de côté",
     "sortSpent": "dépensé",
     "sortChange": "évolution",
     "sortName": "nom",
@@ -805,6 +843,8 @@
       "total": "Total",
       "shortfall": "Déficit",
       "refunds": "Remboursements nets",
+      "fromSavings": "Depuis l'épargne",
+      "toSavings": "Vers l'épargne",
       "surplus": "Reste",
       "uncategorizedIncome": "Revenus non catégorisés",
       "netSpending": "Dépenses nettes"
@@ -815,6 +855,7 @@
       "shortfall": "Dépenses et épargne au-delà de ce qui est entré.",
       "refunds": "Catégories où les remboursements ont dépassé les dépenses.",
       "saved": "Transféré vers des comptes d'épargne et d'investissement.",
+      "fromSavings": "Retiré des comptes d'épargne et d'investissement.",
       "surplus": "Entré, mais ni dépensé ni mis de côté.",
       "uncategorized": "Dépenses qui n'ont pas encore de catégorie.",
       "net": "Ce que cette catégorie a coûté après remboursements.",
@@ -860,6 +901,9 @@
     "manage": "Gérer →"
   },
   "cashForm": {
+    "none": "Aucun",
+    "addExpense": "Ajouter une dépense",
+    "addIncome": "Ajouter un revenu",
     "accountRequired": "Veuillez sélectionner un compte.",
     "pickDate": "Choisissez une date",
     "amountNonNegative": "Le montant doit être non négatif.",
@@ -877,6 +921,8 @@
     "spendingCategory": "Catégorie de dépense",
     "activityUpdated": "Activité mise à jour.",
     "activityCreated": "Activité créée.",
+    "expenseAdded": "Dépense ajoutée.",
+    "incomeAdded": "Revenu ajouté.",
     "saveFailed": "Échec de l'enregistrement de l'activité : {{message}}",
     "editTitle": "Modifier la transaction",
     "addTitle": "Ajouter une transaction",
@@ -943,6 +989,11 @@
     "deselectDay": "Désélectionner toutes les transactions du {{date}}"
   },
   "tabContent": {
+    "comparePriorPeriod": "Comparer à la période précédente",
+    "comparisonDays": "Jour de la période",
+    "comparisonWeeks": "Semaine de la période",
+    "comparisonMonths": "Mois de la période",
+    "comparisonDifference": "Écart",
     "stageWhereLabel": "Où j'en suis",
     "stageWhereSub": "Rythme, budget et répartition par catégorie",
     "stageChangedLabel": "Ce qui a changé",
@@ -950,7 +1001,7 @@
     "stageWhenLabel": "Quand et où",
     "stageWhenSub": "Quand vous dépensez et événements de dépenses",
     "spendingAbovePrefix": "Les dépenses sont",
-    "pctAbove": "{{pct}} % au-dessus",
+    "pctAbove": "{{pct}} au-dessus",
     "thePriorPeriod": "de la période précédente.",
     "moreThan": "{{more}} de plus que {{prior}}",
     "uncategorizedCount_one": "{{count}} transaction non catégorisée",
@@ -989,12 +1040,11 @@
     "uncategorizedReview": "Non catégorisé — à vérifier",
     "uncategorizedImprove": "Non catégorisé — à vérifier pour améliorer la répartition",
     "plusMore": "+ {{count}} de plus",
-    "down": "En baisse",
-    "up": "En hausse",
     "aboutSame": "À peu près comme la période précédente",
     "fromPriorPeriod": "par rapport à la période précédente",
     "intervalMtd": "ce mois-ci",
     "intervalLastMonth": "le mois dernier",
+    "interval1W": "7 derniers jours",
     "interval3M": "3 derniers mois",
     "interval6M": "6 derniers mois",
     "intervalYtd": "depuis le début de l'année",
@@ -1021,9 +1071,15 @@
     "categoryCount_other": "{{count}} catégories",
     "categoryCount_many": "{{count}} catégories",
     "groupRollover": "Report du groupe",
+    "removeGroupRollover": "Supprimer le paramètre de report",
+    "removeGroupRolloverTitle": "Supprimer le paramètre de report de {{name}} ?",
+    "removeGroupRolloverDescription": "Cette action supprime le solde initial enregistré et recalcule les soldes de report pour tous les mois. Les catégories et les objectifs budgétaires sont conservés.",
     "on": "Activé",
     "off": "Désactivé",
     "deleteGroup": "Supprimer le groupe",
+    "deleteGroupDescription": "Ses catégories et réserves mensuelles seront déplacées vers le groupe sélectionné. Cette action est irréversible.",
+    "deleteGroupRollover": "Supprimez le paramètre de report de ce groupe avant de le supprimer.",
+    "deleteGroupDestinationRollover": "Désactivez le report du groupe de destination avant d’y déplacer des budgets.",
     "deleteGroupTitle": "Supprimer {{name}} ?",
     "deleteGroupWithCategories_one": "Sa {{count}} catégorie sera déplacée vers un autre groupe. Cette action est irréversible.",
     "deleteGroupWithCategories_other": "Ses {{count}} catégories seront déplacées vers un autre groupe. Cette action est irréversible.",
@@ -1048,6 +1104,7 @@
     "revertOverride": "Annuler l'ajustement",
     "monthOverrideRevert": "Ajustement mensuel · cliquez pour annuler",
     "spentOf": "dépensé sur",
+    "savedOf": "épargné sur",
     "ofGroup": "({{pct}} du groupe)",
     "rowOptions": "Options de la ligne",
     "moveToGroup": "Déplacer vers le groupe",
@@ -1078,9 +1135,16 @@
     "totals": "Totaux",
     "planned": "Prévu",
     "actual": "Réel",
+    "saved": "Épargné",
+    "savingsGoal": "Objectif d'épargne",
     "remaining": "Restant",
     "unassigned": "Non attribué",
     "rolloverIn": "Report entrant",
+    "carriedIn": "reporté",
+    "left": "restant",
+    "over": "dépassé",
+    "toGo": "restant à épargner",
+    "ahead": "d’avance",
     "dataUnavailable": "Les données de budget ne sont pas disponibles",
     "migrationNeeded": "La base de données locale actuelle a été créée avant la migration des dépenses mise à jour.",
     "addSource_one": "Ajouter une source ({{count}} disponible)",
@@ -1088,6 +1152,27 @@
     "addSource_many": "Ajouter une source ({{count}} disponibles)",
     "overridesTitle_one": "Ajustement · {{count}}",
     "overridesTitle_other": "Ajustements · {{count}}",
-    "overridesTitle_many": "Ajustements · {{count}}"
+    "overridesTitle_many": "Ajustements · {{count}}",
+    "sourceMonth": "Mois source"
+  },
+  "splitEditReview": {
+    "title": "Vérifier la suppression des répartitions",
+    "hiddenCategory": "Les catégories existantes sont conservées et peuvent s’appliquer après la suppression des répartitions.",
+    "confirm": "Enregistrer et supprimer les répartitions",
+    "removed_one": "Cette modification supprimera {{count}} répartition.",
+    "removed_many": "Cette modification supprimera {{count}} répartitions.",
+    "removed_other": "Cette modification supprimera {{count}} répartitions."
+  },
+  "budgetErrors": {
+    "deleteGroup": "Impossible de supprimer le groupe budgétaire.",
+    "copyPlan": "Impossible de copier le plan."
+  },
+  "grid": {
+    "transferInForm": "Modifiez le type d’un transfert dans le formulaire de transfert, via Modifier.",
+    "noCategory": "Cette activité n’est ni une dépense, ni un revenu, ni une épargne, elle n’a donc pas de catégorie.",
+    "saveTypeFirst": "Enregistrez d’abord le nouveau type ou compte, puis choisissez une catégorie.",
+    "saveCategoryFirst": "Enregistrez d’abord la catégorie, puis changez le type ou le compte.",
+    "typeNotForAccount": "Ce type n’est pas disponible pour ce compte.",
+    "amountRequired": "Le montant est requis."
   }
 }

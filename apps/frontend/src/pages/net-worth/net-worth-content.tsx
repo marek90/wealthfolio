@@ -1,3 +1,4 @@
+import { isValuationComplete } from "@/lib/valuation";
 import { useNetWorth, useNetWorthHistory } from "@/hooks/use-alternative-assets";
 import { usePortfolioAllocations } from "@/hooks/use-portfolio-allocations";
 import { useIsMobileViewport } from "@/hooks/use-platform";
@@ -7,23 +8,21 @@ import { formatDateISO, parseLocalDate } from "@/lib/utils";
 import Balance from "@/pages/dashboard/balance";
 import { AllocationDetailSheet } from "@/pages/holdings/components/allocation-detail-sheet";
 import { DashboardCard } from "@/components/dashboard-card";
+import { HealthStatusIndicator } from "@/components/health-status-icon";
+import { PrivacyToggle } from "@/components/privacy-toggle";
 import {
   GainAmount,
   GainPercent,
   IntervalSelector,
-  getInitialIntervalData,
   useNumberFormatting,
   type TimePeriod,
 } from "@wealthfolio/ui";
-import { usePersistentState } from "@/hooks/use-persistent-state";
+import { SpendingDatePicker } from "@/features/spending/components/spending-date-picker";
+import { PeriodNavigation } from "@/features/spending/components/period-navigation";
+import { useDashboardPeriod } from "@/pages/dashboard/use-dashboard-period";
+import { yearRange } from "@/features/spending/lib/year-period";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@wealthfolio/ui/components/ui/tooltip";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
@@ -32,7 +31,6 @@ import { CategoryDetailSheet } from "./components/category-detail-sheet";
 import { NetWorthAttention } from "./components/net-worth-attention";
 import { MomentumCard } from "./components/momentum-card";
 import {
-  THEME_COLOR,
   THEME_COLOR_LIGHT,
   computeMomentum,
   computeVelocity,
@@ -41,6 +39,7 @@ import {
   investmentAllocation,
   isPlainPercent,
   parseHistory,
+  themeColorTint,
   toneClass,
   type ParsedNetWorth,
   type SelectedCategory,
@@ -50,6 +49,7 @@ import { NetWorthChart } from "./net-worth-chart";
 import { formatZonedDateKey } from "@/features/spending/lib/timezone";
 
 const DEFAULT_INTERVAL: TimePeriod = "ALL";
+// Read only until any dashboard tab picks a shared period.
 const INTERVAL_STORAGE_KEY = "networth-interval";
 const MS_PER_DAY = 86_400_000;
 
@@ -68,16 +68,13 @@ export function NetWorthContent() {
   });
   const isMobile = useIsMobileViewport();
 
-  const [periodCode, setPeriodCode] = usePersistentState<TimePeriod>(
-    INTERVAL_STORAGE_KEY,
-    DEFAULT_INTERVAL,
-  );
+  const period = useDashboardPeriod(currentDateISO, {
+    key: INTERVAL_STORAGE_KEY,
+    initial: DEFAULT_INTERVAL,
+  });
+  const { code: periodCode, range: dateRange } = period;
   // A local Date carries the configured calendar day for the date-only interval helper.
   const currentDate = useMemo(() => parseLocalDate(currentDateISO), [currentDateISO]);
-  const dateRange = useMemo(
-    () => getInitialIntervalData(periodCode, currentDate).range,
-    [periodCode, currentDate],
-  );
 
   // ISO date strings for the selected-range history query.
   const historyDates = useMemo(() => {
@@ -94,11 +91,14 @@ export function NetWorthContent() {
     if (!dateRange?.from || periodCode === "ALL") return null;
     const end = dateRange.to ?? currentDate;
     const rangeMs = end.getTime() - dateRange.from.getTime();
-    const priorStart = new Date(dateRange.from.getTime() - rangeMs);
+    const priorStart =
+      period.customYear !== null
+        ? yearRange(period.customYear - 1).from
+        : new Date(dateRange.from.getTime() - rangeMs);
     const yearStart = new Date(end.getTime() - 366 * MS_PER_DAY);
     const start = priorStart < yearStart ? priorStart : yearStart;
     return { startDate: formatDateISO(start), endDate: formatDateISO(end) };
-  }, [currentDate, dateRange, periodCode]);
+  }, [currentDate, dateRange, periodCode, period.customYear]);
 
   const { data: historyData, isLoading: isHistoryLoading } = useNetWorthHistory({
     startDate: historyDates?.startDate ?? "",
@@ -112,36 +112,33 @@ export function NetWorthContent() {
     enabled: !!longHistoryDates,
   });
 
-  const handleIntervalSelect = (code: TimePeriod) => {
-    setPeriodCode(code);
-  };
-
   const parsedData = useMemo((): ParsedNetWorth | null => {
     if (!netWorthData) return null;
     return {
-      netWorth: parseFloat(netWorthData.netWorth) || 0,
+      netWorth: netWorthData.netWorth,
       assets: {
-        total: parseFloat(netWorthData.assets.total) || 0,
+        total: netWorthData.assets.total,
         breakdown: (netWorthData.assets.breakdown || []).map((item) => ({
           category: item.category,
           name: getNetWorthCategoryLabel(t, item.category, item.name),
-          value: parseFloat(item.value) || 0,
+          value: item.value,
           assetId: item.assetId,
           children: (item.children ?? []).map((child) => ({
             category: child.category,
             name: child.name,
-            value: parseFloat(child.value) || 0,
+            value: child.value,
             assetId: child.assetId,
           })),
         })),
       },
       liabilities: {
-        total: parseFloat(netWorthData.liabilities.total) || 0,
+        total: netWorthData.liabilities.total,
         breakdown: (netWorthData.liabilities.breakdown || []).map((item) => ({
           category: item.category,
           name: item.name,
-          value: parseFloat(item.value) || 0,
+          value: item.value,
           assetId: item.assetId,
+          firstValueDate: item.firstValueDate,
         })),
       },
     };
@@ -149,6 +146,16 @@ export function NetWorthContent() {
 
   const parsedHistory = useMemo(() => parseHistory(historyData), [historyData]);
   const longHistory = useMemo(() => parseHistory(longHistoryData), [longHistoryData]);
+  const hasIncompleteValuation =
+    !isValuationComplete(netWorthData?.valueStatus) ||
+    (historyData?.some((point) => !isValuationComplete(point.valueStatus)) ?? false);
+  const missingFx = useMemo(
+    () => [
+      ...(netWorthData?.missingFx ?? []),
+      ...(historyData?.flatMap((point) => point.missingFx ?? []) ?? []),
+    ],
+    [netWorthData?.missingFx, historyData],
+  );
 
   const velocity = useMemo(() => computeVelocity(parsedHistory), [parsedHistory]);
   const trailingYearMonthly = useMemo(() => {
@@ -164,8 +171,13 @@ export function NetWorthContent() {
   }, [longHistory, periodCode, currentDate, velocity]);
   const momentum = useMemo(() => {
     if (!historyDates || periodCode === "ALL") return null;
-    return computeMomentum(longHistory, historyDates.startDate, historyDates.endDate);
-  }, [longHistory, historyDates, periodCode]);
+    return computeMomentum(
+      longHistory,
+      historyDates.startDate,
+      historyDates.endDate,
+      period.customYear,
+    );
+  }, [longHistory, historyDates, periodCode, period.customYear]);
 
   // Net worth change over the selected range, on the same baseline rules as the
   // breakdown rows so the header and the table agree.
@@ -186,9 +198,8 @@ export function NetWorthContent() {
     parsedHistory[parsedHistory.length - 1].netWorth >= 0;
 
   const currency = netWorthData?.currency || settings?.baseCurrency || "USD";
-  const hasStaleValuations = netWorthData && netWorthData.staleAssets.length > 0;
-  const periodLabel = periodCode;
-  const localizedPeriodLabel = t(`ui:interval.${periodCode}`);
+  const periodLabel = periodCode ?? period.label;
+  const localizedPeriodLabel = period.label;
 
   // Breakdown row → detail drawer. Investments open the existing asset-class
   // allocation sheet; every other row opens the category detail sheet.
@@ -205,13 +216,17 @@ export function NetWorthContent() {
     return (
       <div className="flex min-h-[50vh] items-center justify-center p-8">
         <div className="text-center">
-          <div className="bg-destructive/10 mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full">
-            <Icons.AlertTriangle className="text-destructive h-6 w-6" />
+          <div className="text-destructive-subtle-foreground mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-current/15">
+            <Icons.AlertTriangle className="h-6 w-6" />
           </div>
           <p className="text-destructive text-lg font-medium">
             {t("insights:networth.failed_to_load")}
           </p>
           <p className="text-muted-foreground mt-2 text-sm">{error?.message}</p>
+          {/* Health Center usually explains why the figure failed to load. */}
+          <div className="mt-4 flex justify-center">
+            <HealthStatusIndicator />
+          </div>
         </div>
       </div>
     );
@@ -220,55 +235,52 @@ export function NetWorthContent() {
   return (
     <div className="flex min-h-full flex-col">
       {/* Top section: Net Worth value */}
-      <div className="px-4 pb-1 pt-2 md:px-6 md:pb-2 lg:px-8">
+      <div className="px-4 pt-2 pb-6 md:px-6 md:pb-2 lg:px-8">
         <div className="flex items-start gap-2">
-          <div>
-            <div className="flex items-center gap-3">
+          <div className="min-w-0">
+            <div
+              className="flex max-w-full flex-wrap items-center gap-x-1"
+              data-testid="dashboard-period-header"
+            >
+              <div
+                className="text-muted-foreground/80 text-2xs font-semibold tracking-[0.12em] uppercase"
+                data-testid="dashboard-period-caption"
+              >
+                {t("dashboard:tabs.net_worth")} · {localizedPeriodLabel}
+              </div>
+              <PeriodNavigation navigation={period.navigation} />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {period.isHistorical && (
+                <span className="text-muted-foreground w-full text-xs">
+                  {t("common:currentValue")}
+                </span>
+              )}
               <Balance
                 isLoading={isLoading}
+                isUnavailable={
+                  !!netWorthData?.valueStatus && netWorthData.valueStatus !== "complete"
+                }
                 targetValue={parsedData?.netWorth ?? 0}
                 currency={currency}
                 displayCurrency={true}
                 displayDecimal={false}
                 compact={isMobile}
               />
-              {hasStaleValuations && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div className="bg-warning/10 flex h-8 w-8 items-center justify-center rounded-full">
-                        <Icons.AlertCircle className="text-warning h-4 w-4" />
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-[280px]">
-                      <p className="mb-2 text-xs font-medium">
-                        {t("insights:networth.stale_valuations_tooltip")}
-                      </p>
-                      <ul className="space-y-1 text-xs">
-                        {netWorthData?.staleAssets.map((asset) => (
-                          <li
-                            key={asset.assetId}
-                            className="flex items-center justify-between gap-2"
-                          >
-                            <span className="truncate">{asset.name ?? asset.assetId}</span>
-                            <span className="text-muted-foreground shrink-0">
-                              {t("insights:networth.days_ago", { count: asset.daysStale })}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
+              <PrivacyToggle variant="ghost" />
+              <HealthStatusIndicator />
             </div>
-            <div className="text-md flex space-x-3">
+            <div className="text-md flex min-h-5 flex-wrap items-center gap-x-3">
               {isHistoryLoading ? (
                 <div className="flex items-center gap-3 pt-1">
                   <Skeleton className="h-4 w-24" />
-                  <div className="border-secondary my-1 border-r pr-2" />
+                  <div className="border-secondary my-1 border-e pe-2" />
                   <Skeleton className="h-4 w-16" />
                 </div>
+              ) : parsedHistory.length < 2 ? (
+                <span className="text-muted-foreground text-sm">
+                  {t("performance:not_available")}
+                </span>
               ) : (
                 <>
                   <GainAmount
@@ -279,7 +291,7 @@ export function NetWorthContent() {
                   />
                   {showChangeRatio && (
                     <>
-                      <div className="border-secondary my-1 border-r pr-2" />
+                      <div className="border-secondary my-1 border-e pe-2" />
                       {isPlainPercent(netWorthChange.percent) ? (
                         <GainPercent
                           className="lg:text-md text-sm font-light"
@@ -301,9 +313,11 @@ export function NetWorthContent() {
                   )}
                 </>
               )}
-              {periodCode && (
-                <span className="lg:text-md text-muted-foreground ml-1 text-sm font-light">
-                  {t(`ui:interval.${periodCode}`)}
+              {period.isHistorical && (
+                <span className="text-muted-foreground text-sm font-light">
+                  {t("insights:networth.breakdown_table.change_over", {
+                    period: localizedPeriodLabel,
+                  })}
                 </span>
               )}
             </div>
@@ -315,11 +329,11 @@ export function NetWorthContent() {
       <div
         className="flex grow flex-col"
         style={{
-          backgroundImage: `linear-gradient(to top, ${THEME_COLOR.replace(")", " / 0.30)")}, ${THEME_COLOR.replace(")", " / 0.15)")} 50%, transparent 100%)`,
+          backgroundImage: `linear-gradient(to top, ${themeColorTint(30)}, ${themeColorTint(15)} 50%, transparent 100%)`,
         }}
       >
         {/* Chart section */}
-        <div className="h-[280px]">
+        <div className="h-70">
           {isHistoryLoading ? (
             <div className="flex h-full items-center justify-center">
               <Skeleton className="h-full w-full" />
@@ -336,18 +350,33 @@ export function NetWorthContent() {
           )}
           {historyData && historyData.length > 0 && (
             <div className="flex w-full justify-center">
-              <IntervalSelector
-                className="pointer-events-auto relative z-20 w-full max-w-screen-sm sm:max-w-screen-md md:max-w-2xl lg:max-w-3xl"
-                onIntervalSelect={handleIntervalSelect}
-                isLoading={isHistoryLoading}
-                value={periodCode}
-              />
+              <div className="pointer-events-auto relative z-20 flex w-full max-w-screen-sm min-w-0 items-center justify-center gap-1.5 pe-4 sm:max-w-screen-md md:max-w-2xl md:pe-0 lg:max-w-3xl">
+                <IntervalSelector
+                  className="w-auto"
+                  onIntervalSelect={period.selectPreset}
+                  isLoading={isHistoryLoading}
+                  value={period.selectedPreset}
+                />
+                <SpendingDatePicker
+                  customMonth={period.customMonth}
+                  customRange={period.customRange}
+                  customYear={period.customYear}
+                  maxYear={period.maxYear}
+                  onCustomYearChange={period.selectYear}
+                  selectionLabel={
+                    period.customMonth || period.customYear !== null ? period.label : undefined
+                  }
+                  maxMonth={period.maxMonth}
+                  onCustomMonthChange={period.selectMonth}
+                  onCustomRangeChange={period.selectRange}
+                />
+              </div>
             </div>
           )}
         </div>
 
         {/* Content section */}
-        <div className="grow px-4 pb-[var(--mobile-nav-total-offset)] pt-14 md:px-6 md:pb-6 md:pt-12 lg:px-10 lg:pb-8 lg:pt-14">
+        <div className="grow px-4 pt-14 pb-[var(--mobile-nav-total-offset)] md:px-6 md:pt-12 md:pb-6 lg:px-10 lg:pt-14 lg:pb-8">
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-3 lg:gap-12">
             {/* Left column: Breakdown */}
             <div className="lg:col-span-2">
@@ -368,11 +397,12 @@ export function NetWorthContent() {
                   history={parsedHistory}
                   currency={currency}
                   periodLabel={periodLabel}
+                  isIncomplete={!isValuationComplete(netWorthData?.valueStatus)}
                   onSelect={setSelected}
                 />
               ) : (
                 <div
-                  className="rounded-xl border border-orange-200/50 p-6 text-center md:p-8 dark:border-orange-800/50"
+                  className="border-warning-subtle-border rounded-xl border p-6 text-center md:p-8"
                   style={{ backgroundColor: THEME_COLOR_LIGHT }}
                 >
                   <p className="text-sm">{t("insights:networth.no_assets_found")}</p>
@@ -381,7 +411,7 @@ export function NetWorthContent() {
                     className="text-muted-foreground hover:text-foreground mt-2 inline-flex items-center gap-1 text-xs underline-offset-4 hover:underline"
                   >
                     {t("insights:networth.add_first_asset")}
-                    <Icons.ChevronRight className="h-3 w-3" />
+                    <Icons.ChevronRight className="h-3 w-3 rtl:rotate-180" />
                   </Link>
                 </div>
               )}
@@ -402,7 +432,11 @@ export function NetWorthContent() {
                 <MomentumCard momentum={momentum} currency={currency} periodLabel={periodLabel} />
               )}
 
-              <NetWorthAttention staleAssets={netWorthData?.staleAssets ?? []} />
+              <NetWorthAttention
+                staleAssets={netWorthData?.staleAssets ?? []}
+                hasIncompleteValuation={hasIncompleteValuation}
+                missingFx={missingFx}
+              />
             </div>
           </div>
         </div>

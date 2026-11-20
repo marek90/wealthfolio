@@ -9,7 +9,6 @@ import { QueryKeys } from "@/lib/query-keys";
 import type { LoanAction, PaymentAllocation } from "@/adapters/shared/alternative-assets";
 import type { AlternativeAssetHolding, Quote } from "@/lib/types";
 import { formatDateISO } from "@/lib/utils";
-import { useQuoteMutations } from "../../hooks/use-quote-mutations";
 import { invalidateAlternativeAssetQueries } from "./use-alternative-asset-mutations";
 import { useLoanCalculation, useLoanToday } from "./use-loan-calculation";
 import {
@@ -28,6 +27,7 @@ import {
   LoanBalanceEventDialog,
 } from "../components/loan-action-dialogs";
 import { RenewLoanDialog, type LoanRenewalInput } from "../components/renew-loan-dialog";
+import { ChangeRateSheet, type LoanRateChangeInput } from "../components/change-rate-sheet";
 import { isStaleLoanError, loanErrorText } from "../components/loan-error-text";
 
 import { LoanEventSheet, type LoanSheetEntry } from "../components/loan-event-sheet";
@@ -41,6 +41,7 @@ export interface LoanActionCallbacks {
   confirmBalance: () => void;
   extraPayment: () => void;
   renew: () => void;
+  changeRate: () => void;
   recalculate: () => void;
   close: () => void;
   /** Record a dated payment change, as repeated payment differences suggest. */
@@ -67,9 +68,7 @@ export function useLoanActions(
   const loanOriginationDate =
     typeof metadata.origination_date === "string" ? metadata.origination_date : undefined;
   const queryClient = useQueryClient();
-  const { invalidateQuoteQueries } = useQuoteMutations(assetId);
-  const refresh = () =>
-    Promise.all([invalidateAlternativeAssetQueries(queryClient), invalidateQuoteQueries()]);
+  const refresh = () => invalidateAlternativeAssetQueries(queryClient);
   // The backend checks each action against the stored loan and applies it in one transaction.
   const run = async (action: LoanAction) => {
     try {
@@ -123,6 +122,7 @@ export function useLoanActions(
   const paymentAccountId = paymentAccount?.id;
   const paidFrom = paymentAccount?.name;
   const [closeLoanOpen, setCloseLoanOpen] = useState(false);
+  const [changeRateOpen, setChangeRateOpen] = useState(false);
   const [recalculateScheduleOpen, setRecalculateScheduleOpen] = useState(false);
   const [renewLoanOpen, setRenewLoanOpen] = useState(false);
   const [balanceCorrectionOpen, setBalanceCorrectionOpen] = useState(false);
@@ -136,6 +136,21 @@ export function useLoanActions(
     } catch (cause) {
       toast({ title: loanErrorText(t, cause, "asset:loanEvents.failed"), variant: "destructive" });
     }
+  };
+
+  const handleChangeRate = async ({
+    effectiveDate,
+    annualRate,
+    paymentAmount,
+  }: LoanRateChangeInput) => {
+    if (!holding) return;
+    await run({
+      type: "change_rate",
+      date: formatDateISO(effectiveDate),
+      annualRate,
+      paymentAmount,
+    });
+    setChangeRateOpen(false);
   };
 
   const handleRecalculateSchedule = async (newRate: number, effectiveDate: Date) => {
@@ -231,6 +246,7 @@ export function useLoanActions(
   const isMortgage = (metadata.sub_type ?? metadata.liability_type) === "mortgage";
   const availability = {
     mortgage: isMortgage,
+    changeRate: !!storedProjection,
     recalculate: !!storedProjection,
     renew: canRenewLoan(metadata),
   };
@@ -244,6 +260,7 @@ export function useLoanActions(
     confirmBalance: () => setBalanceCorrectionOpen(true),
     extraPayment: () => setExtraRepaymentOpen(true),
     renew: () => setRenewLoanOpen(true),
+    changeRate: () => setChangeRateOpen(true),
     recalculate: () => setRecalculateScheduleOpen(true),
     close: () => setCloseLoanOpen(true),
     changePayment: async (date, paymentAmount) => {
@@ -260,6 +277,7 @@ export function useLoanActions(
   return {
     actions,
     availability,
+    calculation,
     dialogs:
       isLiability && holding ? (
         <>
@@ -270,6 +288,7 @@ export function useLoanActions(
               metadata={metadata}
               eventIndex={editingEvent.index}
               originationDate={loanOriginationDate}
+              today={today}
               onClose={() => setEditingEvent(null)}
               onSave={handleEditEvent}
             />
@@ -294,6 +313,7 @@ export function useLoanActions(
                 note: loanBalanceUserNote(editingBalance.notes),
               }}
               originationDate={loanOriginationDate}
+              today={today}
               onClose={() => setEditingBalance(null)}
               onSave={handleEditBalance}
             />
@@ -301,8 +321,16 @@ export function useLoanActions(
           <CloseLoanDialog
             open={closeLoanOpen}
             onOpenChange={setCloseLoanOpen}
+            today={today}
             onSubmit={handleCloseLoan}
             originationDate={loanOriginationDate ? parseISO(loanOriginationDate) : null}
+          />
+          <ChangeRateSheet
+            open={changeRateOpen}
+            onOpenChange={setChangeRateOpen}
+            metadata={metadata}
+            today={today}
+            onSubmit={handleChangeRate}
           />
           <RecalculateScheduleDialog
             open={recalculateScheduleOpen}
@@ -313,6 +341,7 @@ export function useLoanActions(
             assetId={assetId}
             metadata={metadata}
             quoteHistory={quoteHistory}
+            today={today}
             onSubmit={handleRecalculateSchedule}
           />
           <RenewLoanDialog
@@ -329,6 +358,7 @@ export function useLoanActions(
                 : null
             }
             mortgage={isMortgage}
+            today={today}
             onSubmit={handleRenewLoan}
           />
           <LoanBalanceEventDialog
@@ -338,6 +368,7 @@ export function useLoanActions(
             currentBalance={currentBalance}
             currency={holding.currency}
             confirmations={confirmedLoanBalances(quoteHistory, today)}
+            today={today}
             onSubmit={(date, amount) => handleBalanceEvent("balance_correction", date, amount)}
           />
           <LoanBalanceEventDialog
@@ -348,6 +379,7 @@ export function useLoanActions(
             currency={holding.currency}
             paidFrom={storedProjection ? paidFrom : undefined}
             confirmations={confirmedLoanBalances(quoteHistory, today)}
+            today={today}
             onSubmit={(date, amount) => handleBalanceEvent("extra_repayment", date, amount)}
           />
         </>

@@ -1,21 +1,25 @@
 import { Account, ContributionLimit } from "@/lib/types";
 import {
+  Badge,
   Button,
   Card,
   CardContent,
   CardHeader,
   CardTitle,
   Icons,
-  Progress,
   Skeleton,
   useAmountFormatting,
   useDateFormatting,
 } from "@wealthfolio/ui";
-import { useEffect, useState } from "react";
+import { ProgressBar } from "@/features/goals/components/goal-card";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
+import { parseAccountIds } from "../contribution-limit-accounts";
+import { hasFormerDefaultDates } from "../contribution-limit-dates";
 import { useContributionLimitProgress } from "../use-contribution-limit-mutations";
-import { AccountSelection } from "./account-selection";
 import { ContributionLimitOperations } from "./contribution-limit-operations";
+import { statusSurfaceVariants } from "@wealthfolio/ui/components/ui/status-surface";
+import { cn } from "@/lib/utils";
 
 interface ContributionLimitItemProps {
   limit: ContributionLimit;
@@ -32,20 +36,19 @@ export function ContributionLimitItem({
 }: ContributionLimitItemProps) {
   const amountFormatting = useAmountFormatting();
   const dateFormatting = useDateFormatting();
+  // At UTC+12 and beyond the former default dates fall on the next local day,
+  // so they show as saved.
+  const formatLimitDate = hasFormerDefaultDates(limit)
+    ? (date: string, options?: Parameters<typeof dateFormatting.formatDate>[1]) =>
+        dateFormatting.formatCalendarDate(date.slice(0, 10), options)
+    : dateFormatting.formatDate;
 
   const { t } = useTranslation();
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  useEffect(() => {
-    if (!limit.accountIds || limit.accountIds.length === 0) {
-      setIsExpanded(true);
-    }
-  }, []);
-
-  const toggleExpanded = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsExpanded(!isExpanded);
-  };
+  const detailsPath = `/settings/contribution-limits/${encodeURIComponent(limit.id)}`;
+  const limitAccounts = parseAccountIds(limit.accountIds).flatMap((id) => {
+    const account = accounts.find((candidate) => candidate.id === id);
+    return account ? [account] : [];
+  });
 
   const { data: progress, isLoading } = useContributionLimitProgress(limit.id);
 
@@ -65,9 +68,14 @@ export function ContributionLimitItem({
 
   return (
     <Card
-      className={`w-full ${progressPercentageNumber === 100 ? "border-success/20 bg-success/10 shadow-sm" : isOverLimit ? "border-destructive/20 bg-destructive/10 shadow-sm" : ""}`}
+      className={cn(
+        "relative w-full",
+        progressPercentageNumber === 100
+          ? statusSurfaceVariants({ status: "success" })
+          : isOverLimit && statusSurfaceVariants({ status: "destructive" }),
+      )}
     >
-      <CardHeader className="cursor-pointer pb-3" onClick={toggleExpanded}>
+      <CardHeader className="pb-3">
         {/* Mobile Layout */}
         <div className="flex flex-col gap-2 sm:hidden">
           {/* Row 1: Title + Actions */}
@@ -75,14 +83,11 @@ export function ContributionLimitItem({
             <div className="flex items-center gap-2">
               {isComplete && <Icons.CheckCircle className="text-success h-5 w-5 shrink-0" />}
               {isOverLimit && <Icons.AlertTriangle className="text-destructive h-5 w-5 shrink-0" />}
-              <CardTitle className="text-base">{limit.groupName}</CardTitle>
+              <CardTitle className="text-base">
+                <LimitLink to={detailsPath}>{limit.groupName}</LimitLink>
+              </CardTitle>
             </div>
-            <div className="flex items-center">
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleExpanded}>
-                <Icons.ChevronDown
-                  className={`h-4 w-4 transition-transform duration-300 ${isExpanded ? "rotate-180" : ""}`}
-                />
-              </Button>
+            <div className="relative">
               <ContributionLimitOperations limit={limit} onEdit={onEdit} onDelete={onDelete} />
             </div>
           </div>
@@ -127,12 +132,12 @@ export function ContributionLimitItem({
             <div className="text-muted-foreground flex items-center gap-2 text-xs">
               <Icons.Calendar className="h-3 w-3 shrink-0" />
               <span>
-                {dateFormatting.formatCalendarDate(limit.startDate.slice(0, 10), {
+                {formatLimitDate(limit.startDate, {
                   month: "short",
                   day: "numeric",
                 })}{" "}
                 →{" "}
-                {dateFormatting.formatCalendarDate(limit.endDate.slice(0, 10), {
+                {formatLimitDate(limit.endDate, {
                   month: "short",
                   day: "numeric",
                   year: "numeric",
@@ -141,7 +146,9 @@ export function ContributionLimitItem({
               {daysRemaining !== null && daysRemaining > 0 && daysRemaining <= 60 && (
                 <span
                   className={`shrink-0 rounded-full px-2 py-0.5 ${
-                    daysRemaining <= 30 ? "bg-amber-100 text-amber-800" : "bg-blue-50 text-blue-700"
+                    daysRemaining <= 30
+                      ? "bg-warning-subtle text-warning-subtle-foreground"
+                      : "bg-info-subtle text-info-subtle-foreground"
                   }`}
                 >
                   {t("settings:limits.day_left", { days: daysRemaining })}
@@ -155,24 +162,25 @@ export function ContributionLimitItem({
         <div className="hidden sm:flex sm:items-center sm:justify-between">
           <div className="space-y-1">
             <div className="flex items-center">
-              {isComplete && <Icons.CheckCircle className="text-success mr-2 h-5 w-5" />}
-              {isOverLimit && <Icons.AlertTriangle className="text-destructive mr-2 h-5 w-5" />}
-              <CardTitle className="text-lg">{limit.groupName}</CardTitle>
+              {isComplete && <Icons.CheckCircle className="text-success me-2 h-5 w-5" />}
+              {isOverLimit && <Icons.AlertTriangle className="text-destructive me-2 h-5 w-5" />}
+              <CardTitle className="text-lg">
+                <LimitLink to={detailsPath}>{limit.groupName}</LimitLink>
+              </CardTitle>
             </div>
 
             {limit.startDate && limit.endDate && (
               <div className="text-muted-foreground flex items-center text-xs">
-                <Icons.Calendar className="mr-1 h-3 w-3" />
+                <Icons.Calendar className="me-1 h-3 w-3" />
                 <span>
-                  {dateFormatting.formatCalendarDate(limit.startDate.slice(0, 10))} →{" "}
-                  {dateFormatting.formatCalendarDate(limit.endDate.slice(0, 10))}
+                  {formatLimitDate(limit.startDate)} → {formatLimitDate(limit.endDate)}
                 </span>
                 {daysRemaining !== null && daysRemaining > 0 && daysRemaining <= 60 && (
                   <span
-                    className={`ml-2 rounded-full px-2 py-0.5 text-xs ${
+                    className={`ms-2 rounded-full px-2 py-0.5 text-xs ${
                       daysRemaining <= 30
-                        ? "bg-amber-100 text-amber-800"
-                        : "bg-blue-50 text-blue-700"
+                        ? "bg-warning-subtle text-warning-subtle-foreground"
+                        : "bg-info-subtle text-info-subtle-foreground"
                     }`}
                   >
                     {t("settings:limits_days_left", { days: daysRemaining })}
@@ -201,7 +209,7 @@ export function ContributionLimitItem({
                     / {amountFormatting.formatAmount(limit.limitAmount, baseCurrency)}
                   </span>
                 </div>
-                <span className="text-muted-foreground text-right text-xs">
+                <span className="text-muted-foreground text-end text-xs">
                   {isComplete
                     ? t("settings:limits_completed")
                     : isOverLimit
@@ -213,13 +221,7 @@ export function ContributionLimitItem({
               </div>
             )}
 
-            <div className="flex items-center space-x-1">
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleExpanded}>
-                <Icons.ChevronDown
-                  className={`h-4 w-4 transition-transform duration-300 ${isExpanded ? "rotate-180" : ""}`}
-                />
-              </Button>
-
+            <div className="relative">
               <ContributionLimitOperations limit={limit} onEdit={onEdit} onDelete={onDelete} />
             </div>
           </div>
@@ -229,23 +231,80 @@ export function ContributionLimitItem({
         {isLoading ? (
           <Skeleton className="h-4 w-full" />
         ) : (
-          <Progress
-            value={progressPercentageNumber > 100 ? 100 : progressPercentageNumber}
-            className={`w-full ${isOverLimit ? "bg-destructive/20" : ""}`}
-          />
-        )}
-        {isExpanded && (
-          <div className="mt-4 border-t pt-4">
-            <AccountSelection
-              limit={limit}
-              accounts={accounts}
-              deposits={progress}
-              isLoading={isLoading}
+          // Clicks pass through to the card's link.
+          <div
+            className="bg-muted pointer-events-none overflow-hidden rounded-full"
+            role="progressbar"
+            aria-label={limit.groupName}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(Math.min(progressPercentageNumber, 100))}
+          >
+            <ProgressBar
+              progress={progressPercentageNumber / 100}
+              fillClass={isOverLimit ? "bg-destructive" : isComplete ? "bg-success" : "bg-primary"}
             />
           </div>
         )}
+        <div className="mt-4 flex items-center justify-between gap-3">
+          {limitAccounts.length ? (
+            <ul
+              className="flex min-w-0 flex-wrap gap-1.5"
+              aria-label={t("settings:limits_form_accounts_label")}
+            >
+              {limitAccounts.slice(0, MAX_ACCOUNT_BADGES).map((account) => (
+                <li key={account.id}>
+                  <Badge variant="outline">
+                    <bdi>{account.name}</bdi>
+                  </Badge>
+                </li>
+              ))}
+              {limitAccounts.length > MAX_ACCOUNT_BADGES && (
+                <li>
+                  <Badge variant="outline" className="text-muted-foreground">
+                    {t("settings:limits_accounts_more", {
+                      number: limitAccounts.length - MAX_ACCOUNT_BADGES,
+                    })}
+                  </Badge>
+                </li>
+              )}
+            </ul>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground text-sm">
+                {t("settings:limits_no_accounts_selected")}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="relative"
+                onClick={() => onEdit(limit)}
+              >
+                {t("settings:limits_choose_accounts")}
+              </Button>
+            </div>
+          )}
+          <Icons.ChevronRight
+            className="text-muted-foreground size-4 shrink-0 rtl:rotate-180"
+            aria-hidden="true"
+          />
+        </div>
       </CardContent>
     </Card>
+  );
+}
+
+const MAX_ACCOUNT_BADGES = 3;
+
+/** The title's link covers the card; the actions above it stay clickable. */
+function LimitLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className="focus-visible:ring-ring rounded-sm after:absolute after:inset-0 focus-visible:ring-2 focus-visible:outline-none"
+    >
+      {children}
+    </Link>
   );
 }
 

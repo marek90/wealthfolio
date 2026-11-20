@@ -45,6 +45,7 @@ export function insightToReportProjection(
       income: insight.headline.income,
       outflow: insight.headline.spent,
       saved: insight.headline.saved,
+      fromSavings: insight.headline.fromSavings ?? 0,
       net: insight.headline.netCashflow,
       count: 0,
     },
@@ -176,6 +177,8 @@ function projectBudget(insight: SpendingInsight): BudgetSnapshot {
       remaining: g.remaining,
       overspent: g.overspent,
       rolloverEnabled: false,
+      savingsTargetTotal: 0,
+      savingsActual: 0,
       categories,
     };
   });
@@ -198,6 +201,9 @@ function projectBudget(insight: SpendingInsight): BudgetSnapshot {
         spendingPlanned: insight.headline.budget,
         spendingActual: insight.headline.spent,
         spendingRemaining: insight.headline.remaining,
+        // The projection carries spending only, as its groups do.
+        savingsPlanned: 0,
+        savingsActual: 0,
         incomePlanned: 0,
         incomeActual: insight.headline.income,
         groupBuffer: insight.groups.reduce((sum, g) => sum + g.buffer.total, 0),
@@ -243,7 +249,8 @@ function projectMonths(
         income: m.income,
         outflow: m.spent,
         saved: m.saved,
-        net: m.income - m.spent - m.saved,
+        fromSavings: m.fromSavings ?? 0,
+        net: m.income - m.spent - m.saved + (m.fromSavings ?? 0),
         count: 0,
       },
       prior: { income: 0, outflow: 0, saved: 0, net: 0, count: 0 },

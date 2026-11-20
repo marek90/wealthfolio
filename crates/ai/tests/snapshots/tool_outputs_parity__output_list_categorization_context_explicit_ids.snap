@@ -11,10 +11,11 @@ expression: result
         "notes": "SQ *COFFEE SHOP OTTAWA"
       }
     ],
-    "nextStep": "Call propose_transaction_categories with aiProposals: [] and the same filters to render the review widget. Rule/history matches are draft proposals, not applied categories.",
+    "nextStep": "Call propose_transaction_categories with aiProposals: [] and the same filters {\"activityIds\":[\"cash-a\"]} to render the review widget. Rule/history matches are draft proposals, not applied categories.",
     "summary": {
       "deterministicallyProposed": 1,
       "needsAiJudgement": 0,
+      "protectedSplits": 0,
       "total": 1
     },
     "taxonomies": [
@@ -35,7 +36,7 @@ expression: result
             "path": "Food / Coffee"
           }
         ],
-        "taxonomyId": "spending",
+        "taxonomyId": "spending_categories",
         "taxonomyName": "Spending"
       }
     ],

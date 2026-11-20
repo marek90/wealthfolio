@@ -17,15 +17,14 @@ use crate::broker_ingest::{
 };
 use crate::platform::Platform;
 use chrono::{DateTime, NaiveDate, Utc};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use wealthfolio_core::accounts::{
     account_types, Account, AccountServiceTrait, NewAccount, TrackingMode,
 };
 use wealthfolio_core::activities::{
-    compute_idempotency_key, ActivityRepositoryTrait, ActivityServiceTrait, ActivityUpsert,
-    NewActivity, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_SELL,
+    compute_idempotency_key, idempotency_activity_type, ActivityRepositoryTrait,
+    ActivityServiceTrait, ActivityUpsert, NewActivity, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_SELL,
 };
 use wealthfolio_core::assets::{
     build_option_metadata, Asset, AssetServiceTrait, AssetSpec, InstrumentType, OptionSpec,
@@ -47,6 +46,28 @@ const DEFAULT_BROKERAGE_PROVIDER: &str = "snaptrade";
 /// Higher than generic valuation precision to preserve crypto fidelity.
 const HOLDINGS_DECIMAL_PRECISION: u32 = 12;
 
+/// Leaves out the positions that resolved to an alternative asset and returns
+/// their spec keys. Alternative assets count toward net worth on their own,
+/// never in an account; only an older one that holds a listing can match a
+/// broker position.
+fn drop_alternative_positions(
+    spec_key_to_asset_id: &mut HashMap<String, String>,
+    assets: &HashMap<String, Asset>,
+) -> Vec<String> {
+    let mut dropped = Vec::new();
+    spec_key_to_asset_id.retain(|spec_key, asset_id| {
+        let alternative = assets
+            .get(asset_id)
+            .is_some_and(|asset| asset.kind.is_alternative());
+        if alternative {
+            dropped.push(spec_key.clone());
+        }
+        !alternative
+    });
+    dropped.sort();
+    dropped
+}
+
 fn normalize_holdings_money(amount: Decimal, currency: &str) -> (Decimal, String) {
     let (amount, currency) = normalize_amount(amount, currency);
     (
@@ -57,12 +78,27 @@ fn normalize_holdings_money(amount: Decimal, currency: &str) -> (Decimal, String
 
 fn exact_positive_contract_multiplier(value: Option<f64>) -> Option<Decimal> {
     value
-        .and_then(Decimal::from_f64)
+        .and_then(mapping::decimal_from_f64)
         .filter(|multiplier| *multiplier > Decimal::ZERO)
 }
 
 fn positive_contract_multiplier(value: Option<f64>, fallback: Decimal) -> Decimal {
     exact_positive_contract_multiplier(value).unwrap_or(fallback)
+}
+
+/// Sums broker cash balances per currency code for the holdings snapshot.
+fn broker_cash_balances(balances: &[HoldingsBalance]) -> HashMap<String, Decimal> {
+    let mut cash_balances: HashMap<String, Decimal> = HashMap::new();
+    for balance in balances {
+        if let (Some(currency), Some(cash)) = (
+            balance.currency.as_ref().and_then(|c| c.code.clone()),
+            balance.cash,
+        ) {
+            let cash_decimal = mapping::decimal_from_f64(cash).unwrap_or(Decimal::ZERO);
+            *cash_balances.entry(currency).or_insert(Decimal::ZERO) += cash_decimal;
+        }
+    }
+    cash_balances
 }
 
 fn normalize_regular_average_cost(
@@ -129,7 +165,7 @@ fn structured_holdings_option_metadata(
     };
     let strike = option
         .strike_price
-        .and_then(Decimal::from_f64)
+        .and_then(mapping::decimal_from_f64)
         .filter(|value| *value > Decimal::ZERO)?;
 
     Some(serde_json::json!({
@@ -642,7 +678,11 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
             // Compute idempotency key for content-based deduplication
             let idempotency_key = compute_idempotency_key(
                 &account_id,
-                &act.activity_type,
+                &idempotency_activity_type(
+                    &act.activity_type,
+                    act.subtype.as_deref(),
+                    act.source_group_id.as_deref(),
+                ),
                 &activity_datetime,
                 asset_id.as_deref(),
                 act.quantity,
@@ -885,16 +925,7 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
         let now = chrono::Utc::now();
 
         // Build cash balances HashMap
-        let mut cash_balances: HashMap<String, Decimal> = HashMap::new();
-        for balance in &balances {
-            if let (Some(currency), Some(cash)) = (
-                balance.currency.as_ref().and_then(|c| c.code.clone()),
-                balance.cash,
-            ) {
-                let cash_decimal = Decimal::from_f64(cash).unwrap_or(Decimal::ZERO);
-                *cash_balances.entry(currency).or_insert(Decimal::ZERO) += cash_decimal;
-            }
-        }
+        let cash_balances = broker_cash_balances(&balances);
 
         // 1. Build AssetSpecs and position data from broker positions
         let mut asset_specs: Vec<AssetSpec> = Vec::new();
@@ -999,16 +1030,17 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
                 spec_key_to_idx.insert(spec_key.clone(), idx);
             }
 
-            let quantity = Decimal::from_f64(units)
+            let quantity = mapping::decimal_from_f64(units)
                 .unwrap_or(Decimal::ZERO)
                 .round_dp(HOLDINGS_DECIMAL_PRECISION);
-            let raw_price = Decimal::from_f64(pos.price.unwrap_or(0.0)).unwrap_or(Decimal::ZERO);
+            let raw_price =
+                mapping::decimal_from_f64(pos.price.unwrap_or(0.0)).unwrap_or(Decimal::ZERO);
             let quote_price = raw_price.round_dp(HOLDINGS_DECIMAL_PRECISION);
             // SnapTrade reports regular-position average cost per underlying unit. Store it per
             // broker position unit so quantity * average_cost remains the complete cost basis.
             let avg_cost = pos
                 .average_purchase_price
-                .and_then(Decimal::from_f64)
+                .and_then(mapping::decimal_from_f64)
                 .map(|value| {
                     normalize_regular_average_cost(value, &raw_quote_currency, contract_multiplier)
                 });
@@ -1107,17 +1139,17 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
                 spec_key_to_idx.insert(spec_key.clone(), idx);
             }
 
-            let quantity = Decimal::from_f64(units)
+            let quantity = mapping::decimal_from_f64(units)
                 .unwrap_or(Decimal::ZERO)
                 .round_dp(HOLDINGS_DECIMAL_PRECISION);
             let raw_price =
-                Decimal::from_f64(opt_pos.price.unwrap_or(0.0)).unwrap_or(Decimal::ZERO);
+                mapping::decimal_from_f64(opt_pos.price.unwrap_or(0.0)).unwrap_or(Decimal::ZERO);
             let quote_price = raw_price.round_dp(HOLDINGS_DECIMAL_PRECISION);
             // The holdings aggregation API already reports option average cost per contract.
             // Unlike regular contracts, applying the multiplier again would double-scale it.
             let avg_cost = opt_pos
                 .average_purchase_price
-                .and_then(Decimal::from_f64)
+                .and_then(mapping::decimal_from_f64)
                 .map(|value| normalize_holdings_money(value, &raw_quote_currency).0);
 
             position_data.push(HoldingsPositionData {
@@ -1151,6 +1183,15 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
                     spec_key_to_asset_id.insert(spec_key.clone(), asset_id.clone());
                 }
             }
+        }
+        // Dropped before any quote, metadata or snapshot write: an unmapped
+        // position is skipped by each of them.
+        for spec_key in drop_alternative_positions(&mut spec_key_to_asset_id, &ensure_result.assets)
+        {
+            warn!(
+                "Broker position {} matches an alternative asset and is left out of account {}",
+                spec_key, account_id
+            );
         }
 
         // Broker multipliers are asset economics shared by every account. New assets already carry
@@ -1364,6 +1405,7 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
             net_contribution_base: Decimal::ZERO,
             cash_total_account_currency: cash_total,
             cash_total_base_currency: Decimal::ZERO,
+            base_currency: None,
             calculated_at: now.naive_utc(),
             source: SnapshotSource::BrokerImported,
         };
@@ -1737,13 +1779,14 @@ mod tests {
     use wealthfolio_core::portfolio::snapshot::{AccountStateSnapshot, Position, SnapshotSource};
 
     use super::{
-        contract_multiplier_metadata_update, default_tracking_mode_for_broker_account_type,
-        holdings_option_metadata, normalize_holdings_money, normalize_regular_average_cost,
-        option_contract_multiplier, positive_contract_multiplier,
-        regular_contract_multiplier_metadata, BrokerSyncService,
+        broker_cash_balances, contract_multiplier_metadata_update,
+        default_tracking_mode_for_broker_account_type, holdings_option_metadata,
+        normalize_holdings_money, normalize_regular_average_cost, option_contract_multiplier,
+        positive_contract_multiplier, regular_contract_multiplier_metadata, BrokerSyncService,
     };
     use crate::broker::models::{
-        HoldingsOptionPosition, HoldingsOptionSymbol, HoldingsPosition, HoldingsUnderlyingSymbol,
+        HoldingsBalance, HoldingsOptionPosition, HoldingsOptionSymbol, HoldingsPosition,
+        HoldingsUnderlyingSymbol,
     };
     use wealthfolio_core::accounts::{account_types, TrackingMode};
     use wealthfolio_core::assets::{
@@ -1808,6 +1851,36 @@ mod tests {
         super::apply_declared_contract_multiplier(&mut position, Decimal::ZERO);
         assert_eq!(position.contract_multiplier, decimal("50"));
         assert_eq!(position.average_cost, Some(decimal("20")));
+    }
+
+    #[test]
+    fn positions_matching_an_alternative_asset_are_left_out() {
+        let asset = |id: &str, kind: wealthfolio_core::assets::AssetKind| Asset {
+            id: id.to_string(),
+            kind,
+            ..Default::default()
+        };
+        let assets: HashMap<String, Asset> = [
+            ("aapl", wealthfolio_core::assets::AssetKind::Investment),
+            ("cottage", wealthfolio_core::assets::AssetKind::Property),
+        ]
+        .into_iter()
+        .map(|(id, kind)| (id.to_string(), asset(id, kind)))
+        .collect();
+        let mut mapping: HashMap<String, String> =
+            [("EQUITY:AAPL@XNAS", "aapl"), ("EQUITY:COTTAGE", "cottage")]
+                .into_iter()
+                .map(|(key, id)| (key.to_string(), id.to_string()))
+                .collect();
+
+        let dropped = super::drop_alternative_positions(&mut mapping, &assets);
+
+        assert_eq!(dropped, vec!["EQUITY:COTTAGE".to_string()]);
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(
+            mapping.get("EQUITY:AAPL@XNAS").map(String::as_str),
+            Some("aapl")
+        );
     }
 
     #[test]
@@ -2090,6 +2163,22 @@ mod tests {
                 .and_then(|value| value.multiplier),
             Some(25.0)
         );
+    }
+
+    #[test]
+    fn broker_cash_balances_keep_large_cent_amounts_exact() {
+        let balances: Vec<HoldingsBalance> = serde_json::from_str(
+            r#"[
+                {"currency": {"code": "USD"}, "cash": 4196049.73},
+                {"currency": {"code": "CAD"}, "cash": -4196049.73}
+            ]"#,
+        )
+        .expect("broker balances");
+
+        let cash_balances = broker_cash_balances(&balances);
+
+        assert_eq!(cash_balances.get("USD"), Some(&decimal("4196049.73")));
+        assert_eq!(cash_balances.get("CAD"), Some(&decimal("-4196049.73")));
     }
 
     #[test]

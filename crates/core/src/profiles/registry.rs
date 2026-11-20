@@ -1,10 +1,10 @@
 use super::*;
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Algorithm, Argon2, Params, Version,
 };
 use fs2::FileExt;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -44,6 +44,8 @@ struct LockRecord {
 
 pub struct ProfileRegistry {
     root: PathBuf,
+    /// An in-memory override for hosts whose sandbox moves between launches.
+    legacy_database_override: Option<PathBuf>,
     data: Mutex<RegistryData>,
     secrets: Arc<dyn SecretStore>,
     secret_gate: Arc<Mutex<()>>,
@@ -185,6 +187,14 @@ impl ProfileRegistry {
         Self::open_with_recovery(root, legacy_database, secrets, false)
     }
 
+    /// Use the host's current sandbox path for the adopted legacy profile.
+    /// Mobile sandboxes can move; other hosts retain the saved path.
+    /// This does not change the registry on disk or paths for newer profiles.
+    pub fn with_legacy_database_path(mut self, database: PathBuf) -> Self {
+        self.legacy_database_override = Some(database);
+        self
+    }
+
     /// Explicit recovery only: preserve orphaned data and credentials, then allow
     /// a new, independently scoped profile to be created through normal setup.
     pub fn start_new(
@@ -304,6 +314,7 @@ impl ProfileRegistry {
         };
         Ok(Self {
             root,
+            legacy_database_override: None,
             data: Mutex::new(data),
             secrets,
             secret_gate: Arc::new(Mutex::new(())),
@@ -514,7 +525,11 @@ impl ProfileRegistry {
         match &profile.legacy_database {
             Some(database) => ProfilePaths {
                 root: self.root.clone(),
-                database: database.clone(),
+                database: self
+                    .legacy_database_override
+                    .as_ref()
+                    .unwrap_or(database)
+                    .clone(),
             },
             None => {
                 let root = self.root.join("profiles").join(profile.id.to_string());
@@ -867,13 +882,12 @@ fn new_lock_record(password: Option<&str>) -> ProfileResult<(LockRecord, Option<
     }
     let (record, recovery) = if let Some(password) = password {
         let params = Params::new(19 * 1024, 2, 1, Some(32)).map_err(storage_error)?;
-        let salt = SaltString::generate(&mut OsRng);
         let verifier = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password(password.as_bytes())
             .map_err(storage_error)?
             .to_string();
         let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill_bytes(&mut bytes);
         let code = hex::encode_upper(bytes);
         let formatted = code
             .as_bytes()
@@ -1210,6 +1224,77 @@ mod tests {
     }
 
     #[test]
+    fn credential_calls_waiting_on_a_prompt_leave_async_workers_free() {
+        // A keyring read that waits until the unlock prompt is answered.
+        struct PromptingSecrets {
+            prompted: std::sync::mpsc::Sender<()>,
+            answered: (Mutex<bool>, std::sync::Condvar),
+        }
+        impl SecretStore for PromptingSecrets {
+            fn get_secret(&self, key: &str) -> crate::Result<Option<String>> {
+                if key.ends_with(crate::secrets::CLOUD_REFRESH_TOKEN_KEY) {
+                    self.prompted.send(()).unwrap();
+                    let (answered, answer) = &self.answered;
+                    drop(answer.wait_while(answered.lock().unwrap(), |answered| !*answered));
+                }
+                Ok(None)
+            }
+            fn set_secret(&self, _: &str, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+            fn delete_secret(&self, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (prompted, prompts) = std::sync::mpsc::channel();
+        let secrets = Arc::new(PromptingSecrets {
+            prompted,
+            answered: Default::default(),
+        });
+        let registry = ProfileRegistry::open(
+            dir.path().into(),
+            dir.path().join("app.db"),
+            secrets.clone(),
+        )
+        .unwrap();
+        let store =
+            registry.secret_store(&registry.profile(registry.default_id().unwrap()).unwrap());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        let wait = std::time::Duration::from_secs(5);
+        // Answer before any assertion, or dropping the runtime waits on the prompt.
+        let answer = || {
+            *secrets.answered.0.lock().unwrap() = true;
+            secrets.answered.1.notify_all();
+        };
+        // One read waits on the prompt while holding the shared gate, and the
+        // next waits on the gate. Each would otherwise hold one of the workers.
+        let first = runtime.spawn({
+            let store = store.clone();
+            async move { store.get_secret(crate::secrets::CLOUD_REFRESH_TOKEN_KEY) }
+        });
+        let prompted = prompts.recv_timeout(wait);
+        if prompted.is_err() {
+            answer();
+        }
+        assert!(prompted.is_ok(), "the first read did not reach the store");
+        let (done, finished) = std::sync::mpsc::channel();
+        let second = runtime.spawn(async move {
+            // Queued on this worker just before the read blocks it.
+            tokio::spawn(async move { done.send(()).unwrap() });
+            store.get_secret(crate::secrets::CLOUD_REFRESH_TOKEN_KEY)
+        });
+        let unrelated = finished.recv_timeout(wait);
+        answer();
+        assert!(unrelated.is_ok(), "unrelated work waited for the prompt");
+        assert_eq!(runtime.block_on(first).unwrap().unwrap(), None);
+        assert_eq!(runtime.block_on(second).unwrap().unwrap(), None);
+    }
+
+    #[test]
     fn deletion_preserves_other_profiles_and_survives_registry_backup_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("app.db");
@@ -1304,6 +1389,75 @@ mod tests {
             assert!(outside.path().join("keep").exists());
             assert!(!root.exists());
         }
+    }
+
+    #[test]
+    fn legacy_profile_keeps_saved_database_when_launch_candidate_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("custom-legacy.db");
+        fs::write(&database, b"existing database").unwrap();
+        let secrets = Arc::new(Secrets::default());
+        drop(ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone()).unwrap());
+        let saved_registry = fs::read(dir.path().join(REGISTRY_FILE)).unwrap();
+
+        for candidate_exists in [false, true] {
+            let candidate = dir.path().join("app.db");
+            if candidate_exists {
+                fs::write(&candidate, b"unrelated database").unwrap();
+            }
+            let registry =
+                ProfileRegistry::open(dir.path().into(), candidate, secrets.clone()).unwrap();
+            let default = registry.profile(registry.default_id().unwrap()).unwrap();
+            assert_eq!(registry.paths(&default).database, database);
+            assert_eq!(
+                fs::read(dir.path().join(REGISTRY_FILE)).unwrap(),
+                saved_registry
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_profile_follows_a_moved_data_directory() {
+        // An iOS update renames the app container but keeps its files.
+        let base = tempfile::tempdir().unwrap();
+        let old_root = base.path().join("OLD-CONTAINER/app");
+        let new_root = base.path().join("NEW-CONTAINER/app");
+        fs::create_dir_all(&old_root).unwrap();
+        fs::write(old_root.join("app.db"), b"existing database").unwrap();
+        let secrets = Arc::new(Secrets::default());
+        drop(
+            ProfileRegistry::open(old_root.clone(), old_root.join("app.db"), secrets.clone())
+                .unwrap(),
+        );
+        fs::rename(
+            base.path().join("OLD-CONTAINER"),
+            base.path().join("NEW-CONTAINER"),
+        )
+        .unwrap();
+
+        let saved_registry = fs::read(new_root.join(REGISTRY_FILE)).unwrap();
+        let registry = ProfileRegistry::open(new_root.clone(), new_root.join("app.db"), secrets)
+            .unwrap()
+            .with_legacy_database_path(new_root.join("app.db"));
+        let default = registry.profile(registry.default_id().unwrap()).unwrap();
+        assert!(ProfileSummary::from(&default).is_legacy);
+        let paths = registry.paths(&default);
+        assert_eq!(paths.root, new_root);
+        assert_eq!(paths.database, new_root.join("app.db"));
+        assert_eq!(
+            fs::read(new_root.join(REGISTRY_FILE)).unwrap(),
+            saved_registry
+        );
+
+        let second = registry.create("Second", DEFAULT_PROFILE_AVATAR).unwrap();
+        let second = registry.profile(second.id).unwrap();
+        assert_eq!(
+            registry.paths(&second).database,
+            new_root
+                .join("profiles")
+                .join(second.id.to_string())
+                .join("app.db")
+        );
     }
 
     #[test]
@@ -1544,7 +1698,7 @@ mod tests {
         let mut record = registry.read_lock(&profile).unwrap();
         record.verifier = Some(
             Argon2::default()
-                .hash_password(b"123456", &SaltString::generate(&mut OsRng))
+                .hash_password(b"123456")
                 .unwrap()
                 .to_string(),
         );
@@ -1556,6 +1710,46 @@ mod tests {
         assert!(registry.verify(id, Some(password)).unwrap());
         registry.set_password(id, Some(password), None).unwrap();
         assert!(!registry.verify(id, None).unwrap());
+    }
+
+    #[test]
+    fn golden_profile_verifier_and_recovery_hash_still_unlock() {
+        // Produced today for fixed synthetic inputs. Stored verifiers must keep unlocking after
+        // an argon2 or sha2 upgrade; never regenerate these to make an upgrade pass.
+        const PASSWORD: &str = " é🔒golden ";
+        const VERIFIER: &str = "$argon2id$v=19$m=19456,t=2,p=1$Z29sZGVuLXByb2ZpbGUtMQ$sZ3/MEsCyA4dP6inM0bFcCsEwaHkAyGczT9k1KqoI2c";
+        const RECOVERY_HASH: &str =
+            "fe7c9cc087eaf842e2eb186a6baebcfc4fc8cd2fd84e14e990182633fa05df08";
+        assert_eq!(
+            recovery_hash("0123456789ABCDEF0123456789ABCDEF"),
+            RECOVERY_HASH
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ProfileRegistry::open(
+            dir.path().into(),
+            dir.path().join("db"),
+            Arc::new(Secrets::default()),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        registry
+            .set_password(id, None, Some("placeholder"))
+            .unwrap();
+        let profile = registry.profile(id).unwrap();
+        let mut record = registry.read_lock(&profile).unwrap();
+        record.verifier = Some(VERIFIER.into());
+        record.recovery_hash = Some(RECOVERY_HASH.into());
+        registry.write_lock(&profile, &record).unwrap();
+
+        assert!(matches!(
+            registry.verify(id, Some(PASSWORD.trim())),
+            Err(ProfileError::IncorrectPassword)
+        ));
+        assert!(registry.verify(id, Some(PASSWORD)).unwrap());
+        assert!(registry
+            .verify(id, Some("0123-4567-89ab-cdef-0123-4567-89ab-cdef"))
+            .unwrap());
     }
 
     #[test]

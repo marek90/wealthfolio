@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::accounts::{Account, AccountAccountingSettings, NewAccount, TrackingMode};
+    use crate::accounts::{
+        normalize_account_number, Account, AccountAccountingSettings, AccountUpdate, NewAccount,
+        TrackingMode, ACCOUNT_NUMBER_MAX_CHARS,
+    };
     use chrono::NaiveDateTime;
 
     // ==================== TrackingMode Serialization Tests ====================
@@ -219,6 +222,52 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Credit card accounts cannot use HOLDINGS tracking mode"));
+    }
+
+    #[test]
+    fn account_update_group_distinguishes_omitted_null_and_name() {
+        let base = serde_json::json!({
+            "name": "Brokerage", "accountType": "SECURITIES",
+            "isDefault": false, "isActive": true
+        });
+        let read = |value| {
+            serde_json::from_value::<AccountUpdate>(value)
+                .unwrap()
+                .group
+        };
+        assert_eq!(read(base.clone()), None);
+        let mut with_group = base;
+        with_group["group"] = serde_json::Value::Null;
+        assert_eq!(read(with_group.clone()), Some(None));
+        with_group["group"] = serde_json::json!("Retirement");
+        assert_eq!(read(with_group), Some(Some("Retirement".to_string())));
+    }
+
+    // ==================== Account Number Tests ====================
+
+    #[test]
+    fn account_number_is_trimmed_and_blank_is_none() {
+        assert_eq!(
+            normalize_account_number("  DE89 3704 0044 0532 0130 00 ").unwrap(),
+            Some("DE89 3704 0044 0532 0130 00".to_string())
+        );
+        assert_eq!(normalize_account_number("   ").unwrap(), None);
+        assert_eq!(normalize_account_number("").unwrap(), None);
+    }
+
+    #[test]
+    fn account_number_longer_than_the_cap_is_rejected() {
+        let at_cap = "9".repeat(ACCOUNT_NUMBER_MAX_CHARS);
+        assert_eq!(
+            normalize_account_number(&format!(" {at_cap} ")).unwrap(),
+            Some(at_cap.clone())
+        );
+        // Characters, not bytes: a multi-byte character counts once.
+        assert!(normalize_account_number(&"é".repeat(ACCOUNT_NUMBER_MAX_CHARS)).is_ok());
+
+        let err = normalize_account_number(&format!("{at_cap}9"))
+            .expect_err("a number over the cap should be rejected");
+        assert!(err.to_string().contains("Account number"));
     }
 
     // ==================== Helper Functions ====================

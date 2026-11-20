@@ -573,7 +573,7 @@ describe("Addon Type Bridge", () => {
         spendingGuard("rerunRules"),
       );
 
-      await sdkAPI.spending.rerunRules();
+      await expect(sdkAPI.spending.rerunRules()).resolves.toBe(3);
 
       expect(mockRerun).toHaveBeenCalledWith(true);
     });
@@ -679,5 +679,547 @@ describe("Addon Type Bridge", () => {
       expect(getPermissionCategory("activities")?.riskLevel).toBe("high");
       expect(getPermissionCategory("activities")?.functions).toContain("searchCashActivities");
     });
+  });
+});
+
+describe("Spending integration grant separation", () => {
+  const declared = (category: string, names: string[]) => [
+    {
+      category,
+      purpose: "Synthetic test",
+      functions: names.map((name) => ({ name, isDeclared: true, isDetected: false })),
+    },
+  ];
+  it("old Spending grants cannot write categories, events or budgets", () => {
+    const internal = {
+      assignSpendingCategory: vi.fn(),
+      unassignSpendingCategory: vi.fn(),
+      setSpendingEvent: vi.fn(),
+      upsertBudgetTarget: vi.fn(),
+    };
+    const api = createSDKHostAPIBridge(
+      internal as unknown as InternalHostAPI,
+      "test",
+      createPermissionGuard(
+        "test",
+        declared("spending", [
+          "getReport",
+          "getRules",
+          "saveRule",
+          "rerunRules",
+          "assignCategory",
+          "setEvent",
+          "upsertBudgetTarget",
+        ]),
+      ),
+    );
+    expect(() => api.spending.assignCategory("a", "expense", "c")).toThrow(
+      "activities.assignCategory",
+    );
+    expect(() => api.spending.unassignCategory("a", "expense")).toThrow(
+      "activities.unassignCategory",
+    );
+    expect(() => api.spending.setEvent("a", null)).toThrow("activities.setEvent");
+    expect(() =>
+      api.spending.upsertBudgetTarget({
+        periodKey: "default",
+        targetType: "category",
+        taxonomyId: "spending_categories",
+        categoryId: "c",
+        amount: "100",
+      }),
+    ).toThrow("budgets.upsertBudgetTarget");
+    for (const method of Object.values(internal)) expect(method).not.toHaveBeenCalled();
+  });
+  it("maps taxonomy-qualified metadata writes only after explicit function grants", async () => {
+    const internal = {
+      assignSpendingCategory: vi.fn().mockResolvedValue({}),
+      unassignSpendingCategory: vi.fn().mockResolvedValue(undefined),
+      setSpendingEvent: vi.fn().mockResolvedValue({}),
+    };
+    const api = createSDKHostAPIBridge(
+      internal as unknown as InternalHostAPI,
+      "test",
+      createPermissionGuard(
+        "test",
+        declared("activities", ["assignCategory", "unassignCategory", "setEvent"]),
+      ),
+    );
+    await api.spending.assignCategory("a", "saving", "c");
+    expect(internal.assignSpendingCategory).toHaveBeenCalledWith("a", "savings_categories", "c");
+    await api.spending.unassignCategory("a", "income");
+    expect(internal.unassignSpendingCategory).toHaveBeenCalledWith("a", "income_sources");
+    await api.spending.setEvent("a", null);
+    expect(internal.setSpendingEvent).toHaveBeenCalledWith("a", null);
+    expect(getPermissionCategory("activities")?.riskLevel).toBe("high");
+    expect(getPermissionCategory("budgets")?.riskLevel).toBe("high");
+  });
+  it("budget grants neither grant organization nor require it", async () => {
+    const internal = {
+      upsertBudgetTarget: vi.fn().mockResolvedValue({}),
+      assignSpendingCategory: vi.fn(),
+    };
+    const api = createSDKHostAPIBridge(
+      internal as unknown as InternalHostAPI,
+      "test",
+      createPermissionGuard("test", declared("budgets", ["upsertBudgetTarget"])),
+    );
+    const target = {
+      periodKey: "2026-10",
+      targetType: "group_buffer" as const,
+      groupId: "g",
+      amount: "20.25",
+    };
+    await api.spending.upsertBudgetTarget(target, "2026-10");
+    expect(internal.upsertBudgetTarget).toHaveBeenCalledWith(target, "2026-10");
+    expect(() => api.spending.assignCategory("a", "expense", "c")).toThrow(
+      "activities.assignCategory",
+    );
+  });
+});
+
+describe("addon activity update payload boundary", () => {
+  it.each(["update", "array", "object"] as const)(
+    "does not forward native controls through %s with only that method granted",
+    async (shape) => {
+      const updateActivity = vi.fn().mockResolvedValue({ id: "a" });
+      const saveActivities = vi.fn().mockResolvedValue({ updated: [] });
+      const unlinkTransferActivities = vi.fn();
+      const method = shape === "update" ? "update" : "saveMany";
+      const guard = createPermissionGuard("limited-addon", [
+        {
+          category: "activities",
+          purpose: "Edit transactions",
+          functions: [{ name: method, isDeclared: true, isDetected: false }],
+        },
+      ]);
+      const api = createSDKHostAPIBridge(
+        { updateActivity, saveActivities, unlinkTransferActivities } as unknown as InternalHostAPI,
+        "limited-addon",
+        guard,
+      );
+      const input = {
+        id: "a",
+        accountId: "account",
+        activityType: "TRANSFER_OUT",
+        activityDate: "2026-04-01",
+        currency: "USD",
+        amount: "25",
+        comment: "Edited",
+        notes: "Legacy alias",
+        asset: {},
+        metadata: { flow: { is_external: true } },
+        unlinkTransferPairId: "b",
+        splitReview: [],
+        futureNativeControl: true,
+      };
+      expect(() => api.activities.unlinkTransfer("a", "b")).toThrow("activities.unlinkTransfer");
+      if (shape === "update") await api.activities.update(input);
+      else if (shape === "array") await api.activities.saveMany([input] as never);
+      else {
+        const request = {
+          updates: [input],
+          creates: [],
+          deleteIds: [],
+          futureNativeBatchControl: true,
+        };
+        await api.activities.saveMany(request);
+      }
+      const forwarded =
+        shape === "update"
+          ? updateActivity.mock.calls[0][0]
+          : saveActivities.mock.calls[0][0].updates[0];
+      expect(forwarded).toEqual({
+        id: "a",
+        accountId: "account",
+        activityType: "TRANSFER_OUT",
+        activityDate: "2026-04-01",
+        currency: "USD",
+        amount: "25",
+        comment: "Edited",
+        notes: "Legacy alias",
+        asset: {},
+        metadata: { flow: { is_external: true } },
+      });
+      if (shape !== "update") {
+        expect(saveActivities.mock.calls[0][0]).toEqual(
+          shape === "array"
+            ? { updates: [forwarded] }
+            : { updates: [forwarded], creates: [], deleteIds: [] },
+        );
+      }
+      expect(input.unlinkTransferPairId).toBe("b");
+      expect(unlinkTransferActivities).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("addon import rows", () => {
+  it("keeps an addon's source record IDs and metadata under its own id", async () => {
+    const checkActivitiesImport = vi.fn(({ activities }: { activities: object[] }) =>
+      Promise.resolve(activities.map((row) => ({ ...row, isValid: true }))),
+    );
+    const importActivities = vi.fn(({ activities }: { activities: object[] }) =>
+      Promise.resolve({
+        activities,
+        importRunId: "run-1",
+        summary: { imported: activities.length },
+      }),
+    );
+    const api = createSDKHostAPIBridge(
+      { checkActivitiesImport, importActivities } as unknown as InternalHostAPI,
+      "statement-importer",
+    );
+    const base = { accountId: "account", activityType: "BUY", isDraft: false, isValid: false };
+    const rows = [
+      { ...base, sourceRecordId: " folio-1/7 ", metadata: { folio: "1" } },
+      { ...base, sourceRecordId: "  ", comment: "No ID" },
+      { ...base, comment: "Absent fields" },
+      { ...base, sourceRecordId: null, metadata: null, comment: "Null fields" },
+      { ...base, sourceRecordId: "empty-details", metadata: {} },
+    ];
+
+    const checked = await api.activities.checkImport(rows as never);
+    const sent = [
+      {
+        ...base,
+        sourceRecordId: "addon:statement-importer:folio-1/7",
+        metadata: { addons: { "statement-importer": { folio: "1" } } },
+      },
+      { ...base, comment: "No ID" },
+      { ...base, comment: "Absent fields" },
+      { ...base, comment: "Null fields" },
+      {
+        ...base,
+        sourceRecordId: "addon:statement-importer:empty-details",
+        metadata: { addons: { "statement-importer": {} } },
+      },
+    ];
+    expect(checkActivitiesImport.mock.calls[0][0].activities).toEqual(sent);
+    expect(checked).toEqual([
+      { ...base, isValid: true, sourceRecordId: "folio-1/7", metadata: { folio: "1" } },
+      { ...base, isValid: true, comment: "No ID" },
+      { ...base, isValid: true, comment: "Absent fields" },
+      { ...base, isValid: true, comment: "Null fields" },
+      { ...base, isValid: true, sourceRecordId: "empty-details", metadata: {} },
+    ]);
+
+    const result = await api.activities.import(checked);
+    expect(importActivities.mock.calls[0][0].activities).toEqual(
+      sent.map((row) => ({ ...row, isValid: true })),
+    );
+    expect(result.activities).toEqual(checked);
+    expect(result.importRunId).toBe("run-1");
+  });
+});
+
+it("preserves SDK update values, legacy aliases, and bulk create/delete requests", async () => {
+  const updateActivity = vi.fn().mockResolvedValue({ id: "a" });
+  const saveActivities = vi.fn().mockResolvedValue({ updated: [] });
+  const api = createSDKHostAPIBridge(
+    { updateActivity, saveActivities } as unknown as InternalHostAPI,
+    "addon",
+    createPermissionGuard("addon", [
+      {
+        category: "activities",
+        purpose: "Manage transactions",
+        functions: ["update", "saveMany"].map((name) => ({
+          name,
+          isDeclared: true,
+          isDetected: false,
+        })),
+      },
+    ]),
+  );
+  const update = {
+    id: "a",
+    accountId: "account",
+    activityType: "BUY",
+    activityDate: new Date("2026-04-01T12:00:00Z"),
+    currency: "EUR",
+    sourceGroupId: "legacy-group",
+    symbol: { symbol: "IBM" },
+    subtype: null,
+    quantity: "1.234567890123456789",
+    unitPrice: "10",
+    amount: null,
+    fee: 0,
+    tax: null,
+    fxRate: "1.1",
+    needsReview: true,
+    status: "POSTED" as const,
+    comment: "Comment",
+    notes: "Legacy notes",
+    metadata: { original: "value" },
+  };
+  await api.activities.update(update);
+  expect(updateActivity).toHaveBeenCalledExactlyOnceWith(update);
+  const creates = [
+    {
+      accountId: "account",
+      activityType: "DEPOSIT" as const,
+      activityDate: "2026-04-01",
+      currency: "USD",
+      amount: "5",
+    },
+  ];
+  await api.activities.saveMany({ creates, deleteIds: ["old"] });
+  expect(saveActivities).toHaveBeenCalledExactlyOnceWith({ creates, deleteIds: ["old"] });
+});
+
+describe("allocationTargets namespace", () => {
+  const allocationGuard = (...functionNames: string[]) =>
+    createPermissionGuard("test-addon", [
+      {
+        category: "allocation-targets",
+        purpose: "Read allocation targets",
+        functions: functionNames.map((name) => ({ name, isDeclared: true, isDetected: false })),
+      },
+    ]);
+  const loggerMocks = {
+    logError: vi.fn(),
+    logInfo: vi.fn(),
+    logWarn: vi.fn(),
+    logTrace: vi.fn(),
+    logDebug: vi.fn(),
+  };
+  const target = (id: string, archivedAt: string | null = null) => ({
+    id,
+    name: `Target ${id}`,
+    scopeType: "account",
+    scopeId: "account-1",
+    taxonomyId: "asset_classes",
+    triggerType: "threshold",
+    driftBandBps: 500,
+    bandType: "hybrid",
+    relativeFactorBps: 2000,
+    rebalanceGoal: "exact_target",
+    minTradeAmount: "0",
+    wholeSharesOnly: false,
+    allowSells: true,
+    maxTurnoverBps: null,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-02T00:00:00Z",
+    archivedAt,
+  });
+  const weight = (targetId: string, categoryId: string, targetBps: number) => ({
+    id: `${targetId}-${categoryId}`,
+    targetId,
+    taxonomyId: "asset_classes",
+    categoryId,
+    targetBps,
+    isLocked: false,
+    isRequired: true,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  });
+  const category = (id: string, key: string, name: string) => ({
+    id,
+    taxonomyId: "asset_classes",
+    parentId: null,
+    name,
+    key,
+    color: "#000000",
+    sortOrder: 0,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  });
+  const driftReport = {
+    targetId: "t1",
+    scopeType: "account",
+    scopeId: "account-1",
+    totalValue: 1000,
+    baseCurrency: "USD",
+    maxDriftBps: 300,
+    outOfBandCount: 0,
+    deployableCash: 25,
+    holdings: null,
+    rows: [
+      {
+        categoryId: "cat-growth",
+        categoryName: "Growth",
+        color: "#123456",
+        currentBps: 7300,
+        targetBps: 7000,
+        driftBps: 300,
+        currentValue: 730,
+        targetValue: 700,
+        valueDelta: -30,
+        effectiveBandBps: 500,
+        status: "in_band",
+        isRequired: true,
+        isZeroCurrent: false,
+        isCash: false,
+      },
+    ],
+  };
+
+  it("getAll drops archived targets and returns weights with category key and name", async () => {
+    const listAllocationTargets = vi
+      .fn()
+      .mockResolvedValue([target("t1"), target("t2", "2026-02-01T00:00:00Z")]);
+    const listAllocationTargetWeights = vi
+      .fn()
+      .mockResolvedValue([weight("t1", "cat-growth", 7000), weight("t1", "cat-defensive", 3000)]);
+    const getTaxonomy = vi.fn().mockResolvedValue({
+      taxonomy: { id: "asset_classes" },
+      categories: [
+        category("cat-growth", "growth", "Growth"),
+        category("cat-defensive", "defensive", "Defensive"),
+        category("cat-unused", "reserve", "Reserve"),
+      ],
+    });
+    const sdkAPI = createSDKHostAPIBridge(
+      {
+        listAllocationTargets,
+        listAllocationTargetWeights,
+        getTaxonomy,
+        ...loggerMocks,
+      } as unknown as InternalHostAPI,
+      "test-addon",
+      allocationGuard("getAll"),
+    );
+
+    const targets = await sdkAPI.allocationTargets.getAll();
+
+    expect(listAllocationTargetWeights).toHaveBeenCalledTimes(1);
+    expect(listAllocationTargetWeights).toHaveBeenCalledWith("t1");
+    expect(getTaxonomy).toHaveBeenCalledTimes(1);
+    expect(targets).toEqual([
+      {
+        id: "t1",
+        name: "Target t1",
+        scopeType: "account",
+        scopeId: "account-1",
+        taxonomyId: "asset_classes",
+        driftBandBps: 500,
+        bandType: "hybrid",
+        relativeFactorBps: 2000,
+        allowSells: true,
+        wholeSharesOnly: false,
+        minTradeAmount: "0",
+        maxTurnoverBps: null,
+        weights: [
+          {
+            categoryId: "cat-growth",
+            categoryKey: "growth",
+            categoryName: "Growth",
+            targetBps: 7000,
+          },
+          {
+            categoryId: "cat-defensive",
+            categoryKey: "defensive",
+            categoryName: "Defensive",
+            targetBps: 3000,
+          },
+        ],
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+      },
+    ]);
+  });
+
+  it("getDrift reads the target's own scope without holdings and maps the rows", async () => {
+    const getAllocationTargetDrift = vi.fn().mockResolvedValue(driftReport);
+    const sdkAPI = createSDKHostAPIBridge(
+      {
+        listAllocationTargets: vi.fn().mockResolvedValue([target("t1")]),
+        getAllocationTargetDrift,
+        ...loggerMocks,
+      } as unknown as InternalHostAPI,
+      "test-addon",
+      allocationGuard("getDrift"),
+    );
+
+    const drift = await sdkAPI.allocationTargets.getDrift("t1");
+
+    expect(getAllocationTargetDrift).toHaveBeenCalledWith(
+      "t1",
+      { type: "all" },
+      { includeHoldings: false },
+    );
+    expect(drift).toEqual({
+      targetId: "t1",
+      scopeType: "account",
+      scopeId: "account-1",
+      baseCurrency: "USD",
+      totalValue: 1000,
+      maxDriftBps: 300,
+      outOfBandCount: 0,
+      deployableCash: 25,
+      rows: [
+        {
+          categoryId: "cat-growth",
+          categoryName: "Growth",
+          currentBps: 7300,
+          targetBps: 7000,
+          driftBps: 300,
+          currentValue: 730,
+          targetValue: 700,
+          valueDelta: -30,
+          effectiveBandBps: 500,
+          status: "in_band",
+          isCash: false,
+        },
+      ],
+    });
+  });
+
+  it("getDrift returns null for an unknown or archived target without computing drift", async () => {
+    const getAllocationTargetDrift = vi.fn();
+    const sdkAPI = createSDKHostAPIBridge(
+      {
+        listAllocationTargets: vi
+          .fn()
+          .mockResolvedValue([target("archived", "2026-02-01T00:00:00Z")]),
+        getAllocationTargetDrift,
+        ...loggerMocks,
+      } as unknown as InternalHostAPI,
+      "test-addon",
+      allocationGuard("getDrift"),
+    );
+
+    await expect(sdkAPI.allocationTargets.getDrift("archived")).resolves.toBeNull();
+    await expect(sdkAPI.allocationTargets.getDrift("missing")).resolves.toBeNull();
+    expect(getAllocationTargetDrift).not.toHaveBeenCalled();
+  });
+
+  it("requires a grant for each function, and portfolio grants do not cover it", () => {
+    const listAllocationTargets = vi.fn();
+    const getAllocationTargetDrift = vi.fn();
+    const internal = {
+      listAllocationTargets,
+      getAllocationTargetDrift,
+      ...loggerMocks,
+    } as unknown as InternalHostAPI;
+
+    const getAllOnly = createSDKHostAPIBridge(internal, "test-addon", allocationGuard("getAll"));
+    expect(() => getAllOnly.allocationTargets.getDrift("t1")).toThrow(
+      "Addon 'test-addon' is not allowed to call allocation-targets.getDrift",
+    );
+
+    const portfolioOnly = createSDKHostAPIBridge(
+      internal,
+      "test-addon",
+      createPermissionGuard("test-addon", [
+        {
+          category: "portfolio",
+          purpose: "Read holdings",
+          functions: [{ name: "getHoldings", isDeclared: true, isDetected: false }],
+        },
+      ]),
+    );
+    expect(() => portfolioOnly.allocationTargets.getAll()).toThrow(
+      "Addon 'test-addon' is not allowed to call allocation-targets.getAll",
+    );
+    expect(listAllocationTargets).not.toHaveBeenCalled();
+    expect(getAllocationTargetDrift).not.toHaveBeenCalled();
+  });
+
+  it("registers a read-only, high-risk allocation-targets permission category", () => {
+    const category = getPermissionCategory("allocation-targets");
+    expect(category?.riskLevel).toBe("high");
+    expect(category?.functions).toEqual(["getAll", "getDrift"]);
+    expect(isBaselineCategory("allocation-targets")).toBe(false);
   });
 });

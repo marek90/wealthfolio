@@ -67,7 +67,8 @@ pub struct ServiceContext {
     pub allocation_target_service:
         Arc<dyn portfolio::allocation_targets::AllocationTargetServiceTrait>,
     pub drift_service: Arc<dyn portfolio::allocation_targets::DriftServiceTrait>,
-    pub rebalance_service: Arc<dyn portfolio::allocation_targets::RebalanceServiceTrait>,
+    pub allocation_worksheet_service:
+        Arc<dyn portfolio::allocation_targets::AllocationWorksheetServiceTrait>,
     pub valuation_service: Arc<dyn portfolio::valuation::ValuationServiceTrait>,
     pub portfolio_coordinator: Arc<portfolio::coordinator::PortfolioCoordinator>,
     pub net_worth_service: Arc<dyn portfolio::net_worth::NetWorthServiceTrait>,
@@ -79,6 +80,8 @@ pub struct ServiceContext {
     pub ai_provider_service: Arc<dyn AiProviderServiceTrait>,
     pub ai_chat_service: Arc<ChatService<TauriAiEnvironment>>,
     pub agent_environment: Arc<dyn wealthfolio_agent_tools::AgentEnvironment>,
+    /// Lets the agent environment start portfolio jobs; set on install.
+    pub portfolio_job_binding: super::ai_environment::PortfolioJobBinding,
     pub mcp_audit_repository: Arc<McpAuditRepository>,
     pub pat_repository: Arc<PatRepository>,
     pub addon_service: Arc<AddonService>,
@@ -93,8 +96,10 @@ pub struct ServiceContext {
     pub categorization_rules_service: Arc<CategorizationRulesService>,
     pub events_service: Arc<EventsService>,
     pub budget_service: Arc<BudgetService>,
+    pub category_merge_service: Arc<wealthfolio_spending::category_merge::CategoryMergeService>,
     pub spending_analytics_service: Arc<AnalyticsService>,
     pub spending_insight_service: Arc<InsightService>,
+    pub data_export_service: Arc<wealthfolio_core::exports::DataExportService>,
 }
 
 impl ServiceContext {
@@ -144,6 +149,12 @@ impl ServiceContext {
 
     pub fn events_service(&self) -> Arc<EventsService> {
         Arc::clone(&self.events_service)
+    }
+
+    pub fn category_merge_service(
+        &self,
+    ) -> Arc<wealthfolio_spending::category_merge::CategoryMergeService> {
+        Arc::clone(&self.category_merge_service)
     }
 
     pub fn budget_service(&self) -> Arc<BudgetService> {
@@ -220,10 +231,10 @@ impl ServiceContext {
         Arc::clone(&self.drift_service)
     }
 
-    pub fn rebalance_service(
+    pub fn allocation_worksheet_service(
         &self,
-    ) -> Arc<dyn portfolio::allocation_targets::RebalanceServiceTrait> {
-        Arc::clone(&self.rebalance_service)
+    ) -> Arc<dyn portfolio::allocation_targets::AllocationWorksheetServiceTrait> {
+        Arc::clone(&self.allocation_worksheet_service)
     }
 
     pub fn valuation_service(&self) -> Arc<dyn portfolio::valuation::ValuationServiceTrait> {
@@ -276,6 +287,10 @@ impl ServiceContext {
 
     pub fn pat_repository(&self) -> Arc<PatRepository> {
         Arc::clone(&self.pat_repository)
+    }
+
+    pub fn data_export_service(&self) -> Arc<wealthfolio_core::exports::DataExportService> {
+        Arc::clone(&self.data_export_service)
     }
 
     pub fn portfolio_service(&self) -> Arc<dyn portfolios::PortfolioServiceTrait> {

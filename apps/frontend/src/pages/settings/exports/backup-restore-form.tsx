@@ -4,7 +4,7 @@ import { getDatabaseBackupDownloadUrl, isWeb, openDatabaseBackupFolder } from "@
 import { usePlatform } from "@/hooks/use-platform";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useDateFormatting } from "@wealthfolio/ui";
+import { useDateFormatting, buttonVariants, useLocalizationSettings } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Card, CardContent, CardHeader } from "@wealthfolio/ui/components/ui/card";
@@ -41,7 +41,8 @@ interface SelectedBackup {
 }
 
 export function BackupRestoreForm() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
+  const localization = useLocalizationSettings();
   const formatting = useDateFormatting();
   const { platform } = usePlatform();
   const [folderError, setFolderError] = useState<BackupFailure | null>(null);
@@ -59,7 +60,7 @@ export function BackupRestoreForm() {
     return !Number.isNaN(date.getTime()) && (!newest || date > newest) ? date : newest;
   }, null);
   return (
-    <Card className="overflow-hidden rounded-2xl shadow-none">
+    <Card className="overflow-hidden">
       <CardHeader className="space-y-4 p-5 sm:p-6">
         <BackupCardHeader
           icon={<DatabaseIcon weight="duotone" aria-hidden />}
@@ -100,7 +101,7 @@ export function BackupRestoreForm() {
           action={
             <Button
               size="sm"
-              className="pointer-coarse:h-11 aria-busy:opacity-100"
+              className="aria-busy:opacity-100 pointer-coarse:h-11"
               disabled={busy}
               aria-busy={create.isPending}
               onClick={() => create.mutate()}
@@ -203,7 +204,7 @@ export function BackupRestoreForm() {
                     </>,
                   ]}
                   details={[
-                    formatBackupSize(backup.sizeBytes, i18n.language),
+                    formatBackupSize(backup.sizeBytes, localization.locale),
                     t(`settings:backup_reason_${backup.reason}`),
                   ]}
                   actions={
@@ -276,8 +277,14 @@ export function BackupRestoreForm() {
         pending={remove.isPending}
         pendingLabel={t("settings:backup_deleting")}
         onCancel={() => setDeleting(null)}
-        onConfirm={() => {
-          if (deleting) remove.mutate(deleting.filename, { onSettled: () => setDeleting(null) });
+        onConfirm={async () => {
+          if (!deleting) return;
+          try {
+            await remove.mutateAsync(deleting.filename);
+          } catch {
+            // The mutation reports the error; the dialog closes either way.
+          }
+          setDeleting(null);
         }}
       />
       {isWeb && (
@@ -289,9 +296,9 @@ export function BackupRestoreForm() {
         >
           <DialogContent
             className="sm:max-w-md"
-            mobileClassName="h-auto max-h-[85dvh] overflow-y-auto"
+            mobileClassName="h-auto [--overlay-max-height:85dvh] overflow-y-auto"
           >
-            <DialogHeader className="text-left">
+            <DialogHeader className="text-start">
               <DialogTitle>{t("settings:backup_original_advanced")}</DialogTitle>
               <DialogDescription>{t("settings:backup_original_warning")}</DialogDescription>
             </DialogHeader>
@@ -300,15 +307,14 @@ export function BackupRestoreForm() {
                 {t("common:cancel")}
               </Button>
               {original && (
-                <Button asChild>
-                  <a
-                    href={getDatabaseBackupDownloadUrl(original.filename)}
-                    onClick={() => setOriginal(null)}
-                  >
-                    <Icons.Download aria-hidden />
-                    {t("settings:backup_original_save")}
-                  </a>
-                </Button>
+                <a
+                  href={getDatabaseBackupDownloadUrl(original.filename)}
+                  onClick={() => setOriginal(null)}
+                  className={buttonVariants()}
+                >
+                  <Icons.Download aria-hidden />
+                  {t("settings:backup_original_save")}
+                </a>
               )}
             </DialogFooter>
           </DialogContent>

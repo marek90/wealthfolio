@@ -944,10 +944,44 @@ mod test_helpers {
     pub(crate) fn create_pool(db_path: &str) -> Result<Arc<DbPool>> {
         DbAccess::plaintext(db_path).create_pool()
     }
+
+    /// Temporary directory for a database opened through a pool.
+    ///
+    /// r2d2 opens connections on its own threads, and a test can end while one
+    /// is still opening. If SQLite's open lands after `TempDir` has unlinked
+    /// the database, it creates the file again, removing the directory fails
+    /// because it is not empty, and `TempDir` ignores the error. Removing it
+    /// again works: once the directory is gone, a late open cannot create the
+    /// file. Windows can't remove a database that is still open, so there the
+    /// directory stays behind, as with `TempDir`.
+    pub(crate) struct TestDir(PathBuf);
+
+    impl TestDir {
+        pub(crate) fn new() -> Self {
+            Self(tempfile::tempdir().expect("create temp dir").keep())
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            for _ in 0..10 {
+                match fs::remove_dir_all(&self.0) {
+                    Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => return,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
-pub(crate) use test_helpers::{create_pool, init, run_migrations};
+pub(crate) use test_helpers::{create_pool, init, run_migrations, TestDir};
 
 pub fn get_db_path(input: &str) -> String {
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -983,6 +1017,52 @@ mod migration_tests {
     use super::*;
     use diesel::prelude::*;
     use diesel::sql_types::BigInt;
+
+    #[test]
+    fn contribution_limit_settings_migrate_and_revert_together() {
+        let conn = RusqliteConnection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contribution_limits (id TEXT PRIMARY KEY, limit_amount REAL);
+             INSERT INTO contribution_limits VALUES ('existing-limit', 7000);",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/2026-10-31-000001_contribution_limits_recurring/up.sql"
+        ))
+        .unwrap();
+        let settings: (f64, bool, Option<String>) = conn
+            .query_row(
+                "SELECT limit_amount, is_recurring, excluded_activity_ids FROM contribution_limits",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(settings, (7000.0, false, None));
+        conn.execute(
+            "UPDATE contribution_limits SET is_recurring = 1, excluded_activity_ids = ?1",
+            [r#"["rollover"]"#],
+        )
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/2026-10-31-000001_contribution_limits_recurring/down.sql"
+        ))
+        .unwrap();
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('contribution_limits')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns, ["id", "limit_amount"]);
+        assert_eq!(
+            conn.query_row("SELECT limit_amount FROM contribution_limits", [], |row| {
+                row.get::<_, f64>(0)
+            })
+            .unwrap(),
+            7000.0
+        );
+    }
 
     #[derive(QueryableByName)]
     struct CountRow {
@@ -1971,3 +2051,6 @@ mod migration_backup_tests;
 
 #[cfg(test)]
 mod account_delete_cleanup_tests;
+
+#[cfg(test)]
+mod signature_default_theme_tests;

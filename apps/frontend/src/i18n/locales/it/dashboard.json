@@ -45,7 +45,6 @@
   "actions": {
     "add_asset": "Aggiungi asset",
     "add_liability": "Aggiungi passività",
-    "record_transaction": "Registra transazione",
     "sync_broker_accounts": "Sincronizza conti broker",
     "sync_devices": "Sincronizza dispositivi",
     "update_prices": "Aggiorna prezzi",
@@ -65,8 +64,8 @@
     "more_goals_one": "+{{count}} altro obiettivo",
     "more_goals_many": "+{{count}} altri obiettivi",
     "more_goals_other": "+{{count}} altri obiettivi",
-    "time_no_deadline": "NESSUNA SCADENZA",
-    "time_due": "SCADENZA"
+    "time_no_deadline": "Nessuna scadenza",
+    "time_due": "Scadenza"
   },
   "tabs": {
     "investments": "Investimenti",

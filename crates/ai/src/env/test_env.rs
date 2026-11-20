@@ -14,20 +14,22 @@ use wealthfolio_core::{
     activities::{
         Activity, ActivityBulkMutationRequest, ActivityBulkMutationResult, ActivityDetails,
         ActivityImport, ActivitySearchResponse, ActivitySearchResponseMeta, ActivityServiceTrait,
-        ActivityUpdate, ActivityUpdatePreview, BrokerSyncProfileData, ImportAssetCandidate,
-        ImportAssetPreviewItem, ImportMappingData, ImportTemplateData, ImportTemplateScope,
-        InternalTransferPairRequest, InternalTransferPairResponse, NewActivity,
-        SaveBrokerSyncProfileRulesRequest, Sort, TransferMatchCandidate,
-        TransferMatchCandidateRequest, UnlinkedTransfers, UnlinkedTransfersRequest,
+        ActivityUpdate, ActivityUpdatePreview, BrokerSyncProfileData, ConvertToTransferRequest,
+        ImportAssetCandidate, ImportAssetPreviewItem, ImportMappingData, ImportTemplateData,
+        ImportTemplateScope, InternalTransferPairRequest, InternalTransferPairResponse,
+        LinkTransferPairsResult, NewActivity, SaveBrokerSyncProfileRulesRequest, Sort,
+        TransferMatchCandidate, TransferMatchCandidateRequest, TransferMatchReview,
+        TransferPairLinkRequest, UnlinkedTransfers, UnlinkedTransfersRequest,
     },
     assets::{
-        Asset, AssetMetadata, AssetResolutionInput, AssetResolutionOutput, AssetServiceTrait,
-        AssetSpec, EnsureAssetsResult, NewAsset, ProviderProfile, UpdateAssetProfile,
+        Asset, AssetMetadata, AssetProfileUpdatePreview, AssetResolutionInput,
+        AssetResolutionOutput, AssetServiceTrait, AssetSpec, EnsureAssetsResult, NewAsset,
+        ProviderProfile, UpdateAssetProfile,
     },
     errors::DatabaseError,
     goals::{
         AccountValuationMap, Goal, GoalFundingRule, GoalFundingRuleInput, GoalPlan,
-        GoalServiceTrait, NewGoal, PreparedRetirementSimulationInput, SaveGoalPlan,
+        GoalServiceTrait, GoalUpdate, NewGoal, PreparedRetirementSimulationInput, SaveGoalPlan,
     },
     health::{
         checks::{
@@ -53,8 +55,8 @@ use wealthfolio_core::{
     },
     quotes::{
         LatestQuotePair, LatestQuoteSnapshot, ProviderInfo, Quote, QuoteImport, QuoteServiceTrait,
-        QuoteSyncState, SparseAssetMarketFacts, SymbolSearchResult, SymbolSyncPlan, SyncMode,
-        SyncResult,
+        QuoteSyncState, ResolvedQuote, SparseAssetMarketFacts, SymbolSearchResult, SymbolSyncPlan,
+        SyncMode, SyncResult,
     },
     secrets::SecretStore,
     settings::{Settings, SettingsServiceTrait, SettingsUpdate},
@@ -180,6 +182,24 @@ impl AccountServiceTrait for MockAccountService {
 #[derive(Default)]
 pub struct MockAssetService {
     pub assets: Vec<Asset>,
+    /// Reported by profile previews as the asset that already has the listing.
+    pub conflicting_asset: Option<Asset>,
+    /// Every profile update, in order.
+    pub profile_updates: std::sync::Mutex<Vec<(String, UpdateAssetProfile)>>,
+    /// From the second `get_asset_by_id` on, report the asset with other
+    /// notes, as if the user edited it meanwhile.
+    pub edited_after_first_read: bool,
+    pub reads: std::sync::atomic::AtomicUsize,
+}
+
+impl MockAssetService {
+    fn find(&self, asset_id: &str) -> CoreResult<Asset> {
+        self.assets
+            .iter()
+            .find(|asset| asset.id == asset_id)
+            .cloned()
+            .ok_or_else(|| CoreError::Database(DatabaseError::NotFound(asset_id.to_string())))
+    }
 }
 
 #[async_trait]
@@ -189,11 +209,13 @@ impl AssetServiceTrait for MockAssetService {
     }
 
     fn get_asset_by_id(&self, asset_id: &str) -> CoreResult<Asset> {
-        self.assets
-            .iter()
-            .find(|asset| asset.id == asset_id)
-            .cloned()
-            .ok_or_else(|| CoreError::Database(DatabaseError::NotFound(asset_id.to_string())))
+        let mut asset = self.find(asset_id)?;
+        let reads = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.edited_after_first_read && reads > 0 {
+            // A profile edit; storage leaves `updated_at` as it was.
+            asset.notes = Some("edited in the app".to_string());
+        }
+        Ok(asset)
     }
 
     async fn delete_asset(&self, _asset_id: &str) -> CoreResult<()> {
@@ -202,10 +224,39 @@ impl AssetServiceTrait for MockAssetService {
 
     async fn update_asset_profile(
         &self,
-        _asset_id: &str,
-        _payload: UpdateAssetProfile,
+        asset_id: &str,
+        payload: UpdateAssetProfile,
     ) -> CoreResult<Asset> {
-        unimplemented!("MockAssetService::update_asset_profile")
+        let asset = self.find(asset_id)?;
+        self.profile_updates
+            .lock()
+            .unwrap()
+            .push((asset_id.to_string(), payload.clone()));
+        Ok(Asset {
+            name: payload.name,
+            display_code: payload.display_code,
+            notes: Some(payload.notes),
+            quote_mode: payload.quote_mode.unwrap_or(asset.quote_mode),
+            quote_ccy: payload.quote_ccy.unwrap_or(asset.quote_ccy.clone()),
+            instrument_symbol: payload.instrument_symbol,
+            instrument_exchange_mic: payload
+                .instrument_exchange_mic
+                .unwrap_or_else(|| asset.instrument_exchange_mic.clone()),
+            provider_config: payload.provider_config,
+            ..asset
+        })
+    }
+
+    fn preview_asset_profile_update(
+        &self,
+        asset_id: &str,
+        payload: UpdateAssetProfile,
+    ) -> CoreResult<AssetProfileUpdatePreview> {
+        self.find(asset_id)?;
+        Ok(AssetProfileUpdatePreview {
+            profile: payload,
+            conflicting_asset: self.conflicting_asset.clone(),
+        })
     }
 
     async fn create_asset(&self, _new_asset: NewAsset) -> CoreResult<Asset> {
@@ -281,6 +332,28 @@ pub struct MockTaxonomyService {
 
 #[async_trait]
 impl TaxonomyServiceTrait for MockTaxonomyService {
+    async fn update_category_reviewed(
+        &self,
+        _: wealthfolio_core::taxonomies::Category,
+        _: wealthfolio_core::taxonomies::Category,
+    ) -> wealthfolio_core::Result<wealthfolio_core::taxonomies::Category> {
+        unimplemented!("reviewed categories are not used by this fixture")
+    }
+    async fn delete_category_reviewed(
+        &self,
+        _: wealthfolio_core::taxonomies::Category,
+    ) -> wealthfolio_core::Result<usize> {
+        unimplemented!("reviewed categories are not used by this fixture")
+    }
+
+    fn get_category_references(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> wealthfolio_core::Result<wealthfolio_core::taxonomies::CategoryReferences> {
+        unimplemented!("category references are not used by this fixture")
+    }
+
     fn get_taxonomies(&self) -> CoreResult<Vec<Taxonomy>> {
         Ok(self
             .taxonomies
@@ -392,10 +465,38 @@ impl TaxonomyServiceTrait for MockTaxonomyService {
 #[derive(Default)]
 pub struct MockActivityService {
     pub activities: Vec<ActivityDetails>,
+    /// Balance, currency and scope `attach_cash_balances` fills in, by
+    /// activity id.
+    pub cash_balances: std::collections::HashMap<
+        String,
+        (
+            String,
+            String,
+            wealthfolio_core::activities::CashBalanceScope,
+        ),
+    >,
 }
 
 #[async_trait]
 impl ActivityServiceTrait for MockActivityService {
+    fn review_activity_split_effects(
+        &self,
+        _activity: ActivityUpdate,
+    ) -> wealthfolio_core::Result<Vec<wealthfolio_core::activities::ActivitySplitEffect>> {
+        Ok(Vec::new()) // This fixture has no persisted split allocations.
+    }
+
+    async fn attach_cash_balances(&self, response: &mut ActivitySearchResponse) -> CoreResult<()> {
+        for row in &mut response.data {
+            if let Some((balance, currency, scope)) = self.cash_balances.get(&row.id) {
+                row.cash_balance = Some(balance.clone());
+                row.cash_balance_currency = Some(currency.clone());
+                row.cash_balance_scope = Some(*scope);
+            }
+        }
+        Ok(())
+    }
+
     fn get_activity(&self, _activity_id: &str) -> CoreResult<Activity> {
         unimplemented!("MockActivityService::get_activity")
     }
@@ -460,6 +561,10 @@ impl ActivityServiceTrait for MockActivityService {
         Ok(UnlinkedTransfers::default())
     }
 
+    async fn review_transfer_matches(&self) -> CoreResult<TransferMatchReview> {
+        Ok(TransferMatchReview::default())
+    }
+
     fn get_first_activity_date(
         &self,
         _account_ids: Option<&[String]>,
@@ -512,12 +617,26 @@ impl ActivityServiceTrait for MockActivityService {
         unimplemented!("MockActivityService::save_internal_transfer_pair")
     }
 
+    async fn convert_to_internal_transfer(
+        &self,
+        _request: ConvertToTransferRequest,
+    ) -> CoreResult<InternalTransferPairResponse> {
+        unimplemented!("MockActivityService::convert_to_internal_transfer")
+    }
+
     async fn link_transfer_activities(
         &self,
         _activity_a_id: String,
         _activity_b_id: String,
     ) -> CoreResult<(Activity, Activity)> {
         unimplemented!("MockActivityService::link_transfer_activities")
+    }
+
+    async fn link_transfer_pairs(
+        &self,
+        _pairs: Vec<TransferPairLinkRequest>,
+    ) -> CoreResult<LinkTransferPairsResult> {
+        unimplemented!("MockActivityService::link_transfer_pairs")
     }
 
     async fn unlink_transfer_activities(
@@ -674,10 +793,40 @@ impl ActivityServiceTrait for MockActivityService {
 #[derive(Default)]
 pub struct MockHoldingsService {
     pub holdings: Vec<Holding>,
+    /// Accounts the asset holdings read reports as incomplete.
+    pub incomplete_account_ids: Vec<String>,
 }
 
 #[async_trait]
 impl HoldingsServiceTrait for MockHoldingsService {
+    async fn get_asset_holdings_scope(
+        &self,
+        account_ids: &[String],
+        asset_id: &str,
+        _base_currency: &str,
+    ) -> CoreResult<wealthfolio_core::holdings::HoldingsScope> {
+        Ok(wealthfolio_core::holdings::HoldingsScope {
+            holdings: self
+                .holdings
+                .iter()
+                .filter(|h| account_ids.contains(&h.account_id))
+                .filter(|h| h.instrument.as_ref().is_some_and(|i| i.id == asset_id))
+                .cloned()
+                .collect(),
+            incomplete_accounts: self
+                .incomplete_account_ids
+                .iter()
+                .map(
+                    |account_id| wealthfolio_core::holdings::IncompleteHoldingsAccount {
+                        account_id: account_id.clone(),
+                        status: "unavailable",
+                        reason_code: "PROJECTION_UNAVAILABLE",
+                    },
+                )
+                .collect(),
+        })
+    }
+
     async fn get_asset_lot_view(
         &self,
         _asset_id: &str,
@@ -803,7 +952,7 @@ impl GoalServiceTrait for MockGoalService {
         unimplemented!("MockGoalService::create_goal")
     }
 
-    async fn update_goal(&self, _goal: Goal) -> CoreResult<Goal> {
+    async fn update_goal(&self, _goal: GoalUpdate) -> CoreResult<Goal> {
         unimplemented!("MockGoalService::update_goal")
     }
 
@@ -835,11 +984,15 @@ impl GoalServiceTrait for MockGoalService {
         unimplemented!("MockGoalService::delete_goal_plan")
     }
 
-    async fn refresh_goal_summary(
-        &self,
-        _goal_id: &str,
-        _valuations: &AccountValuationMap,
-    ) -> CoreResult<Goal> {
+    async fn current_valuation_map(&self) -> CoreResult<AccountValuationMap> {
+        unimplemented!("MockGoalService::current_valuation_map")
+    }
+
+    async fn refresh_all_goal_summaries(&self) -> CoreResult<Vec<Goal>> {
+        unimplemented!("MockGoalService::refresh_all_goal_summaries")
+    }
+
+    async fn refresh_goal_summary(&self, _goal_id: &str) -> CoreResult<Goal> {
         unimplemented!("MockGoalService::refresh_goal_summary")
     }
 
@@ -892,10 +1045,6 @@ impl SettingsServiceTrait for MockSettingsService {
 
     fn get_base_currency(&self) -> CoreResult<Option<String>> {
         Ok(Some("USD".to_string()))
-    }
-
-    async fn update_base_currency(&self, _new_base_currency: &str) -> CoreResult<()> {
-        Ok(())
     }
 
     fn is_auto_update_check_enabled(&self) -> CoreResult<bool> {
@@ -1088,6 +1237,12 @@ impl crate::types::ChatRepositoryTrait for MockChatRepository {
 #[derive(Default)]
 pub struct MockQuoteService {
     pub search_results: RwLock<Vec<SymbolSearchResult>>,
+    pub providers: Vec<ProviderInfo>,
+    /// What `resolve_symbol_quote` answers; every call is counted.
+    pub resolved_quote: ResolvedQuote,
+    pub resolve_calls: std::sync::atomic::AtomicUsize,
+    /// Assets passed to `resolve_asset_quote`.
+    pub resolved_assets: std::sync::Mutex<Vec<Asset>>,
 }
 
 #[async_trait]
@@ -1306,6 +1461,36 @@ impl QuoteServiceTrait for MockQuoteService {
     }
 
     async fn get_providers_info(&self) -> CoreResult<Vec<ProviderInfo>> {
+        Ok(self.providers.clone())
+    }
+
+    async fn resolve_symbol_quote(
+        &self,
+        _symbol: &str,
+        _exchange_mic: Option<&str>,
+        _instrument_type: Option<&wealthfolio_core::assets::InstrumentType>,
+        _quote_ccy: Option<&str>,
+        _preferred_provider: Option<&str>,
+        _provider_symbol: Option<&str>,
+    ) -> CoreResult<ResolvedQuote> {
+        self.resolve_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.resolved_quote.clone())
+    }
+
+    async fn resolve_asset_quote(&self, asset: &Asset) -> CoreResult<ResolvedQuote> {
+        self.resolved_assets.lock().unwrap().push(asset.clone());
+        self.resolve_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.resolved_quote.clone())
+    }
+
+    fn get_stored_quotes(
+        &self,
+        _asset_id: &str,
+        _start: Option<NaiveDate>,
+        _end: Option<NaiveDate>,
+    ) -> CoreResult<Vec<Quote>> {
         Ok(Vec::new())
     }
 
@@ -1579,12 +1764,45 @@ pub struct MockCashActivityService {
 
 #[async_trait]
 impl CashActivityServiceTrait for MockCashActivityService {
+    async fn set_event_reviewed(
+        &self,
+        _: &str,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> anyhow::Result<()> {
+        unimplemented!("reviewed tags")
+    }
+
+    async fn validate_splits(
+        &self,
+        _: &str,
+        _: &[wealthfolio_spending::activity_splits::NewActivitySplit],
+    ) -> anyhow::Result<()> {
+        unimplemented!("reviewed splits")
+    }
+    async fn replace_splits_reviewed(
+        &self,
+        _: wealthfolio_spending::activity_splits::SplitReviewState,
+        _: Vec<wealthfolio_spending::activity_splits::NewActivitySplit>,
+    ) -> anyhow::Result<Vec<wealthfolio_spending::activity_splits::ActivitySplit>> {
+        unimplemented!("reviewed splits")
+    }
+
+    async fn context(
+        &self,
+    ) -> anyhow::Result<wealthfolio_spending::cash_activities::SpendingContext> {
+        Ok(wealthfolio_spending::cash_activities::SpendingContext::default())
+    }
     async fn bulk_assign_categories(
         &self,
         _: &[wealthfolio_spending::activity_assignments::BulkCategoryAssignment],
     ) -> anyhow::Result<Vec<wealthfolio_spending::activity_assignments::ActivityTaxonomyAssignment>>
     {
         anyhow::bail!("Category commits are not supported by assistant fixtures")
+    }
+
+    async fn spending_account_ids(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     async fn search(
@@ -1624,6 +1842,41 @@ pub struct MockCategorizationRulesService {
 
 #[async_trait]
 impl CategorizationRulesServiceTrait for MockCategorizationRulesService {
+    async fn update_reviewed(
+        &self,
+        _: wealthfolio_spending::categorization_rules::CategorizationRule,
+        _: wealthfolio_spending::categorization_rules::NewCategorizationRule,
+    ) -> anyhow::Result<wealthfolio_spending::categorization_rules::CategorizationRule> {
+        unimplemented!("reviewed rules")
+    }
+    async fn delete_reviewed(
+        &self,
+        _: wealthfolio_spending::categorization_rules::CategorizationRule,
+    ) -> anyhow::Result<()> {
+        unimplemented!("reviewed rules")
+    }
+    async fn list_presets(
+        &self,
+    ) -> anyhow::Result<Vec<wealthfolio_spending::categorization_rules::presets::RulePresetSummary>>
+    {
+        unimplemented!("presets")
+    }
+    async fn import_preset(
+        &self,
+        _: &str,
+        _: &std::collections::HashMap<String, (String, String)>,
+    ) -> anyhow::Result<wealthfolio_spending::categorization_rules::presets::ImportPresetResult>
+    {
+        unimplemented!("presets")
+    }
+    async fn remove_preset(
+        &self,
+        _: &str,
+    ) -> anyhow::Result<wealthfolio_spending::categorization_rules::presets::RemovePresetResult>
+    {
+        unimplemented!("presets")
+    }
+
     async fn list(
         &self,
     ) -> anyhow::Result<Vec<wealthfolio_spending::categorization_rules::CategorizationRule>> {
@@ -1635,6 +1888,10 @@ impl CategorizationRulesServiceTrait for MockCategorizationRulesService {
         _new_rule: wealthfolio_spending::categorization_rules::NewCategorizationRule,
     ) -> anyhow::Result<wealthfolio_spending::categorization_rules::CategorizationRule> {
         unimplemented!("MockCategorizationRulesService::create")
+    }
+
+    async fn rerun_all(&self, _: &[String], _: bool) -> anyhow::Result<usize> {
+        unimplemented!("MockCategorizationRulesService::rerun_all")
     }
 }
 
@@ -1674,7 +1931,24 @@ impl MockEnvironment {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentEnvironment for MockEnvironment {
+    fn budget_service(&self) -> Arc<dyn wealthfolio_spending::budget::BudgetServiceTrait> {
+        unimplemented!("Spending service not mocked for assistant tests and evals")
+    }
+    fn spending_events_service(&self) -> Arc<dyn wealthfolio_spending::events::EventsServiceTrait> {
+        unimplemented!("Spending service not mocked for assistant tests and evals")
+    }
+    fn spending_analytics_service(
+        &self,
+    ) -> Arc<dyn wealthfolio_spending::analytics::AnalyticsServiceTrait> {
+        unimplemented!("Spending service not mocked for assistant tests and evals")
+    }
+    fn spending_insight_service(
+        &self,
+    ) -> Arc<dyn wealthfolio_spending::insight::InsightServiceTrait> {
+        unimplemented!("Spending service not mocked for assistant tests and evals")
+    }
     fn base_currency(&self) -> String {
         self.base_currency.clone()
     }
@@ -1754,6 +2028,10 @@ impl AgentEnvironment for MockEnvironment {
     fn categorization_rules_service(&self) -> Arc<dyn CategorizationRulesServiceTrait> {
         self.categorization_rules_service.clone()
     }
+
+    async fn run_health_checks(&self) -> CoreResult<HealthStatus> {
+        self.health_service.run_checks(&self.base_currency).await
+    }
 }
 
 impl AiEnvironment for MockEnvironment {
@@ -1775,12 +2053,21 @@ impl AiEnvironment for MockEnvironment {
 #[derive(Default)]
 pub struct MockHealthService {
     pub cached_status: Option<HealthStatus>,
+    /// How many times `run_checks` ran. Each run replaces the cached status,
+    /// as the real service does.
+    pub runs: std::sync::atomic::AtomicUsize,
+    pub last_run: std::sync::Mutex<Option<HealthStatus>>,
 }
 
 #[async_trait::async_trait]
 impl HealthServiceTrait for MockHealthService {
     async fn run_checks(&self, _base_currency: &str) -> CoreResult<HealthStatus> {
-        Ok(HealthStatus::healthy())
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Lets a concurrent refresh start before this run caches its status.
+        tokio::task::yield_now().await;
+        let status = HealthStatus::healthy();
+        *self.last_run.lock().expect("mock lock") = Some(status.clone());
+        Ok(status)
     }
 
     async fn run_checks_with_data(
@@ -1822,7 +2109,8 @@ impl HealthServiceTrait for MockHealthService {
     }
 
     async fn get_cached_status(&self) -> Option<HealthStatus> {
-        self.cached_status.clone()
+        let last_run = self.last_run.lock().expect("mock lock").clone();
+        last_run.or_else(|| self.cached_status.clone())
     }
 
     async fn dismiss_issue(&self, _issue_id: &str, _data_hash: &str) -> CoreResult<()> {
@@ -1907,7 +2195,7 @@ impl wealthfolio_core::portfolio::net_worth::NetWorthServiceTrait for EmptyNetWo
     {
         Ok(wealthfolio_core::portfolio::net_worth::NetWorthResponse::empty(date, "USD".into()))
     }
-    fn get_net_worth_history(
+    async fn get_net_worth_history(
         &self,
         _: chrono::NaiveDate,
         _: chrono::NaiveDate,
@@ -1920,6 +2208,21 @@ impl wealthfolio_core::portfolio::net_worth::NetWorthServiceTrait for EmptyNetWo
 struct EmptyContributionLimitService;
 #[async_trait::async_trait]
 impl wealthfolio_core::limits::ContributionLimitServiceTrait for EmptyContributionLimitService {
+    fn get_contribution_limit_details(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::limits::ContributionLimitDetails> {
+        unimplemented!("empty fixture")
+    }
+    async fn set_contribution_activity_excluded(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> wealthfolio_core::errors::Result<()> {
+        unimplemented!("read-only fixture")
+    }
     fn get_contribution_limits(
         &self,
     ) -> wealthfolio_core::errors::Result<Vec<wealthfolio_core::limits::ContributionLimit>> {

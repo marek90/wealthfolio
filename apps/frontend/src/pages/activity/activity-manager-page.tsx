@@ -1,4 +1,5 @@
-import { getAccounts } from "@/adapters";
+import { cn } from "@/lib/utils";
+import { getAccounts, getAssetHoldingsScope } from "@/adapters";
 import { ExternalLink } from "@/components/external-link";
 import { useIsMobileViewport } from "@/hooks/use-platform";
 import { useAssetProfile } from "@/pages/asset/hooks/use-asset-profile";
@@ -22,10 +23,13 @@ import {
   Page,
   PageContent,
   PageHeader,
+  Spinner,
+  buttonVariants,
 } from "@wealthfolio/ui";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useBackNavigation } from "@/pages/layouts/mobile-stack/use-mobile-stack";
 import type { AccountSelectOption } from "./components/forms/fields";
 import {
   ActivityTypePicker,
@@ -48,7 +52,7 @@ const ActivityManagerPage = () => {
   const assetIdParam = searchParams.get("assetId");
   const redirectTo = searchParams.get("redirect-to");
 
-  const { data: accounts = [] } = useQuery<Account[], Error>({
+  const { data: accounts = [], isLoading: isAccountsLoading } = useQuery<Account[], Error>({
     queryKey: [QueryKeys.ACCOUNTS],
     queryFn: () => getAccounts(),
   });
@@ -56,13 +60,14 @@ const ActivityManagerPage = () => {
   // Non-archived accounts for filtering
   const activeAccounts = useMemo(() => accounts.filter((acc) => !acc.isArchived), [accounts]);
 
+  const goBack = useBackNavigation();
   const handleClose = useCallback(() => {
     if (redirectTo) {
       navigate(redirectTo);
       return;
     }
-    navigate(-1);
-  }, [navigate, redirectTo]);
+    goBack();
+  }, [goBack, navigate, redirectTo]);
 
   // Get the selected account if pre-selected
   const selectedAccount = useMemo(() => {
@@ -85,7 +90,73 @@ const ActivityManagerPage = () => {
   }, [selectedAccount]);
 
   // Fetch asset profile when assetId is provided (uses react-query cache)
-  const { data: assetProfile } = useAssetProfile(assetIdParam);
+  const { data: assetProfile, isLoading: isAssetProfileLoading } = useAssetProfile(assetIdParam);
+
+  const [selectedType, setSelectedType] = useState<PickerActivityType | undefined>(
+    mapActivityTypeToPicker(typeParam),
+  );
+  const [sellAccount, setSellAccount] = useState<{ assetId: string; accountId: string } | null>(
+    null,
+  );
+  const needsSellAccount = selectedType === "SELL" && !!assetIdParam && !accountParam;
+  const {
+    data: assetHoldingsScope,
+    isPending: isAssetHoldingsPending,
+    isFetching: isAssetHoldingsFetching,
+    isError: isAssetHoldingsError,
+  } = useQuery({
+    queryKey: [QueryKeys.ASSET_HOLDINGS, assetIdParam, "scope"],
+    queryFn: () => getAssetHoldingsScope(assetIdParam!),
+    enabled: needsSellAccount && sellAccount?.assetId !== assetIdParam,
+    staleTime: 0,
+  });
+  // An account still being recalculated may own the asset. Wait: the portfolio
+  // update's completion refreshes this query.
+  const isAssetHoldingsUpdating =
+    !isAssetHoldingsError &&
+    !!assetHoldingsScope?.incompleteAccounts.some((account) => account.status === "pending");
+
+  useEffect(() => {
+    if (
+      !needsSellAccount ||
+      isAccountsLoading ||
+      isAssetHoldingsPending ||
+      isAssetHoldingsFetching ||
+      isAssetHoldingsUpdating
+    )
+      return;
+    const owners =
+      isAssetHoldingsError ||
+      !assetHoldingsScope ||
+      assetHoldingsScope.incompleteAccounts.length > 0
+        ? []
+        : activeAccounts.filter(
+            (account) =>
+              accountSupportsActivityType(account, "SELL") &&
+              assetHoldingsScope.holdings.some(
+                (holding) => holding.accountId === account.id && holding.quantity > 0,
+              ),
+          );
+    // Resolve once per asset so background refreshes cannot replace a user choice.
+    setSellAccount((previous) =>
+      previous?.assetId === assetIdParam
+        ? previous
+        : { assetId: assetIdParam!, accountId: owners.length === 1 ? owners[0].id : "" },
+    );
+  }, [
+    needsSellAccount,
+    isAccountsLoading,
+    isAssetHoldingsPending,
+    isAssetHoldingsFetching,
+    isAssetHoldingsUpdating,
+    isAssetHoldingsError,
+    activeAccounts,
+    assetHoldingsScope,
+    assetIdParam,
+  ]);
+
+  const isResolvingSellAccount =
+    needsSellAccount && (sellAccount?.assetId !== assetIdParam || isAssetProfileLoading);
 
   // Build initial activity from URL params + cached asset data
   const initialActivity: Partial<ActivityDetails> = useMemo(() => {
@@ -97,6 +168,9 @@ const ActivityManagerPage = () => {
 
     if (accountParam) {
       activity.accountId = accountParam;
+    } else if (needsSellAccount) {
+      // An unresolved/ambiguous holding must not default to an unrelated account.
+      activity.accountId = sellAccount?.assetId === assetIdParam ? sellAccount.accountId : "";
     }
 
     if (assetIdParam) {
@@ -104,18 +178,28 @@ const ActivityManagerPage = () => {
     }
 
     if (assetProfile) {
-      activity.assetSymbol = assetProfile.displayCode ?? assetProfile.instrumentSymbol ?? undefined;
+      activity.assetSymbol =
+        (selectedType === "SELL" ? assetProfile.instrumentSymbol : assetProfile.displayCode) ??
+        assetProfile.displayCode ??
+        assetProfile.instrumentSymbol ??
+        undefined;
       activity.currency = assetProfile.quoteCcy;
       activity.exchangeMic = assetProfile.instrumentExchangeMic ?? undefined;
       activity.assetQuoteMode = assetProfile.quoteMode;
+      // A crypto asset's totals stay exact and its money fields take 8 decimals.
+      activity.instrumentType = assetProfile.instrumentType ?? undefined;
     }
 
     return activity;
-  }, [typeParam, accountParam, assetIdParam, assetProfile]);
-
-  const [selectedType, setSelectedType] = useState<PickerActivityType | undefined>(
-    mapActivityTypeToPicker(typeParam),
-  );
+  }, [
+    typeParam,
+    accountParam,
+    assetIdParam,
+    assetProfile,
+    needsSellAccount,
+    sellAccount,
+    selectedType,
+  ]);
 
   // Update selected type when URL param changes
   useEffect(() => {
@@ -132,6 +216,8 @@ const ActivityManagerPage = () => {
       value: account.id,
       label: account.name,
       currency: account.currency,
+      accountType: account.accountType,
+      group: account.group,
     }));
   }, [activeAccounts, selectedType]);
 
@@ -142,6 +228,20 @@ const ActivityManagerPage = () => {
     selectedType,
     onSuccess: handleClose,
   });
+
+  if (isResolvingSellAccount) {
+    return (
+      <Page>
+        <PageHeader heading={t("activity:add_activity")} onBack={handleClose} />
+        <PageContent>
+          <div className="flex items-center justify-center gap-2 p-6" role="status">
+            <Spinner />
+            {t("common:component.loading_holdings")}
+          </div>
+        </PageContent>
+      </Page>
+    );
+  }
 
   // For mobile, use the existing mobile form component
   if (isMobileViewport) {
@@ -181,15 +281,16 @@ const ActivityManagerPage = () => {
         }
         onBack={handleClose}
         actions={
-          <Button variant="ghost" size="sm" asChild>
-            <ExternalLink
-              href="https://wealthfolio.app/docs/concepts/activity-types"
-              className="flex items-center gap-1.5"
-            >
-              <Icons.HelpCircle className="h-4 w-4" />
-              {t("activity:learn_more")}
-            </ExternalLink>
-          </Button>
+          <ExternalLink
+            href="https://wealthfolio.app/docs/concepts/activity-types"
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "sm" }),
+              "flex items-center gap-1.5",
+            )}
+          >
+            <Icons.HelpCircle className="h-4 w-4" />
+            {t("activity:learn_more")}
+          </ExternalLink>
         }
       />
       <PageContent>
@@ -216,9 +317,9 @@ const ActivityManagerPage = () => {
                       variant="outline"
                       size="sm"
                       className="w-fit"
-                      onClick={() => navigate(`/account/${selectedAccount.id}`)}
+                      onClick={() => navigate(`/accounts/${selectedAccount.id}`)}
                     >
-                      <Icons.ExternalLink className="mr-2 h-3 w-3" />
+                      <Icons.ExternalLink className="me-2 h-3 w-3" />
                       {t("activity:manager.go_to_account")}
                     </Button>
                   </AlertDescription>

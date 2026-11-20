@@ -16,7 +16,8 @@ use wealthfolio_core::{
     accounts::{account_supports_portfolio_scope, AccountPurpose, AccountServiceTrait},
     health::HealthServiceTrait,
     portfolio::coordinator::{
-        run_periodic_update, AccountFailure, JobObserver, PortfolioJobRequest, RetryPolicy,
+        run_periodic_update, AccountFailure, JobObserver, PortfolioCoordinator,
+        PortfolioJobRequest, RetryPolicy,
     },
     quotes::{MarketSyncMode, SyncResult},
 };
@@ -79,8 +80,22 @@ pub struct PortfolioJobConfig {
 
 /// Enqueue a background portfolio job that will publish SSE events as it runs.
 pub fn enqueue_portfolio_job(state: Arc<AppState>, config: PortfolioJobConfig) {
+    spawn_portfolio_job(
+        state.portfolio_coordinator.clone(),
+        ServerJobObserver::new(&state),
+        config,
+    );
+}
+
+/// [`enqueue_portfolio_job`] from its parts, for callers built before
+/// `AppState` exists (the agent environment).
+pub fn spawn_portfolio_job(
+    coordinator: Arc<PortfolioCoordinator>,
+    observer: ServerJobObserver,
+    config: PortfolioJobConfig,
+) {
     tokio::spawn(async move {
-        if let Err(err) = process_portfolio_job(state, config).await {
+        if let Err(err) = run_portfolio_job(&coordinator, &observer, config).await {
             tracing::error!("Portfolio job failed: {}", err);
         }
     });
@@ -133,6 +148,7 @@ pub fn trigger_portfolio_recalc_with_asset_sync(state: Arc<AppState>, asset_ids:
 pub struct ServerJobObserver {
     event_bus: EventBus,
     health_service: Arc<dyn HealthServiceTrait + Send + Sync>,
+    goal_service: Arc<dyn wealthfolio_core::goals::GoalServiceTrait + Send + Sync>,
 }
 
 impl ServerJobObserver {
@@ -140,16 +156,19 @@ impl ServerJobObserver {
         Self {
             event_bus: state.event_bus.clone(),
             health_service: state.health_service.clone(),
+            goal_service: state.goal_service.clone(),
         }
     }
 
     pub fn with_parts(
         event_bus: EventBus,
         health_service: Arc<dyn HealthServiceTrait + Send + Sync>,
+        goal_service: Arc<dyn wealthfolio_core::goals::GoalServiceTrait + Send + Sync>,
     ) -> Self {
         Self {
             event_bus,
             health_service,
+            goal_service,
         }
     }
 
@@ -161,6 +180,7 @@ impl ServerJobObserver {
     }
 }
 
+#[async_trait::async_trait]
 impl JobObserver for ServerJobObserver {
     fn market_sync_started(&self) {
         self.event_bus.publish(ServerEvent::new(MARKET_SYNC_START));
@@ -206,11 +226,20 @@ impl JobObserver for ServerJobObserver {
             .publish(ServerEvent::with_payload(PORTFOLIO_UPDATE_ERROR, payload));
     }
 
-    fn update_completed(&self) {
+    async fn update_completed(&self) {
         // Freshness verdicts and stale-projection issues are cached.
         self.clear_health_cache();
         self.event_bus
             .publish(ServerEvent::new(PORTFOLIO_UPDATE_COMPLETE));
+        match self.goal_service.refresh_all_goal_summaries().await {
+            Ok(goals) => {
+                crate::api::goals::emit_goal_summaries_updated(&self.event_bus, &goals, false)
+            }
+            Err(error) => tracing::warn!(
+                "Goal summary batch refresh failed ({})",
+                wealthfolio_core::goals::summary_refresh_error_kind(&error)
+            ),
+        }
     }
 }
 
@@ -230,9 +259,16 @@ pub async fn process_portfolio_job(
     config: PortfolioJobConfig,
 ) -> ApiResult<()> {
     let observer = ServerJobObserver::new(&state);
-    let report = state
-        .portfolio_coordinator
-        .run_job_with_retry(config.into_request(), &observer, RetryPolicy::default())
+    run_portfolio_job(&state.portfolio_coordinator, &observer, config).await
+}
+
+async fn run_portfolio_job(
+    coordinator: &PortfolioCoordinator,
+    observer: &ServerJobObserver,
+    config: PortfolioJobConfig,
+) -> ApiResult<()> {
+    let report = coordinator
+        .run_job_with_retry(config.into_request(), observer, RetryPolicy::default())
         .await
         .map_err(|err| crate::error::ApiError::Anyhow(anyhow!(err.to_string())))?;
     if let Some(Err(message)) = &report.market_sync {

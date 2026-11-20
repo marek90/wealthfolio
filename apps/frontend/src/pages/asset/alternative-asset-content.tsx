@@ -4,17 +4,23 @@ import {
 } from "./alternative-assets/hooks/use-loan-actions";
 import HistoryChart from "@/components/history-chart-symbol";
 import { useLoanCalculation } from "./alternative-assets/hooks/use-loan-calculation";
+import { useLoanScheduleExport } from "./alternative-assets/hooks/use-loan-schedule-export";
 import { useAlternativeHoldings, useLinkedLiabilities } from "@/hooks/use-alternative-assets";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import type { AlternativeAssetHolding, Asset, DateRange, Quote, TimePeriod } from "@/lib/types";
 import { AlternativeAssetKind } from "@/lib/types";
 import {
   AmountDisplay,
-  EmptyPlaceholder,
   Icons,
   IntervalSelector,
   useDateFormatting,
   useNumberFormatting,
+  Spinner,
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
 } from "@wealthfolio/ui";
 import {
   AlertDialog,
@@ -29,6 +35,7 @@ import {
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@wealthfolio/ui/components/ui/card";
 import { Separator } from "@wealthfolio/ui/components/ui/separator";
+import { useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -42,7 +49,10 @@ import {
 } from "./alternative-assets";
 import { LoanHistory } from "./alternative-assets/components/loan-history";
 import { MortgageOverview, LoanOverview } from "./alternative-assets/components/loan-overview";
-import { useAlternativeAssetMutations } from "./alternative-assets/hooks/use-alternative-asset-mutations";
+import {
+  invalidateAlternativeAssetQueries,
+  useAlternativeAssetMutations,
+} from "./alternative-assets/hooks/use-alternative-asset-mutations";
 import { useQuoteMutations } from "./hooks/use-quote-mutations";
 import { LinkedLiabilitiesSection } from "./linked-liabilities-card";
 import type { LoanSetup } from "@/adapters/shared/alternative-assets";
@@ -95,11 +105,12 @@ export const AlternativeAssetContent: React.FC<AlternativeAssetContentProps> = (
     return allHoldings.find((h) => h.id === holding.linkedAssetId);
   }, [holding.linkedAssetId, allHoldings]);
 
-  // Quote mutations for history grid
-  const { saveQuoteMutation, deleteQuoteMutation, invalidateQuoteQueries } = useQuoteMutations(
-    assetId,
-    { invalidateOnSuccess: false },
-  );
+  // Quote mutations for history grid. The grid refreshes once all its edits
+  // are saved, as any other change to an alternative asset does.
+  const queryClient = useQueryClient();
+  const { saveQuoteMutation, deleteQuoteMutation } = useQuoteMutations(assetId, {
+    invalidateOnSuccess: false,
+  });
 
   // Loan-specific computations (used in history tab and handlers)
   const metadata = useMemo(() => holding.metadata || {}, [holding.metadata]);
@@ -218,7 +229,7 @@ export const AlternativeAssetContent: React.FC<AlternativeAssetContentProps> = (
           /* Main grid: Chart on left, Details on right */
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             {/* Left: Value history chart with value/gain/equity in header */}
-            <Card className="col-span-1 md:col-span-2">
+            <Card className="col-span-1 overflow-hidden md:col-span-2">
               <CardHeader className="flex flex-row items-center justify-between space-y-0">
                 <CardTitle className="text-md">
                   <div>
@@ -230,9 +241,7 @@ export const AlternativeAssetContent: React.FC<AlternativeAssetContentProps> = (
                       />
                     </p>
                     {gainAmount !== null && gainPercent !== null && (
-                      <p
-                        className={`text-sm ${gainAmount >= 0 ? "text-success" : "text-destructive"}`}
-                      >
+                      <p className={`text-sm ${gainAmount >= 0 ? "text-gain" : "text-loss"}`}>
                         <AmountDisplay
                           value={gainAmount}
                           currency={holding.currency}
@@ -255,12 +264,18 @@ export const AlternativeAssetContent: React.FC<AlternativeAssetContentProps> = (
                     />
                   </>
                 ) : (
-                  <div className="flex h-[200px] items-center justify-center">
-                    <EmptyPlaceholder
-                      icon={<Icons.Activity className="text-muted-foreground h-8 w-8" />}
-                      title={t("asset:altContent.no_valuation_data")}
-                      description={t("asset:altContent.no_valuation_description")}
-                    />
+                  <div className="flex h-50 items-center justify-center">
+                    <Empty>
+                      <EmptyHeader>
+                        <EmptyMedia variant="icon">
+                          {<Icons.Activity className="text-muted-foreground size-8" />}
+                        </EmptyMedia>
+                        <EmptyTitle>{t("asset:altContent.no_valuation_data")}</EmptyTitle>
+                        <EmptyDescription>
+                          {t("asset:altContent.no_valuation_description")}
+                        </EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
                   </div>
                 )}
               </CardContent>
@@ -351,7 +366,7 @@ export const AlternativeAssetContent: React.FC<AlternativeAssetContentProps> = (
         currency={holding.currency}
         onSaveQuote={(quote: Quote) => saveQuoteMutation.mutateAsync(quote)}
         onDeleteQuote={(id: string) => deleteQuoteMutation.mutateAsync(id)}
-        onPersistComplete={invalidateQuoteQueries}
+        onPersistComplete={() => invalidateAlternativeAssetQueries(queryClient)}
       />
     </div>
   );
@@ -516,7 +531,7 @@ const AlternativeAssetDetailCard: React.FC<AlternativeAssetDetailCardProps> = ({
             </div>
             <div>
               <div
-                className={`text-xl font-extrabold ${netEquity >= 0 ? "text-success" : "text-destructive"}`}
+                className={`text-xl font-extrabold ${netEquity >= 0 ? "text-gain" : "text-loss"}`}
               >
                 <AmountDisplay
                   value={netEquity}
@@ -524,7 +539,7 @@ const AlternativeAssetDetailCard: React.FC<AlternativeAssetDetailCardProps> = ({
                   isHidden={isBalanceHidden}
                 />
               </div>
-              <div className="text-muted-foreground text-right text-sm font-normal">
+              <div className="text-muted-foreground text-end text-sm font-normal">
                 {holding.currency}
               </div>
             </div>
@@ -581,7 +596,7 @@ const AlternativeAssetDetailCard: React.FC<AlternativeAssetDetailCardProps> = ({
             {detailRows.map((row, idx) => (
               <div key={idx} className="flex justify-between">
                 <span className="text-muted-foreground">{row.label}</span>
-                <span className="text-right font-medium">{row.value}</span>
+                <span className="text-end font-medium">{row.value}</span>
               </div>
             ))}
           </div>
@@ -707,6 +722,7 @@ export function useAlternativeAssetActions({
 }: AlternativeAssetActionsProps) {
   const { t } = useTranslation();
   const loan = useLoanActions(holding, quoteHistory);
+  const exportLoanSchedule = useLoanScheduleExport(holding, loan.calculation);
   // Modal state
   const [updateValuationOpen, setUpdateValuationOpen] = useState(false);
   const [editDetailsOpen, setEditDetailsOpen] = useState(false);
@@ -855,11 +871,11 @@ export function useAlternativeAssetActions({
             <AlertDialogAction
               onClick={handleDelete}
               disabled={deleteMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              variant="destructive"
             >
               {deleteMutation.isPending ? (
                 <>
-                  <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                  <Spinner className="me-2 h-4 w-4" />
                   {t("asset:altContent.deleting")}
                 </>
               ) : (
@@ -875,6 +891,7 @@ export function useAlternativeAssetActions({
   return {
     loanActions: loan.actions,
     loanAvailability: loan.availability,
+    exportLoanSchedule,
     openUpdateValuation: () =>
       holding?.kind.toLowerCase() === "liability"
         ? loan.actions.confirmBalance()

@@ -112,6 +112,26 @@ it("returns an expired instance session to login without another auth check", as
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
+it("applies the confirmed session to expiry reported as soon as the content renders", async () => {
+  fetchMock
+    .mockResolvedValueOnce(status())
+    .mockResolvedValueOnce(Response.json({ authenticated: true }));
+  // A mutation callback runs after this async commit but before its scheduled passive effects.
+  const observer = new MutationObserver(() => {
+    if (!screen.queryByText("Private portfolio")) return;
+    observer.disconnect();
+    notifyUnauthorized();
+  });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  try {
+    mount(undefined, <LoginPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Session expired");
+    expect(screen.getByTestId("login-password-input")).toBeInTheDocument();
+  } finally {
+    observer.disconnect();
+  }
+});
+
 it("keeps the login form intact when another request reports expiry", async () => {
   fetchMock
     .mockResolvedValueOnce(status())
@@ -243,4 +263,33 @@ it("retains profile authority and cached queries when a proxy requires navigatio
   expect(queries.getQueryData(["accounts"])).toBe("synthetic cached value");
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+it("localizes known server login messages without rewriting unknown diagnostics", async () => {
+  const { default: i18n } = await import("i18next");
+  const { default: zhAuth } = await import("@/i18n/locales/zh/auth.json");
+  i18n.addResourceBundle("zh", "auth", zhAuth, true, true);
+  await i18n.changeLanguage("zh");
+  try {
+    fetchMock
+      .mockResolvedValueOnce(status())
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    mount(undefined, <LoginPage />);
+    const input = await screen.findByTestId("login-password-input");
+    fireEvent.change(input, { target: { value: "synthetic-password" } });
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ code: 401, message: "Invalid password" }, { status: 401 }),
+    );
+    fireEvent.click(screen.getByTestId("login-submit-button"));
+    expect(await screen.findByText(zhAuth.context.invalidPassword)).toBeInTheDocument();
+    expect(screen.queryByText("Invalid password")).not.toBeInTheDocument();
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ code: 500, message: "Diagnostic code XYZ" }, { status: 500 }),
+    );
+    fireEvent.click(screen.getByTestId("login-submit-button"));
+    expect(await screen.findByText("Diagnostic code XYZ")).toBeInTheDocument();
+    expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  } finally {
+    await act(() => i18n.changeLanguage("en"));
+  }
 });

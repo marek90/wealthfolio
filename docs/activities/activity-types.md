@@ -26,10 +26,16 @@ again. Type normally determines direction; a SELL can be an outflow when its
 trade details prove charges exceed proceeds. Explicit zero remains zero.
 
 Writers can derive missing trade totals from quantity × unit price × asset
-multiplier, plus charges for BUY or minus charges for SELL. Import can convert a
-matching gross total to final; a conflicting total is preserved for review.
-Plain cash and income require an explicit amount. Standalone charges and
-recognized asset-income composites have their own missing-amount derivation.
+multiplier, rounded half away from zero to the activity currency's minor unit,
+plus charges for BUY or minus charges for SELL. Crypto trades keep the exact
+value, since exchanges settle past the cent; a non-zero value never rounds to
+zero; and a SELL whose rounding would flip proceeds into a debit, or back, keeps
+the exact value. A supplied total is stored as given: one within half a minor
+unit of the calculation is consistent with it and is not flagged. Import can
+convert a matching gross total to final by adding the charges to it; a
+conflicting total is preserved for review. Plain cash and income require an
+explicit amount. Standalone charges and recognized asset-income composites have
+their own missing-amount derivation; composites round their value the same way.
 
 All monetary inputs use activity currency. `fx_rate` converts activity currency
 to account currency. A positive supplied rate settles BUY/SELL cash in account
@@ -193,9 +199,11 @@ cash FX conversion within the same account is a narrow exception:
 - Account-level `net_contribution` and `net_contribution_base` do not change.
 - No external portfolio flow or TWR cash-flow event is created.
 
-This exception uses Wealthfolio's qualified FX-pair recognition. Same-account
-transfers or transfers that merely share a group identifier are not
-automatically contribution-neutral.
+The pair is recognized when its two cash legs are in the same account, in
+different currencies, linked by one group identifier, and both explicitly
+internal (`flow.is_external: false`). The transfer form, the transfer link and
+the import linker record pairs that way. Legs that merely share a group
+identifier, without that mark, are not contribution-neutral.
 
 #### TRANSFER_IN
 
@@ -317,6 +325,11 @@ described above.
 | `REFUND`  | No change        | Reversal of existing fee, not new capital   |
 | (default) | No change        | Internal adjustment                         |
 
+`metadata.flow.is_external` overrides the subtype: `true` adds the gross amount
+to net contribution as an external flow (for example a refund or reimbursement
+paid from outside the portfolio), and `false` keeps any credit internal, `BONUS`
+included.
+
 ---
 
 ### Fee & Tax Activities
@@ -384,7 +397,8 @@ with adjustment details
 
 - Option expiring worthless
 - Return of capital basis adjustment
-- Merger/spinoff compiler input
+- Conversion of one asset into another at cost (fund switch, share-class
+  conversion)
 - Corporate action adjustments
 
 **Note**: This is a flexible type for non-standard corrections. Specific
@@ -559,13 +573,45 @@ a ROC reclassification or a reinvested distribution matching those effects.
   performance and holdings income.
 - Rules: `docs/architecture/portfolio-engine-rules.md` R7.4.
 
+A **conversion** exchanges units of one asset for units of another in the same
+account and keeps their cost: a fund switch where the gain is deferred (Spain's
+_traspaso_), a share-class or series switch (Vanguard Investor to Admiral
+shares, or a mutual fund to its ETF class), a fund merger, a token migration.
+The activity picker calls it **Fund conversion** (Spanish: _Traspaso_). Record
+it as two ADJUSTMENT rows on the same day, sharing a `sourceGroupId`:
+`CONVERSION_OUT` with the asset and quantity that leave, `CONVERSION_IN` with
+the asset and quantity that arrive.
+
+- The arriving units take over the leaving units' lots: each keeps its cost and
+  acquisition date, and its units scale by quantity in ÷ quantity out. Nothing
+  is realized, and no cash or net contribution moves.
+- Both rows apply or neither does. A conversion is rejected when the account
+  holds fewer units than leave, the two assets trade in different currencies,
+  either row has a fee, or the rows are on different days or in different
+  accounts.
+- If the switch was a taxable sale, record a SELL and a BUY instead. Whether it
+  is taxed depends on the country and the instrument: in Spain, a _traspaso_
+  between investment funds defers the gain, a switch between ETFs does not. A
+  switch between brokers is a transfer, then a conversion in the receiving
+  account.
+- A _traspaso_ takes days between the units leaving and arriving; record it on
+  the day the new units arrive, when their number is known. Spanish tax takes
+  the oldest units first, so a FIFO account keeps lots that match the tax
+  record.
+- A statement that splits one switch into several same-day pieces is recorded as
+  one conversion per pair of assets: two funds into one is two conversions, one
+  fund into two is two partial conversions.
+- Rules: `docs/architecture/portfolio-engine-rules.md` R7.5.
+
 ### Adjustment Subtypes
 
-| Subtype                 | Description                                                 | Effect                                          |
-| ----------------------- | ----------------------------------------------------------- | ----------------------------------------------- |
-| `OPTION_EXPIRY`         | Option contract expired worthless                           | Removes `quantity` lots, no cash                |
-| `RETURN_OF_CAPITAL`     | Dividends already recorded that were a return of capital    | Cost basis and income down by `amount`, no cash |
-| `NOTIONAL_DISTRIBUTION` | Taxable distribution reinvested without new units (phantom) | Cost basis and income up by `amount`, no cash   |
+| Subtype                 | Description                                                    | Effect                                          |
+| ----------------------- | -------------------------------------------------------------- | ----------------------------------------------- |
+| `OPTION_EXPIRY`         | Option contract expired worthless                              | Removes `quantity` lots, no cash                |
+| `RETURN_OF_CAPITAL`     | Dividends already recorded that were a return of capital       | Cost basis and income down by `amount`, no cash |
+| `NOTIONAL_DISTRIBUTION` | Taxable distribution reinvested without new units (phantom)    | Cost basis and income up by `amount`, no cash   |
+| `CONVERSION_OUT`        | Units leaving in a conversion, paired with a `CONVERSION_IN`   | Removes `quantity` lots at cost, no cash        |
+| `CONVERSION_IN`         | Units arriving in a conversion, paired with a `CONVERSION_OUT` | Opens the leaving lots as this asset, no cash   |
 
 ---
 
@@ -588,12 +634,12 @@ Activities support a `metadata` JSON field for additional context:
 
 ### Key Metadata Fields
 
-| Field                  | Type    | Used By         | Description                                   |
-| ---------------------- | ------- | --------------- | --------------------------------------------- |
-| `flow.is_external`     | boolean | TRANSFER_IN/OUT | Marks transfer as crossing portfolio boundary |
-| `split_ratio`          | string  | SPLIT           | Human-readable split ratio (e.g., "2:1")      |
-| `source.broker`        | string  | All             | Original broker name                          |
-| `source.original_type` | string  | All             | Raw activity type from provider               |
+| Field                  | Type    | Used By                 | Description                                       |
+| ---------------------- | ------- | ----------------------- | ------------------------------------------------- |
+| `flow.is_external`     | boolean | TRANSFER_IN/OUT, CREDIT | Marks the flow as crossing the portfolio boundary |
+| `split_ratio`          | string  | SPLIT                   | Human-readable split ratio (e.g., "2:1")          |
+| `source.broker`        | string  | All                     | Original broker name                              |
+| `source.original_type` | string  | All                     | Raw activity type from provider                   |
 
 ---
 

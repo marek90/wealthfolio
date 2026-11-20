@@ -111,6 +111,7 @@ export * from "../shared/taxonomies";
 
 // Alternative Assets Commands
 export * from "../shared/alternative-assets";
+export * from "../shared/exports";
 
 // Asset Logo Commands
 export * from "../shared/asset-logos";
@@ -223,6 +224,7 @@ export {
   listAgentAccessTokens,
   createAgentAccessToken,
   deleteAgentAccessToken,
+  updateAgentAccessTokenScopes,
 } from "./agent-access";
 
 // AI Streaming (Tauri Channel-based implementation)
@@ -230,11 +232,13 @@ export { streamAiChat } from "./ai-streaming";
 
 // Event Listeners (Tauri listen() implementation)
 export {
+  listenBackButton,
   listenFileDropHover,
   listenFileDrop,
   listenFileDropCancelled,
   listenPortfolioUpdateStart,
   listenPortfolioUpdateComplete,
+  listenGoalSummariesUpdated,
   listenDatabaseRestored,
   listenDeviceSyncRestore,
   listenPortfolioUpdateError,

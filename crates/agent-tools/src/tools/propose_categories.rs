@@ -32,6 +32,7 @@ use crate::tools::categorization_context::{
     compute_categorization_state, CategorizationFilters, CategoryExample, Proposal,
     TaxonomySummary, UnproposedActivity, MAX_LIMIT,
 };
+use crate::tools::date_bounds::DATE_BOUND_DESCRIPTION;
 
 /// One AI-inferred category for a row, supplied by the chat agent on its second
 /// call to this tool. The agent reasons about the unproposed rows in chat context
@@ -76,10 +77,14 @@ pub struct ProposeCategoriesArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalSummary {
+    /// Rows fetched for the batch, including rows that take no category.
     pub total: usize,
     pub proposed: usize,
+    /// Rows listed for a manual choice.
     pub unproposed: usize,
     pub avg_confidence: f32,
+    #[serde(default)]
+    pub protected_splits: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,8 +159,9 @@ impl ProposeCategories {
                     proposed: 0,
                     unproposed: 0,
                     avg_confidence: 0.0,
+                    protected_splits: state.protected_splits,
                 },
-                taxonomies: Vec::new(),
+                taxonomies: state.taxonomies,
                 examples: Vec::new(),
                 draft_status: "draft".to_string(),
             });
@@ -196,6 +202,9 @@ impl ProposeCategories {
 
         let total = state.total;
         let proposed = state.proposals.len();
+        // Rows the widget lists for a manual choice. `total` also counts rows
+        // that take no category (neutral transfers), which appear in neither list.
+        let unproposed = state.unproposed.len();
         let avg_confidence = if proposed > 0 {
             state.proposals.iter().map(|p| p.confidence).sum::<f32>() / proposed as f32
         } else {
@@ -208,8 +217,9 @@ impl ProposeCategories {
             summary: ProposalSummary {
                 total,
                 proposed,
-                unproposed: total.saturating_sub(proposed),
+                unproposed,
                 avg_confidence,
+                protected_splits: state.protected_splits,
             },
             taxonomies: state.taxonomies,
             examples: state.examples,
@@ -247,8 +257,8 @@ impl AgentTool for ProposeCategories {
                     "enum": ["uncategorized", "all", "needs_review"],
                     "description": "Default: uncategorized."
                 },
-                "startDate": { "type": "string", "description": "Inclusive ISO 8601 lower bound." },
-                "endDate":   { "type": "string", "description": "Inclusive ISO 8601 upper bound." },
+                "startDate": { "type": "string", "description": DATE_BOUND_DESCRIPTION },
+                "endDate":   { "type": "string", "description": DATE_BOUND_DESCRIPTION },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -275,17 +285,15 @@ impl AgentTool for ProposeCategories {
     }
 
     fn required_scopes(&self) -> &'static [AgentScope] {
-        // Returns cash-activity rows AND the taxonomy tree, so it requires
-        // activities:read and classification:read alongside classification:suggest.
-        &[
-            AgentScope::ActivitiesRead,
-            AgentScope::ClassificationRead,
-            AgentScope::ClassificationSuggest,
-        ]
+        &[AgentScope::SpendingRead]
     }
 
     fn access_level(&self) -> AgentToolAccess {
         AgentToolAccess::Suggest
+    }
+
+    fn sanitize_args_for_audit(&self, _: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"categorizationArguments":"[redacted]"})
     }
 
     async fn call(
@@ -293,7 +301,11 @@ impl AgentTool for ProposeCategories {
         env: Arc<dyn AgentEnvironment>,
         args: serde_json::Value,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: ProposeCategoriesArgs = serde_json::from_value(args)?;
+        let args: ProposeCategoriesArgs = serde_json::from_value(args).map_err(|_| {
+            AgentToolError::InvalidInput(
+                "Invalid categorization arguments; see the input schema".into(),
+            )
+        })?;
         let output = ProposeCategories::build_output(env.as_ref(), args).await?;
         Ok(AgentToolResult {
             content: serde_json::to_value(output)?,
@@ -326,6 +338,9 @@ pub(crate) fn merge_ai_proposals(
         else {
             continue;
         };
+        if row.allowed_taxonomy_id.as_deref() != Some(tax_id.as_str()) {
+            continue;
+        }
         let confidence = ai.confidence.unwrap_or(0.7).clamp(0.5, 0.95);
         accepted.insert(
             row.activity_id.clone(),
@@ -369,6 +384,7 @@ mod tests {
             currency: "USD".to_string(),
             notes: Some("STARBUCKS".to_string()),
             reason: "test".to_string(),
+            allowed_taxonomy_id: Some("tax1".to_string()),
         }
     }
 
@@ -391,6 +407,26 @@ mod tests {
             ),
         );
         m
+    }
+
+    #[test]
+    fn incompatible_ai_taxonomy_stays_unproposed() {
+        let mut row = make_unproposed("a1");
+        row.allowed_taxonomy_id = Some("income_sources".to_string());
+        let (proposed, remaining) = merge_ai_proposals(
+            vec![row],
+            vec![],
+            &make_key_lookup(),
+            vec![AiProposal {
+                activity_id: "a1".to_string(),
+                taxonomy_id: "tax1".to_string(),
+                category_key: "groceries".to_string(),
+                confidence: None,
+                reason: None,
+            }],
+        );
+        assert!(proposed.is_empty());
+        assert_eq!(remaining.len(), 1);
     }
 
     #[test]

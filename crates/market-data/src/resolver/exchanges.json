@@ -149,7 +149,7 @@
       "close": [16, 30],
       "providers": {
         "YAHOO": { "suffix": ".L", "codes": ["LSE", "IOB"] },
-        "ALPHA_VANTAGE": { "suffix": ".LON", "currency": "GBP" }
+        "ALPHA_VANTAGE": { "suffix": ".LON" }
       }
     },
     {
@@ -463,6 +463,14 @@
       "providers": {
         "YAHOO": { "suffix": ".WA", "codes": ["WSE"] }
       }
+    },
+    {
+      "mic": "MISX",
+      "name": "MOEX",
+      "long_name": "Moscow Exchange",
+      "currency": "RUB",
+      "timezone": "Europe/Moscow",
+      "close": [18, 50]
     },
     {
       "mic": "XPRA",
@@ -889,6 +897,7 @@
     "DKK": ["XCSE"],
     "NOK": ["XOSL"],
     "PLN": ["XWAR"],
+    "RUB": ["MISX"],
     "ILS": ["XTAE"],
     "ILA": ["XTAE"],
     "ZAR": ["XJSE"],

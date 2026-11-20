@@ -1,6 +1,6 @@
 /**
  * Canonical period toggle for spending surfaces that need named comparison
- * periods (This month / Last month / 3M / 6M / YTD / 1Y). Used by the Insights page
+ * periods (1W / This month / 3M / 6M / YTD / 1Y). Used by the Insights page
  * and any future page that compares period-over-period totals.
  *
  * Why this exists: prior to this primitive each surface inlined its own
@@ -11,8 +11,8 @@
  * - The Budget page (uses `MonthSwitcher` — budgets are inherently
  *   per-month with rollover, no useful "1Y" view).
  *
- * Dashboard links use shared period-preference keys so the most recent explicit
- * dashboard or insights period selection wins when moving between surfaces.
+ * The dashboard tabs and the insights page share the last explicit period pick
+ * (see `lib/dashboard-period-sync.ts`).
  */
 import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -29,6 +29,7 @@ function useSpendingPeriodLabels(): Record<ReportsPeriod, ReactNode> {
   const { t } = useTranslation();
   return useMemo(
     () => ({
+      "1W": "1W",
       MTD: (
         <>
           <span className="hidden sm:inline">{t("spending:period.thisMonth")}</span>
@@ -72,7 +73,10 @@ export function SpendingPeriodToggle({
     <AnimatedToggleGroup
       variant={variant}
       size={size}
-      items={REPORTS_PERIODS.map((p) => ({ value: p, label: labels[p] }))}
+      items={REPORTS_PERIODS.filter((p) => p !== "LAST_MONTH").map((p) => ({
+        value: p,
+        label: labels[p],
+      }))}
       value={value}
       onValueChange={onValueChange}
       className={className}
@@ -85,10 +89,19 @@ interface SpendingPeriodSelectorProps {
   onValueChange: (next: ReportsPeriod) => void;
   customMonth: string | null;
   customRange?: DateRange;
+  customYear?: number | null;
+  maxYear?: number;
+  onCustomYearChange?: (year: number | null) => void;
+  selectionLabel?: string;
   maxMonth: string;
   onCustomMonthChange: (monthKey: string | null) => void;
   onCustomRangeChange?: (range: DateRange | undefined) => void;
   isLoading?: boolean;
+  /**
+   * "chart" sits under a chart, like the dashboard's interval selector; "header" sits in a
+   * page header, like the shared date range selector (presets on a track, plain calendar).
+   */
+  appearance?: "chart" | "header";
   className?: string;
 }
 
@@ -97,18 +110,25 @@ export function SpendingPeriodSelector({
   onValueChange,
   customMonth,
   customRange,
+  customYear,
+  maxYear,
+  onCustomYearChange,
+  selectionLabel,
   maxMonth,
   onCustomMonthChange,
   onCustomRangeChange,
   isLoading,
+  appearance = "chart",
   className,
 }: SpendingPeriodSelectorProps) {
   const isMobile = useIsMobile();
+  const header = appearance === "header";
 
   return (
     <div
       className={cn(
-        "flex w-full min-w-0 max-w-full items-center justify-center gap-1.5",
+        "flex min-w-0 max-w-full items-center gap-1.5",
+        header ? "justify-end gap-1" : "w-full justify-center",
         className,
       )}
       aria-busy={isLoading ? "true" : undefined}
@@ -117,15 +137,20 @@ export function SpendingPeriodSelector({
         value={value}
         onValueChange={onValueChange}
         size={isMobile ? "compact" : "sm"}
-        variant="default"
-        className="min-w-0 bg-transparent"
+        variant={header ? "secondary" : "default"}
+        className={header ? "min-w-0" : "min-w-0 bg-transparent"}
       />
       <SpendingDatePicker
         customMonth={customMonth}
         customRange={customRange}
+        customYear={customYear}
+        maxYear={maxYear}
+        onCustomYearChange={onCustomYearChange}
+        selectionLabel={selectionLabel}
         maxMonth={maxMonth}
         onCustomMonthChange={onCustomMonthChange}
         onCustomRangeChange={onCustomRangeChange}
+        appearance={appearance}
       />
     </div>
   );

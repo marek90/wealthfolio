@@ -31,7 +31,8 @@
     "addModels": "モデルを追加..."
   },
   "provider": {
-    "noProvidersConfigured": "設定済みのプロバイダーがありません"
+    "noProvidersConfigured": "設定済みのプロバイダーがありません",
+    "label": "AIプロバイダー"
   },
   "reasoning": {
     "thinking": "思考中...",
@@ -127,6 +128,7 @@
   "tools": {
     "calling": "{{toolName}}を実行中...",
     "cancelled": "{{toolName}}をキャンセルしました",
+    "notUsed": "使用されなかったツール: {{toolName}}",
     "used": "使用したツール: {{toolName}}"
   },
   "accounts": {
@@ -406,7 +408,8 @@
     "monthlyAverage": "月平均",
     "byType": "種類別",
     "monthlyIncome": "月次収入",
-    "sources": "収入源"
+    "sources": "収入源",
+    "yoyShort": "前年比"
   },
   "categorizationContext": {
     "loading": "分類コンテキストを読み込み中…",
@@ -521,6 +524,8 @@
       "holdingsDescription": "ポジション、その評価額、純資産",
       "transactionsLabel": "取引",
       "transactionsDescription": "取引の表示、下書き作成、インポート、分類",
+      "spendingLabel": "支出",
+      "spendingDescription": "支出レポート、予算、取引、イベント",
       "performanceLabel": "パフォーマンス",
       "performanceDescription": "リターンとパフォーマンス指標",
       "incomeLabel": "収入",
@@ -605,6 +610,92 @@
       "repetitionBlurb": "モデルが同じ内容を繰り返すのを抑制します。",
       "otherTitle": "その他",
       "otherBlurb": "プロバイダー固有のその他のオプション。"
+    }
+  },
+  "runtimeErrors": {
+    "settingsLink": "AI プロバイダー設定",
+    "thisModel": "このモデル",
+    "selectedModel": "選択したモデル",
+    "thinkingUnsupported": "**思考モードは非対応です**\n\n{{modelName}} は思考・推論機能に対応していません。\n\n対応する別のモデルを試すか、{{settingsLink}}を確認してください。",
+    "modelUnavailable": "**モデルを利用できません**\n\nモデル「{{modelName}}」が見つかりません。考えられる原因：\n- モデルが未ダウンロード\n- モデル名が正しくない\n- AI プロバイダーのサービスが停止中\n\n{{settingsLink}}で別のモデルを選択するか、設定を確認してください。",
+    "connectionRefused": "**AI プロバイダーに接続できません**\n\nサービスが起動していないようです。次を確認してください。\n1. ローカルの AI プロバイダー（Ollama など）を起動\n2. {{settingsLink}}でプロバイダーの URL を確認\n3. 再試行",
+    "authentication": "**認証に失敗しました**\n\nAPI キーが無効か未設定のようです。{{settingsLink}}で API キーが正しく設定されているか確認してください。",
+    "rateLimit": "**リクエスト制限を超えました**\n\nリクエストが多すぎます。しばらく待ってから再試行してください。",
+    "contextOverflow": "**会話が長すぎます**\n\nこのチャットはモデルのコンテキストウィンドウに収まらなくなりました。新しいチャットを開始するか、{{settingsLink}}でコンテキストウィンドウの大きいモデルを選択してください。",
+    "timeout": "**リクエストがタイムアウトしました**\n\nAI プロバイダーの応答が遅すぎます。低速な接続、過負荷、複雑なリクエストが原因の可能性があります。\n\n再試行するか、{{settingsLink}}で高速なモデルを選択してください。",
+    "provider": "**プロバイダーエラー**\n\n{{error}}\n\n問題が続く場合は{{settingsLink}}を確認してください。",
+    "unknown": "**問題が発生しました**\n\n{{error}}\n\n問題が続く場合は{{settingsLink}}を確認してください。"
+  },
+  "importSessionErrors": {
+    "missingCsv": "CSV の内容がありません。AI ツールの結果が不完全な可能性があります。",
+    "emptyCsv": "CSV ファイルにデータ行がありません。",
+    "noActivities": "取引を抽出できませんでした。列の対応付けが正しくない可能性があります。",
+    "prepareFailed": "CSV インポートを準備できませんでした。",
+    "revalidateFailed": "再検証に失敗しました。",
+    "nothing": "インポートする内容がありません。",
+    "allInvalid": "すべての取引に検証エラーがあります。修正して再試行してください。",
+    "importFailed": "取引のインポートに失敗しました。",
+    "reviewAndRetry": "インポートに失敗しました。エラーを確認して再試行してください。"
+  },
+  "spendingCards": {
+    "unavailableDisabled": "支出の記録がオフになっています。ここに支出を表示するには、設定でオンにしてください。",
+    "unavailableNoAccounts": "支出に含まれる口座がまだありません。設定で選択してください。",
+    "missingFx_one": "為替レートがない取引{{count}}件は合計に含まれていません。",
+    "missingFx_other": "為替レートがない取引{{count}}件は合計に含まれていません。",
+    "contextOff": "支出の記録はオフです",
+    "contextNoAccounts": "支出はオンですが、含まれる口座がありません",
+    "contextOn": "支出 · {{accounts}} · {{currency}} · {{timezone}}",
+    "accountsCount_one": "{{count}}件の口座",
+    "accountsCount_other": "{{count}}件の口座",
+    "eventsSummary": "{{events}} · {{types}}",
+    "eventsCount_one": "{{count}}件のイベント",
+    "eventsCount_other": "{{count}}件のイベント",
+    "eventTypesCount_one": "{{count}}種類のイベント",
+    "eventTypesCount_other": "{{count}}種類のイベント",
+    "newCategory": "新規",
+    "uncategorized": "未分類",
+    "insightTitle": "支出",
+    "period": "{{start}} – {{end}}",
+    "ofBudget": "予算 {{amount}} 中",
+    "vsPrevious": "前期間比 {{percent}}",
+    "noSpending": "この期間の支出はありません。",
+    "colCategory": "カテゴリ",
+    "colShare": "割合",
+    "colSpent": "支出額",
+    "colChange": "変化",
+    "overBudget": "予算超過",
+    "emptyCategories_one": "+ 支出のないカテゴリ{{count}}件",
+    "emptyCategories_other": "+ 支出のないカテゴリ{{count}}件",
+    "reportTitle": "キャッシュフロー",
+    "income": "収入",
+    "spending": "支出",
+    "saved": "貯蓄",
+    "net": "純額",
+    "topSpending": "主な支出: {{list}}",
+    "categoryAmount": "{{name}} {{amount}}",
+    "transactionsTitle": "取引",
+    "showing": "{{total}}件中{{shown}}件を表示",
+    "noTransactions": "一致する取引はありません。",
+    "colDate": "日付",
+    "colPayee": "支払先",
+    "colAmount": "金額",
+    "noPayee": "支払先なし",
+    "moreCategories": "+{{extra}}",
+    "budgetTitle": "予算",
+    "defaultBudget": "既定の予算",
+    "budgetUsed": "{{planned}} 中 {{actual}}",
+    "overBy": "{{used}} · {{amount}} 超過",
+    "noBudget": "この月の予算は設定されていません。",
+    "eventsTitle": "イベント",
+    "noEvents": "この期間のイベントはありません。",
+    "transactionsCount_one": "取引{{count}}件",
+    "transactionsCount_other": "取引{{count}}件",
+    "mostly": "主に{{category}}",
+    "status": {
+      "on_track": "予算内",
+      "approaching": "予算に近い",
+      "over": "予算超過",
+      "cashflow_negative": "支出が収入を上回る"
     }
   }
 }

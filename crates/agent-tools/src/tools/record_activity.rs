@@ -14,10 +14,12 @@ use wealthfolio_core::activities::{
     ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT,
     ACTIVITY_TYPE_UNKNOWN, ACTIVITY_TYPE_WITHDRAWAL,
 };
+use wealthfolio_core::quotes::search_result_matches_query;
 
 use crate::env::AgentEnvironment;
 use crate::scope::AgentScope;
 use crate::tool::{AgentTool, AgentToolAccess, AgentToolError, AgentToolResult};
+use crate::tools::activity_updates::parse_currency;
 
 // ============================================================================
 // Tool Arguments (LLM Input)
@@ -33,6 +35,10 @@ pub struct RecordActivityArgs {
 
     /// Symbol (e.g., "AAPL", "BTC"). Required for trading activities.
     pub symbol: Option<String>,
+
+    /// Exchange MIC that pins which listing of `symbol` is meant, e.g. the
+    /// `exchangeMic` of a symbol candidate.
+    pub exchange_mic: Option<String>,
 
     /// ISO 8601 date (e.g., "2026-01-17"). LLM converts "yesterday" to ISO.
     pub activity_date: String,
@@ -57,6 +63,12 @@ pub struct RecordActivityArgs {
     /// Activity subtype: DRIP, DIVIDEND_IN_KIND, STAKING_REWARD, BONUS.
     pub subtype: Option<String>,
 
+    /// Activity currency (ISO 4217). Overrides the asset or account currency.
+    pub currency: Option<String>,
+
+    /// Rate converting the activity currency into the account currency.
+    pub fx_rate: Option<f64>,
+
     /// Optional notes.
     pub notes: Option<String>,
 }
@@ -80,6 +92,10 @@ pub struct RecordActivityOutput {
 
     /// Resolved asset info (if symbol provided and resolved).
     pub resolved_asset: Option<ResolvedAsset>,
+
+    /// Search results for a symbol that matched none of them exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbol_candidates: Vec<ResolvedAsset>,
 
     /// Available subtypes for this activity type (for dropdown).
     pub available_subtypes: Vec<SubtypeOption>,
@@ -113,8 +129,12 @@ pub struct ActivityDraft {
     pub amount: Option<f64>,
     pub fee: Option<f64>,
     pub tax: Option<f64>,
-    /// From asset or account.
+    /// Caller override, else from asset or account.
     pub currency: String,
+    /// Rate converting `currency` into the account currency. None uses the
+    /// market rate.
+    #[serde(default)]
+    pub fx_rate: Option<f64>,
     /// Resolved account ID.
     pub account_id: Option<String>,
     /// Display name for the account.
@@ -219,6 +239,46 @@ const ACTIVITY_TYPES: &[&str] = &[
     ACTIVITY_TYPE_UNKNOWN,
 ];
 
+/// Most search results listed for a symbol with no exact match.
+const MAX_SYMBOL_CANDIDATES: usize = 5;
+
+/// Take the first search result that is exactly the instrument `symbol` names,
+/// on `exchange_mic` when given. With none, return up to
+/// [`MAX_SYMBOL_CANDIDATES`] results to choose from: the search also returns
+/// substring hits on symbols and names, so its top result is not an answer on
+/// its own.
+fn resolve_symbol_from_search(
+    results: &[wealthfolio_core::quotes::SymbolSearchResult],
+    symbol: &str,
+    exchange_mic: Option<&str>,
+    fallback_currency: &str,
+) -> (Option<ResolvedAsset>, Vec<ResolvedAsset>) {
+    let on_exchange = |result: &wealthfolio_core::quotes::SymbolSearchResult| {
+        exchange_mic.is_none_or(|expected| {
+            result
+                .canonical_exchange_mic
+                .as_deref()
+                .or(result.exchange_mic.as_deref())
+                .is_some_and(|mic| mic.eq_ignore_ascii_case(expected))
+        })
+    };
+    if let Some(exact) = results
+        .iter()
+        .find(|result| on_exchange(result) && search_result_matches_query(result, symbol))
+    {
+        return (
+            Some(resolved_asset_from_search_result(exact, fallback_currency)),
+            Vec::new(),
+        );
+    }
+    let candidates = results
+        .iter()
+        .take(MAX_SYMBOL_CANDIDATES)
+        .map(|result| resolved_asset_from_search_result(result, fallback_currency))
+        .collect();
+    (None, candidates)
+}
+
 fn resolved_asset_from_search_result(
     result: &wealthfolio_core::quotes::SymbolSearchResult,
     fallback_currency: &str,
@@ -312,13 +372,17 @@ pub(crate) fn record_activity_schema() -> serde_json::Value {
                 "type": "string",
                 "description": "Symbol or ticker (e.g., 'AAPL', 'BTC', 'VTI'). Required for BUY/SELL/DIVIDEND/SPLIT and asset-backed income subtypes like DRIP, DIVIDEND_IN_KIND, and STAKING_REWARD"
             },
+            "exchangeMic": {
+                "type": "string",
+                "description": "Exchange MIC that picks one listing of the symbol (e.g. 'XTSE'). Pass the exchangeMic of the symbolCandidates entry the user chose, with its symbol"
+            },
             "activityDate": {
                 "type": "string",
                 "description": "Concrete ISO 8601 date only, e.g. '2026-01-17'. Do not pass relative phrases like 'yesterday', 'today', 'last Friday', or 'next Monday'. Resolve them relative to the current local date before calling this tool."
             },
             "quantity": {
                 "type": "number",
-                "description": "Number of shares or units. Required for BUY/SELL/SPLIT and asset-backed income subtypes like DRIP, DIVIDEND_IN_KIND, and STAKING_REWARD"
+                "description": "Number of shares or units. Required for BUY/SELL and asset-backed income subtypes like DRIP, DIVIDEND_IN_KIND, and STAKING_REWARD. Not used for SPLIT, whose ratio goes in amount"
             },
             "unitPrice": {
                 "type": "number",
@@ -326,7 +390,7 @@ pub(crate) fn record_activity_schema() -> serde_json::Value {
             },
             "amount": {
                 "type": "number",
-                "description": "Total cash amount or taxable income amount. For DRIP, DIVIDEND_IN_KIND, and STAKING_REWARD, provide either amount or unitPrice"
+                "description": "Final cash that moved: a buy's total including charges, a sell's proceeds after them. For DIVIDEND and INTEREST, the cash received after withholding tax, with the withheld tax in `tax` (a 100 dividend with 15 withheld is amount 85, tax 15). For INTEREST on a credit card, the interest charged. For DRIP, DIVIDEND_IN_KIND, and STAKING_REWARD, the value of the shares or tokens received; provide either amount or unitPrice. For SPLIT, the split ratio (2 for a 2-for-1 split)"
             },
             "fee": {
                 "type": "number",
@@ -334,11 +398,19 @@ pub(crate) fn record_activity_schema() -> serde_json::Value {
             },
             "tax": {
                 "type": "number",
-                "description": "Trade-level tax amount (optional)"
+                "description": "Tax charged or withheld, such as dividend withholding tax (optional). Already reflected in amount; it is not deducted again"
             },
             "account": {
                 "type": "string",
                 "description": "Account name or ID. Required before calling this tool when the user has multiple accounts. If the user did not specify an account, ask which account first instead of calling this tool with an empty account."
+            },
+            "currency": {
+                "type": "string",
+                "description": "ISO 4217 currency of the amounts (e.g. 'EUR'). Omit to use the resolved asset's currency, or the account currency for cash activities"
+            },
+            "fxRate": {
+                "type": "number",
+                "description": "Rate from the statement converting the activity currency into the account currency (optional). Omit to use the market rate"
             },
             "subtype": {
                 "type": "string",
@@ -369,13 +441,21 @@ const RECORD_ACTIVITY_DESCRIPTION: &str = "Record investment transactions from n
     \n- If MULTIPLE accounts exist and the user didn't specify, ASK first — do NOT \
     call this tool with an empty account just to show the picker. \
     \n\nSYMBOL HANDLING: pass whatever the user wrote (ticker, company name, or \
-    freeform like \"my rental property\") VERBATIM. The backend resolves names to \
-    tickers and marks unresolvable symbols as custom assets. Do NOT hand-convert \
-    names to tickers — models routinely hallucinate or use stale tickers (e.g. \
-    \"Facebook\" is now META, not FB). \
+    freeform like \"my rental property\") VERBATIM. The backend takes a listing only \
+    when it matches exactly: the ticker, a ticker with its exchange suffix (e.g. \
+    VOD.L), or an ISIN. Otherwise it marks the symbol as a custom asset and, when \
+    the search found anything, lists `symbolCandidates` with a validation error: \
+    call again with the symbol and exchangeMic of the candidate the user meant, \
+    or ask the user. \
+    Do NOT hand-convert names to tickers — models routinely hallucinate or use \
+    stale tickers (e.g. \"Facebook\" is now META, not FB); take them from \
+    `symbolCandidates`. \
     \n\nSUBTYPES: \"reinvested dividend\" → DRIP, \"dividend in kind\"/\"spinoff\" → \
     DIVIDEND_IN_KIND, \"staking reward\" → STAKING_REWARD, \"bonus\"/\"promo credit\" \
     → BONUS. \
+    \n\nCURRENCY: pass `currency` only when the amounts are in a currency other than \
+    the asset's (or the account's, for cash). Pass `fxRate` only when the user or \
+    statement gives the conversion rate to the account currency. \
     \n\nUse `record_activities` (the batch tool) instead of this one when recording 2+ \
     transactions in a single user request.";
 
@@ -455,6 +535,7 @@ impl RecordActivity {
             .unwrap_or_else(|| env.base_currency());
 
         // 4. Handle symbol/asset resolution using quote_service
+        let mut symbol_candidates = Vec::new();
         let (resolved_asset, asset_id, asset_name, is_custom_asset) =
             if let Some(symbol) = &args.symbol {
                 // Search for the symbol using quote_service
@@ -464,9 +545,17 @@ impl RecordActivity {
                     .await
                     .unwrap_or_default();
 
-                if let Some(top_result) = search_results.first() {
-                    // Found a match - use the top result
-                    let asset = resolved_asset_from_search_result(top_result, &currency);
+                let (exact, candidates) = resolve_symbol_from_search(
+                    &search_results,
+                    symbol,
+                    args.exchange_mic
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|mic| !mic.is_empty()),
+                    &currency,
+                );
+                symbol_candidates = candidates;
+                if let Some(asset) = exact {
                     (
                         Some(asset.clone()),
                         Some(asset.asset_id.clone()),
@@ -474,7 +563,7 @@ impl RecordActivity {
                         false,
                     )
                 } else {
-                    // No match found - treat as custom asset
+                    // No exact match - treat as custom asset
                     (
                         None,
                         None,
@@ -504,10 +593,21 @@ impl RecordActivity {
         let amount = args.amount;
 
         // 7. Build draft
-        // Use asset's currency for trading activities, otherwise use account currency
-        let draft_currency = resolved_asset
-            .as_ref()
-            .map(|a| a.currency.clone())
+        // An explicit caller currency wins; otherwise use the asset's currency
+        // for trading activities and the account currency for cash. A blank
+        // override is ignored; an invalid one is reported on the draft.
+        let blank_currency = args.currency.as_deref().map(str::trim) == Some("");
+        let (currency_override, currency_error) = if blank_currency {
+            (None, None)
+        } else {
+            match parse_currency(&args.currency) {
+                Ok(code) => (code, None),
+                Err(message) => (None, Some(message)),
+            }
+        };
+        let account_currency = account_id.as_ref().map(|_| currency.clone());
+        let draft_currency = currency_override
+            .or_else(|| resolved_asset.as_ref().map(|a| a.currency.clone()))
             .unwrap_or(currency);
 
         let draft = ActivityDraft {
@@ -538,6 +638,7 @@ impl RecordActivity {
             fee: args.fee,
             tax: args.tax,
             currency: draft_currency,
+            fx_rate: args.fx_rate,
             account_id,
             account_name,
             subtype: args.subtype,
@@ -549,7 +650,36 @@ impl RecordActivity {
         };
 
         // 8. Validate the draft
-        let validation = validate_draft(&draft);
+        let mut validation = validate_draft(&draft);
+        if let Some(message) = currency_error {
+            validation.errors.push(ValidationError {
+                field: "currency".to_string(),
+                message,
+            });
+        }
+        if !symbol_candidates.is_empty() {
+            validation.errors.push(ValidationError {
+                field: "symbol".to_string(),
+                message: format!(
+                    "No listing matches '{}' exactly. Use the symbol and exchangeMic of one \
+                     of symbolCandidates, a ticker with its exchange suffix (e.g. VOD.L), or \
+                     an ISIN",
+                    args.symbol.as_deref().unwrap_or_default().trim()
+                ),
+            });
+        }
+        // A rate only converts between two currencies.
+        if draft.fx_rate.is_some() && account_currency.as_deref() == Some(draft.currency.as_str()) {
+            validation.errors.push(ValidationError {
+                field: "fx_rate".to_string(),
+                message: format!(
+                    "fxRate applies only when the activity currency differs from the account \
+                     currency ({})",
+                    draft.currency
+                ),
+            });
+        }
+        validation.is_valid = validation.missing_fields.is_empty() && validation.errors.is_empty();
 
         // 9. Get available subtypes
         let available_subtypes = get_subtypes_for_activity_type(&activity_type);
@@ -559,6 +689,7 @@ impl RecordActivity {
             validation,
             available_accounts,
             resolved_asset,
+            symbol_candidates,
             available_subtypes,
         })
     }
@@ -692,8 +823,13 @@ fn validate_draft(draft: &ActivityDraft) -> ValidationResult {
             if draft.symbol.is_none() && draft.asset_id.is_none() {
                 missing_fields.push("symbol".to_string());
             }
-            if draft.quantity.is_none() {
-                missing_fields.push("quantity".to_string());
+            // Core stores the split ratio in `amount`, takes its absolute
+            // value and rejects zero; it does not read quantity.
+            let has_ratio = draft
+                .amount
+                .is_some_and(|ratio| ratio.is_finite() && ratio != 0.0);
+            if !has_ratio {
+                missing_fields.push("amount".to_string());
             }
         }
         // Either amount (for cash) or (symbol + quantity) for assets
@@ -713,6 +849,16 @@ fn validate_draft(draft: &ActivityDraft) -> ValidationResult {
         errors.push(ValidationError {
             field: "activity_date".to_string(),
             message: "Invalid date format. Expected YYYY-MM-DD or ISO 8601".to_string(),
+        });
+    }
+
+    if draft
+        .fx_rate
+        .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+    {
+        errors.push(ValidationError {
+            field: "fx_rate".to_string(),
+            message: "FX rate must be a positive number".to_string(),
         });
     }
 
@@ -807,6 +953,87 @@ mod tests {
         assert_eq!(asset.provider_symbol.as_deref(), Some("ABC.ZZ"));
     }
 
+    fn search_result(
+        symbol: &str,
+        canonical: &str,
+        mic: &str,
+        existing_id: Option<&str>,
+    ) -> wealthfolio_core::quotes::SymbolSearchResult {
+        wealthfolio_core::quotes::SymbolSearchResult {
+            symbol: symbol.to_string(),
+            canonical_symbol: Some(canonical.to_string()),
+            canonical_exchange_mic: Some(mic.to_string()),
+            exchange_mic: Some(mic.to_string()),
+            long_name: format!("{canonical} Inc."),
+            is_existing: existing_id.is_some(),
+            existing_asset_id: existing_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// #2405: "A" found an existing holding by substring and drafted the trade
+    /// against it. Only an exact match resolves; the rest become candidates.
+    #[test]
+    fn symbol_without_exact_match_lists_candidates() {
+        let results = vec![
+            search_result("RELIANCE.NS", "RELIANCE", "XNSE", Some("reliance")),
+            search_result("TATA.NS", "TATA", "XNSE", Some("tata")),
+        ];
+
+        let (resolved, candidates) = resolve_symbol_from_search(&results, "A", None, "INR");
+
+        assert!(resolved.is_none());
+        let ids: Vec<_> = candidates.iter().map(|c| c.asset_id.as_str()).collect();
+        assert_eq!(ids, ["reliance", "tata"]);
+    }
+
+    #[test]
+    fn exact_match_resolves_even_when_not_first() {
+        let results = vec![
+            search_result("RELIANCE.NS", "RELIANCE", "XNSE", Some("reliance")),
+            search_result("A", "A", "XNYS", None),
+        ];
+
+        let (resolved, candidates) = resolve_symbol_from_search(&results, "a", None, "USD");
+
+        let resolved = resolved.expect("exact symbol resolves");
+        assert_eq!(resolved.symbol, "A");
+        assert_eq!(resolved.exchange_mic.as_deref(), Some("XNYS"));
+        assert!(candidates.is_empty());
+    }
+
+    /// A candidate is picked again by its symbol and exchange: the same ticker
+    /// already held on another exchange ranks first and must not take it.
+    #[test]
+    fn exchange_mic_picks_the_candidate_listing() {
+        let results = vec![
+            search_result("SHOP", "SHOP", "XNYS", Some("shop-nyse")),
+            search_result("SHOP.TO", "SHOP", "XTSE", None),
+        ];
+
+        let (held, _) = resolve_symbol_from_search(&results, "SHOP", None, "CAD");
+        let (picked, _) = resolve_symbol_from_search(&results, "SHOP", Some("xtse"), "CAD");
+        let (missing, candidates) =
+            resolve_symbol_from_search(&results, "SHOP", Some("XLON"), "CAD");
+
+        assert_eq!(held.unwrap().asset_id, "shop-nyse");
+        assert_eq!(picked.unwrap().exchange_mic.as_deref(), Some("XTSE"));
+        assert!(missing.is_none());
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn candidates_are_capped() {
+        let results: Vec<_> = (0..8)
+            .map(|i| search_result(&format!("X{i}"), &format!("X{i}"), "XNYS", None))
+            .collect();
+
+        let (resolved, candidates) = resolve_symbol_from_search(&results, "Y", None, "USD");
+
+        assert!(resolved.is_none());
+        assert_eq!(candidates.len(), MAX_SYMBOL_CANDIDATES);
+    }
+
     #[test]
     fn test_get_subtypes_for_activity_type() {
         let subtypes = get_subtypes_for_activity_type("DIVIDEND");
@@ -822,13 +1049,8 @@ mod tests {
         assert!(subtypes.is_empty());
     }
 
-    #[test]
-    fn trade_draft_without_stated_amount_stays_valid() {
-        // A BUY draft with qty + price but no amount must validate: the
-        // total is derived canonically at commit, never synthesized in the
-        // draft (a local formula was wrong for SELL and blind to option
-        // multipliers).
-        let draft = ActivityDraft {
+    fn buy_draft() -> ActivityDraft {
+        ActivityDraft {
             activity_type: "BUY".to_string(),
             activity_date: "2024-01-15".to_string(),
             symbol: Some("AAPL".to_string()),
@@ -845,6 +1067,7 @@ mod tests {
             fee: Some(5.0),
             tax: None,
             currency: "USD".to_string(),
+            fx_rate: None,
             account_id: Some("acct-1".to_string()),
             account_name: None,
             subtype: None,
@@ -853,9 +1076,78 @@ mod tests {
             pricing_mode: "MARKET".to_string(),
             is_custom_asset: false,
             asset_kind: None,
-        };
+        }
+    }
+
+    #[test]
+    fn trade_draft_without_stated_amount_stays_valid() {
+        // A BUY draft with qty + price but no amount must validate: the
+        // total is derived canonically at commit, never synthesized in the
+        // draft (a local formula was wrong for SELL and blind to option
+        // multipliers).
+        let draft = buy_draft();
         let validation = validate_draft(&draft);
         assert!(validation.is_valid, "{:?}", validation);
+    }
+
+    fn split_draft() -> ActivityDraft {
+        ActivityDraft {
+            activity_type: "SPLIT".to_string(),
+            quantity: None,
+            unit_price: None,
+            amount: Some(2.0),
+            fee: None,
+            price_source: "none".to_string(),
+            ..buy_draft()
+        }
+    }
+
+    #[test]
+    fn split_draft_without_ratio_reports_missing_amount() {
+        // Core stores a split's ratio in `amount` and rejects a split
+        // without one, so this draft would fail at commit.
+        let mut draft = split_draft();
+        draft.quantity = Some(4.0);
+        draft.amount = None;
+        let validation = validate_draft(&draft);
+        assert!(!validation.is_valid);
+        assert_eq!(validation.missing_fields, vec!["amount".to_string()]);
+    }
+
+    #[test]
+    fn split_draft_with_zero_or_non_finite_ratio_reports_missing_amount() {
+        for ratio in [0.0, f64::NAN, f64::INFINITY] {
+            let mut draft = split_draft();
+            draft.amount = Some(ratio);
+            let validation = validate_draft(&draft);
+            assert_eq!(
+                validation.missing_fields,
+                vec!["amount".to_string()],
+                "ratio {ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_draft_needs_ratio_not_quantity() {
+        // Core reads only `amount` for a split and takes its absolute value.
+        assert!(validate_draft(&split_draft()).is_valid);
+
+        let mut negative = split_draft();
+        negative.amount = Some(-2.0);
+        assert!(validate_draft(&negative).is_valid);
+    }
+
+    #[test]
+    fn non_positive_fx_rate_is_invalid() {
+        let mut draft = buy_draft();
+        draft.fx_rate = Some(1.08);
+        assert!(validate_draft(&draft).is_valid);
+
+        draft.fx_rate = Some(0.0);
+        let validation = validate_draft(&draft);
+        assert!(!validation.is_valid);
+        assert_eq!(validation.errors[0].field, "fx_rate");
     }
 
     #[test]

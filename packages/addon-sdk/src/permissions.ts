@@ -69,6 +69,14 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
     riskLevel: 'high',
   },
   {
+    id: 'allocation-targets',
+    name: 'Allocation Targets',
+    description:
+      'Read-only access to your allocation targets and how your holdings compare to them',
+    functions: ['getAll', 'getDrift'],
+    riskLevel: 'high',
+  },
+  {
     id: 'portfolio',
     name: 'Portfolio Data',
     description: 'Access to holdings, portfolio performance, and account valuations',
@@ -91,6 +99,9 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
       'getAll',
       'search',
       'searchCashActivities',
+      'assignCategory',
+      'unassignCategory',
+      'setEvent',
       'create',
       'update',
       'saveMany',
@@ -149,6 +160,10 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
     functions: [
       'isEnabled',
       'getCategories',
+      'getContext',
+      'getBudget',
+      'getEvents',
+      'getEventTypes',
       'getReport',
       'getRules',
       'saveRule',
@@ -156,6 +171,13 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
       'rerunRules',
     ],
     riskLevel: 'medium',
+  },
+  {
+    id: 'budgets',
+    name: 'Budget Management',
+    description: 'Change default budget targets and monthly overrides',
+    functions: ['upsertBudgetTarget'],
+    riskLevel: 'high',
   },
   {
     id: 'financial-planning',

@@ -1,54 +1,69 @@
 import type { CategoryAllocation, NetWorthHistoryPoint, TaxonomyAllocation } from "@/lib/types";
 import type { FormattingApi } from "@wealthfolio/ui";
 
-// Goldish orange net-worth theme (matches the history chart). Reserved for the
-// chart/brand; value numbers use semantic green/red tones (orange == warning).
-export const THEME_COLOR = "hsl(38 75% 50%)";
-export const THEME_COLOR_LIGHT = "hsl(38 75% 50% / 0.12)";
+// The net-worth line: the theme's --net-worth colour (Classic's is gold), at 3:1
+// or more on the page and cards, and neither gain nor loss (value numbers use
+// green/red tones).
+export const THEME_COLOR = "var(--net-worth)";
+export const THEME_COLOR_LIGHT = "color-mix(in oklab, var(--net-worth) 12%, transparent)";
 
-/** Semantic text tone for a signed value: green gain, red loss, muted when flat. */
-export function toneClass(value: number): string {
-  if (Math.abs(value) < 0.005) return "text-muted-foreground/60";
-  return value > 0 ? "text-success" : "text-destructive";
+/** The net-worth colour at the given strength over transparent, for tints. */
+export function themeColorTint(percent: number): string {
+  return `color-mix(in oklab, ${THEME_COLOR} ${percent}%, transparent)`;
 }
 
-/** Semantic fill color for bars/meters: green for positive/zero, red for negative. */
+/** Text tone for a signed value: gain or loss, muted when flat. */
+export function toneClass(value: number): string {
+  if (Math.abs(value) < 0.005) return "text-muted-foreground/60";
+  return value > 0 ? "text-gain" : "text-loss";
+}
+
+/** Fill color for bars/meters: gain for positive/zero, loss for negative. */
 export function toneColor(value: number): string {
-  return value < -0.005 ? "var(--destructive)" : "var(--success)";
+  return value < -0.005 ? "var(--loss)" : "var(--gain)";
 }
 
 /** Softened semantic fill for chart bars/areas (dimmer than the text tone). */
 export function toneFill(value: number): string {
-  const base = value < -0.005 ? "var(--destructive)" : "var(--success)";
+  const base = value < -0.005 ? "var(--loss)" : "var(--gain)";
   return `color-mix(in srgb, ${base} 60%, transparent)`;
 }
-
-export const CARD_LABEL = "text-muted-foreground/70 text-xs font-semibold uppercase tracking-wide";
-
-// Muted, semantic category palette (tuned for the warm/cream theme). Used for
-// the composition bar, breakdown row dots, and the detail-sheet icons so they
-// stay consistent. Liabilities keep the semantic red.
-// NOTE: tuned for light mode — dark-mode variants would need theme-aware tokens.
-export const CATEGORY_CSS_COLORS: Record<string, string> = {
-  properties: "#4b4137", // warm dark taupe / charcoal
-  investments: "#6f7544", // muted olive green
-  cash: "#d8c98f", // pale cream / light gold
-  vehicles: "#6d7c86", // muted slate
-  otherAssets: "#928d83", // medium warm gray
-  preciousMetals: "#b8923a", // soft gold
-  collectibles: "#8a6b49", // muted brown
-  liabilities: "var(--destructive)",
-};
 
 export interface BreakdownEntry {
   category: string;
   name: string;
   value: number;
   assetId?: string;
+  /** First day the row carried a balance (YYYY-MM-DD), when the backend knows it. */
+  firstValueDate?: string;
   children?: BreakdownEntry[];
 }
 
 /** A breakdown row selected for the detail drawer. */
+/** History key prefix the backend gives a credit card's balance (`CREDIT_CARD:<accountId>`). */
+export const CREDIT_CARD_KEY_PREFIX = "CREDIT_CARD:";
+const CASH_ACCOUNT_KEY_PREFIX = "CASH:";
+
+/** Only Net Worth cash breakdown keys identify accounts instead of assets. */
+export function categoryItemDetailPath(category: string, assetId?: string): string | null {
+  if (!assetId) return null;
+  if (category === "cash" && assetId.startsWith(CASH_ACCOUNT_KEY_PREFIX)) {
+    const accountId = assetId.slice(CASH_ACCOUNT_KEY_PREFIX.length).split(":")[0];
+    return accountId ? `/accounts/${encodeURIComponent(accountId)}` : null;
+  }
+  return `/holdings/${encodeURIComponent(assetId)}`;
+}
+
+/**
+ * Where a liability's own page is: the account for a credit card, the asset
+ * page for a loan or other liability.
+ */
+export function liabilityDetailPath(key: string): string {
+  return key.startsWith(CREDIT_CARD_KEY_PREFIX)
+    ? `/accounts/${encodeURIComponent(key.slice(CREDIT_CARD_KEY_PREFIX.length))}`
+    : `/holdings/${encodeURIComponent(key)}`;
+}
+
 export interface SelectedCategory {
   /** History/breakdown key: the category key for assets, the assetId for liabilities. */
   key: string;
@@ -56,6 +71,7 @@ export interface SelectedCategory {
   value: number;
   isLiability: boolean;
   isInvestment: boolean;
+  firstValueDate?: string;
   children: BreakdownEntry[];
 }
 
@@ -100,15 +116,13 @@ export interface ParsedHistoryPoint {
   breakdown: Record<string, number>;
 }
 
-const num = (value: string | number | undefined | null): number => {
-  if (value == null) return 0;
-  const parsed = typeof value === "number" ? value : parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-};
+const num = (value: number | undefined | null): number =>
+  value != null && Number.isFinite(value) ? value : 0;
 
-/** Parse the raw history response (decimal strings, or numbers in web mode) into numbers. */
+/** Parse the raw history response, treating missing or non-finite values as zero. */
 export function parseHistory(history: NetWorthHistoryPoint[] | undefined): ParsedHistoryPoint[] {
-  if (!history) return [];
+  if (!history || history.some((point) => point.valueStatus && point.valueStatus !== "complete"))
+    return [];
   return history.map((point) => {
     const breakdown: Record<string, number> = {};
     for (const [key, value] of Object.entries(point.breakdown ?? {})) {
@@ -158,8 +172,14 @@ const MULTIPLE_THRESHOLD = 10;
 /**
  * Change over the range from a value series. Liabilities are stored as positive
  * magnitudes, so a reduction is expressed as a positive (good) change.
+ * `hadEarlierBalance` marks a row that carried a balance before the range (a
+ * card paid off and then used again), which is not new despite starting at zero.
  */
-export function deriveChange(series: number[], isLiability: boolean): Change {
+export function deriveChange(
+  series: number[],
+  isLiability: boolean,
+  hadEarlierBalance = false,
+): Change {
   if (series.length < 2) return { amount: 0, percent: 0, isNew: false };
   const first = series[0];
   const last = series[series.length - 1];
@@ -169,8 +189,16 @@ export function deriveChange(series: number[], isLiability: boolean): Change {
   return {
     amount,
     percent: hasBaseline ? amount / base : null,
-    isNew: !hasBaseline && Math.abs(last) >= BASELINE_FLOOR,
+    isNew: !hasBaseline && !hadEarlierBalance && Math.abs(last) >= BASELINE_FLOOR,
   };
+}
+
+/** True when a row's first balance came before the history's first point. */
+export function hadBalanceBefore(
+  history: ParsedHistoryPoint[],
+  firstValueDate: string | undefined,
+): boolean {
+  return !!firstValueDate && history.length > 0 && firstValueDate < history[0].date;
 }
 
 /** True when the ratio is small enough to read as a plain percentage. */
@@ -277,13 +305,17 @@ export function computeMomentum(
   longHistory: ParsedHistoryPoint[],
   rangeStartISO: string,
   rangeEndISO: string,
+  calendarYear?: number | null,
 ): Momentum | null {
   if (longHistory.length < 2) return null;
 
   const rangeDays = daysBetween(rangeStartISO, rangeEndISO) || 1;
-  const priorStartISO = new Date(new Date(rangeStartISO).getTime() - rangeDays * MS_PER_DAY)
-    .toISOString()
-    .slice(0, 10);
+  const priorStartISO =
+    calendarYear != null
+      ? `${calendarYear - 1}-01-01`
+      : new Date(new Date(rangeStartISO).getTime() - rangeDays * MS_PER_DAY)
+          .toISOString()
+          .slice(0, 10);
 
   const nwEnd = netWorthAsOf(longHistory, rangeEndISO);
   const nwStart = netWorthAsOf(longHistory, rangeStartISO);
@@ -292,7 +324,9 @@ export function computeMomentum(
   const earliest = longHistory[0].date;
   const hasPrior = earliest <= priorStartISO;
   const nwPriorStart = netWorthAsOf(longHistory, priorStartISO);
-  const priorChange = hasPrior ? nwStart - nwPriorStart : null;
+  const nwPriorEnd =
+    calendarYear != null ? netWorthAsOf(longHistory, `${calendarYear - 1}-12-31`) : nwStart;
+  const priorChange = hasPrior ? nwPriorEnd - nwPriorStart : null;
   const beatBy = priorChange != null ? currentChange - priorChange : null;
 
   // Monthly net worth change bars across the prior + current windows.

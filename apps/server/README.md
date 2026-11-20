@@ -16,7 +16,7 @@ Key environment variables
 - `WF_LISTEN_ADDR`: Bind address, default `0.0.0.0:8088`.
 - `WF_DB_PATH`: Path to the SQLite database file (or a directory; if a directory is provided, `app.db` is used inside it). Example: `./db/app.db`.
 - `WF_CORS_ALLOW_ORIGINS`: Comma-separated list of allowed origins for CORS. Example: `http://localhost:1420`.
-- `WF_REQUEST_TIMEOUT_MS`: Request timeout in milliseconds. Default `300000`.
+- `WF_REQUEST_TIMEOUT_MS`: Optional routine-request timeout override in milliseconds. Empty uses `45000` from the [shared timeout policy](../../config/timeouts.json). Heavy, import, and transfer routes keep their classified budgets. Explicit legacy overrides are preserved; values of `60000` or more can outlast the routine client timeout. See the [production timeout matrix](../../docs/self-host/timeouts.md).
 - `WF_STATIC_DIR`: Directory to serve static assets from (the web build output). Default `dist`.
 - `WF_SECRET_KEY`: 32-byte key (required unless `WF_SECRET_KEY_FILE` is set) used to encrypt secrets at rest and sign JWTs. Must decode to exactly 32 bytes.
   Can be provided as:
@@ -52,6 +52,7 @@ Key environment variables
   - `WF_OIDC_ALLOW_ANY`: **Optional**, default `false`. Set to `true` to allow **any** user the IdP authenticates when no allowlist is configured. Only safe on a dedicated single-user IdP; on a shared/multi-tenant IdP this grants everyone access. A warning is logged at startup when enabled.
   - `WF_OIDC_POST_LOGOUT_REDIRECT_URL`: **Optional**. When the IdP advertises an `end_session_endpoint`, sign-out performs RP-Initiated Logout (ends the IdP session too); otherwise logout is local-only. Set this to return to the app after IdP logout — it must be **registered** with the IdP (e.g. Keycloak's "Valid post logout redirect URIs"). If unset, the IdP shows its own logged-out page.
   - `WF_OIDC_RP_LOGOUT`: **Optional**, default `true`. Set to `false` to force local-only logout even when the IdP supports RP-Initiated Logout.
+  - `WF_OIDC_CA_FILE`: **Optional** path to a PEM bundle of extra root certificates trusted for OIDC requests only (discovery, token exchange). Use it when the IdP's certificate is issued by a private CA (e.g. step-ca). The OIDC client otherwise trusts only the bundled Mozilla roots and ignores the system trust store and `SSL_CERT_FILE`; the bundled roots stay trusted. The server refuses to start if the file is unreadable or contains no certificate.
 - `WF_SECRET_FILE`: Optional override for where encrypted secrets are stored. Defaults to `<data-root>/secrets.json`.
 - `WF_DB_REQUIRE_ENCRYPTION`: Optional, default `0`. Requires the live database to
   match the configured encryption policy. `1` creates a new encrypted database,

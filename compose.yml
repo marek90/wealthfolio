@@ -17,6 +17,10 @@ services:
       - ./data:/data
     env_file:
       - ./secrets/.env.compose
+    environment:
+      # Upstream contract (scripts/print-timeout-proxy.test.mjs): empty uses the server's
+      # shared timeout matrix. Do not hard-code a value here.
+      WF_REQUEST_TIMEOUT_MS: "${WF_REQUEST_TIMEOUT_MS:-}"
     healthcheck:
       test:
         ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8088/api/v1/healthz"]

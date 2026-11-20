@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import * as z from "zod";
 
@@ -18,7 +18,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@wealthfolio/ui/components/ui/dialog";
 import {
   Form,
@@ -43,7 +42,25 @@ import { useCustomProviders } from "@/hooks/use-custom-providers";
 import { useMarketDataProviders } from "@/hooks/use-market-data-providers";
 import { ExchangeRate } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { MoneyInput, worldCurrencies } from "@wealthfolio/ui";
+import { invalidTypeError } from "@/lib/zod-errors";
+import {
+  canonicalCurrencyCode,
+  getCurrencyDisplayLabel,
+  getQuoteUnitCurrency,
+  MoneyInput,
+  Spinner,
+  worldCurrencies,
+} from "@wealthfolio/ui";
+
+/**
+ * A typed code as FX pairs store it: upper case, unless that names another
+ * currency. South African cents become ZAC, but pence (GBp) aren't pounds (GBP).
+ */
+function fxPairCode(text: string) {
+  const code = canonicalCurrencyCode(text);
+  const upper = code.toUpperCase();
+  return getQuoteUnitCurrency(upper)?.value === code ? upper : code;
+}
 
 interface ExchangeRateFormData {
   fromCurrency: string;
@@ -55,18 +72,27 @@ interface ExchangeRateFormData {
 interface AddExchangeRateFormProps {
   onSubmit: (newRate: Omit<ExchangeRate, "id">) => void;
   onCancel: () => void;
+  isSubmitting?: boolean;
 }
 
-export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormProps) {
-  const { t } = useTranslation();
+export function AddExchangeRateForm({
+  onSubmit,
+  onCancel,
+  isSubmitting = false,
+}: AddExchangeRateFormProps) {
+  const { t, i18n } = useTranslation();
+  const currencyLabel = (code: string) => {
+    const currency = worldCurrencies.find((item) => item.value === code);
+    return currency
+      ? getCurrencyDisplayLabel(currency, i18n.resolvedLanguage ?? i18n.language, t)
+      : code;
+  };
   const exchangeRateSchema = z
     .object({
       fromCurrency: z.string().min(1, t("settings:fx_err_from_required")),
       toCurrency: z.string().min(1, t("settings:fx_err_to_required")),
       rate: z.coerce
-        .number({
-          invalid_type_error: t("settings:fx_err_rate_type"),
-        })
+        .number({ error: invalidTypeError(t("settings:fx_err_rate_type")) })
         .min(0, { message: t("settings:fx_err_rate_negative") })
         .optional(),
       source: z.string().min(1, t("settings:fx_err_source_required")),
@@ -83,12 +109,32 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
         message: t("settings:fx_err_rate_invalid"),
         path: ["rate"],
       },
-    );
+    )
+    .superRefine((data, ctx) => {
+      // Conversions look quote units up through their major currency's pair, so a
+      // rate saved in pence or cents would never be used directly (#2460).
+      for (const path of ["fromCurrency", "toCurrency"] as const) {
+        const quoteUnit = getQuoteUnitCurrency(data[path]);
+        if (quoteUnit) {
+          ctx.addIssue({
+            code: "custom",
+            message: t("settings:fx_err_quote_unit", {
+              code: data[path],
+              major: quoteUnit.major,
+            }),
+            path: [path],
+          });
+        }
+      }
+    });
 
   const { data: providers } = useMarketDataProviders();
   const { data: customProviders = [] } = useCustomProviders();
+  const sourceProviders =
+    providers?.filter((p) => p.id !== "CUSTOM_SCRAPER" && p.providerType !== "custom") ?? [];
+  const enabledCustomProviders = customProviders.filter((cp) => cp.enabled);
   const form = useForm<ExchangeRateFormData>({
-    resolver: zodResolver(exchangeRateSchema),
+    resolver: zodResolver(exchangeRateSchema) as Resolver<ExchangeRateFormData>,
     defaultValues: {
       fromCurrency: "",
       toCurrency: "",
@@ -101,6 +147,7 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
   const isManualSource = selectedSource === "MANUAL";
 
   const handleSubmit = (data: ExchangeRateFormData) => {
+    if (isSubmitting) return;
     onSubmit({
       fromCurrency: data.fromCurrency,
       toCurrency: data.toCurrency,
@@ -115,16 +162,21 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
 
   const renderCurrencyField = (fieldName: "fromCurrency" | "toCurrency") => {
     const [searchValue, setSearchValue] = useState("");
+    const customCode = fxPairCode(searchValue);
+    const showCustomCode =
+      customCode !== "" && !worldCurrencies.some((currency) => currency.value === customCode);
 
     const handleSearchChange = (value: string) => {
-      setSearchValue(value);
+      const query = value.trim();
+      setSearchValue(query);
       const matchingCurrency = worldCurrencies.find(
         (currency) =>
-          currency.label.toLowerCase().includes(value.toLowerCase()) ||
-          currency.value.includes(value),
+          currency.label.toLowerCase().includes(query.toLowerCase()) ||
+          currencyLabel(currency.value).toLowerCase().includes(query.toLowerCase()) ||
+          currency.value.includes(query),
       );
-      if (!matchingCurrency && value) {
-        form.setValue(fieldName, value.toUpperCase());
+      if (!matchingCurrency && query) {
+        form.setValue(fieldName, fxPairCode(query));
       }
     };
 
@@ -140,21 +192,20 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
                 : t("settings:fx_to_currency")}
             </FormLabel>
             <Popover modal={true}>
-              <PopoverTrigger asChild>
-                <FormControl>
-                  <Button
-                    variant="outline"
-                    role="combobox"
-                    className={cn("justify-between", !field.value && "text-muted-foreground")}
-                  >
-                    {field.value
-                      ? worldCurrencies.find((currency) => currency.value === field.value)?.label ||
-                        field.value
-                      : t("settings:fx_select_currency")}
-                    <Icons.ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </FormControl>
-              </PopoverTrigger>
+              <FormControl>
+                <PopoverTrigger
+                  render={
+                    <Button
+                      variant="field"
+                      role="combobox"
+                      className={cn("justify-between", !field.value && "text-muted-foreground")}
+                    />
+                  }
+                >
+                  {field.value ? currencyLabel(field.value) : t("settings:fx_select_currency")}
+                  <Icons.ChevronsUpDown className="ms-2 h-4 w-4 shrink-0 opacity-50" />
+                </PopoverTrigger>
+              </FormControl>
               <PopoverContent className="w-full p-0">
                 <Command>
                   <CommandInput
@@ -163,23 +214,25 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
                   />
                   <CommandList>
                     <CommandGroup>
-                      <ScrollArea className="max-h-96 overflow-y-auto">
-                        {searchValue && (
+                      {/* Fits inside CommandList's max-h-75 with the group's padding, so
+                          only this area scrolls. */}
+                      <ScrollArea className="max-h-72 overflow-y-auto">
+                        {showCustomCode && (
                           <CommandItem
-                            value={searchValue}
-                            key={searchValue}
+                            value={customCode}
+                            key={customCode}
                             onSelect={() => {
-                              form.setValue(fieldName, searchValue);
+                              form.setValue(fieldName, customCode);
                             }}
                           >
                             <Icons.Plus
                               className={cn(
-                                "mr-2 h-4 w-4",
-                                searchValue === field.value ? "opacity-100" : "opacity-0",
+                                "me-2 h-4 w-4",
+                                customCode === field.value ? "opacity-100" : "opacity-0",
                               )}
                             />
                             <span className="font-semibold italic">
-                              {t("settings:fx_custom_search", { value: searchValue })}
+                              {t("settings:fx_custom_search", { value: customCode })}
                             </span>
                           </CommandItem>
                         )}
@@ -188,11 +241,15 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
                           .filter(
                             (currency) =>
                               currency.label.toLowerCase().includes(searchValue.toLowerCase()) ||
+                              currencyLabel(currency.value)
+                                .toLowerCase()
+                                .includes(searchValue.toLowerCase()) ||
                               currency.value.includes(searchValue),
                           )
                           .map((currency) => (
                             <CommandItem
-                              value={currency.label}
+                              value={currency.value}
+                              keywords={[currency.label, currencyLabel(currency.value)]}
                               key={currency.value}
                               onSelect={() => {
                                 form.setValue(fieldName, currency.value);
@@ -200,11 +257,11 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
                             >
                               <Icons.Check
                                 className={cn(
-                                  "mr-2 h-4 w-4",
+                                  "me-2 h-4 w-4",
                                   currency.value === field.value ? "opacity-100" : "opacity-0",
                                 )}
                               />
-                              {currency.label}
+                              {currencyLabel(currency.value)}
                             </CommandItem>
                           ))}
                       </ScrollArea>
@@ -228,7 +285,7 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
           <DialogDescription>{t("settings:fx_add_subtitle")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-10 p-4">
+        <fieldset disabled={isSubmitting} className="grid gap-10 p-4">
           {renderCurrencyField("fromCurrency")}
           {renderCurrencyField("toCurrency")}
 
@@ -238,7 +295,21 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
             render={({ field }) => (
               <FormItem>
                 <FormLabel>{t("settings:fx_data_source")}</FormLabel>
-                <Select onValueChange={field.onChange} defaultValue={field.value}>
+                <Select
+                  items={[
+                    { value: "MANUAL", label: t("settings:fx_source_manual") },
+                    ...sourceProviders.map((provider) => ({
+                      value: provider.id,
+                      label: provider.name,
+                    })),
+                    ...enabledCustomProviders.map((cp) => ({
+                      value: `CUSTOM_SCRAPER:${cp.id}`,
+                      label: cp.name,
+                    })),
+                  ]}
+                  onValueChange={field.onChange}
+                  defaultValue={field.value}
+                >
                   <FormControl>
                     <SelectTrigger>
                       <SelectValue placeholder={t("settings:fx_select_data_source")} />
@@ -246,20 +317,16 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
                   </FormControl>
                   <SelectContent>
                     <SelectItem value="MANUAL">{t("settings:fx_source_manual")}</SelectItem>
-                    {providers
-                      ?.filter((p) => p.id !== "CUSTOM_SCRAPER" && p.providerType !== "custom")
-                      .map((provider) => (
-                        <SelectItem key={provider.id} value={provider.id}>
-                          {provider.name}
-                        </SelectItem>
-                      ))}
-                    {customProviders
-                      .filter((cp) => cp.enabled)
-                      .map((cp) => (
-                        <SelectItem key={cp.id} value={`CUSTOM_SCRAPER:${cp.id}`}>
-                          {cp.name}
-                        </SelectItem>
-                      ))}
+                    {sourceProviders.map((provider) => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.name}
+                      </SelectItem>
+                    ))}
+                    {enabledCustomProviders.map((cp) => (
+                      <SelectItem key={cp.id} value={`CUSTOM_SCRAPER:${cp.id}`}>
+                        {cp.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <FormDescription>
@@ -285,17 +352,20 @@ export function AddExchangeRateForm({ onSubmit, onCancel }: AddExchangeRateFormP
               )}
             />
           )}
-        </div>
+        </fieldset>
 
         <DialogFooter>
-          <DialogTrigger asChild>
-            <Button variant="outline" onClick={onCancel}>
-              {t("common:cancel")}
-            </Button>
-          </DialogTrigger>
-          <Button type="submit">
-            <Icons.Plus className="h-4 w-4" />
-            <span className="hidden sm:ml-2 sm:inline">{t("settings:fx_add_title")}</span>
+          <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>
+            {t("common:cancel")}
+          </Button>
+          <Button
+            type="submit"
+            disabled={isSubmitting}
+            aria-busy={isSubmitting}
+            aria-label={t("settings:fx_add_title")}
+          >
+            {isSubmitting ? <Spinner className="h-4 w-4" /> : <Icons.Plus className="h-4 w-4" />}
+            <span className="hidden sm:ms-2 sm:inline">{t("settings:fx_add_title")}</span>
           </Button>
         </DialogFooter>
       </form>

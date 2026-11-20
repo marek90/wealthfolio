@@ -54,7 +54,10 @@ pub enum DeviceSyncError {
         status: u16,
         code: String,
         message: String,
-        details: Option<serde_json::Value>,
+        // Boxed: with serde_json's `preserve_order`, which the app and server
+        // builds enable, a `Value` takes 72 bytes, and every `Result` that
+        // carries this error grows with it.
+        details: Option<Box<serde_json::Value>>,
     },
 
     /// Invalid request (missing required data, etc.)
@@ -92,7 +95,7 @@ impl DeviceSyncError {
             status,
             code: code.into(),
             message: message.into(),
-            details,
+            details: details.map(Box::new),
         }
     }
 
@@ -144,8 +147,16 @@ impl DeviceSyncError {
         self.error_code() == Some(SYNC_CURSOR_TOO_OLD)
     }
 
-    /// Classify error for retry policy.
+    /// Domain denials must be handled before generic HTTP status policy.
     pub fn retry_class(&self) -> ApiRetryClass {
+        if self.error_code().is_some_and(|code| {
+            code.starts_with("SUBSCRIPTION_")
+                || code == "PLAN_UPGRADE_REQUIRED"
+                || code == "BACKUP_SUBSCRIPTION_REQUIRED"
+                || code == "BACKUP_READ_GRACE_EXPIRED"
+        }) {
+            return ApiRetryClass::Permanent;
+        }
         match self {
             Self::Api { status, .. } => match *status {
                 401 | 403 => ApiRetryClass::ReauthRequired,
@@ -193,6 +204,18 @@ mod tests {
             "Request failed: {\"path\":[\"snapshotId\"],\"message\":\"Invalid UUID\"}",
         );
         assert!(err.is_snapshot_id_validation_error());
+    }
+
+    #[test]
+    fn domain_denials_are_not_transient_or_credential_refresh_errors() {
+        for (status, code) in [
+            (403, "SUBSCRIPTION_CANCELED"),
+            (403, "PLAN_UPGRADE_REQUIRED"),
+            (403, "BACKUP_SUBSCRIPTION_REQUIRED"),
+        ] {
+            let err = DeviceSyncError::api_structured(status, code, "Denied", None);
+            assert_eq!(err.retry_class(), ApiRetryClass::Permanent);
+        }
     }
 
     #[test]

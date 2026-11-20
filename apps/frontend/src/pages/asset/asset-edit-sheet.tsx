@@ -1,3 +1,7 @@
+import { useIsMobileViewport } from "@/hooks/use-platform";
+import { cn } from "@/lib/utils";
+import { getTaxonomyLabel } from "@/lib/taxonomy-labels";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 import { getExchanges, resolveSymbolQuote } from "@/adapters";
 import { MultiSelectTaxonomy } from "@/components/classification/multi-select-taxonomy";
 import { SingleSelectTaxonomy } from "@/components/classification/single-select-taxonomy";
@@ -10,8 +14,14 @@ import type { Asset, Quote } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Alert,
-  AlertDescription,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
   CurrencyInput,
   DatePickerInput,
   Label,
@@ -30,6 +40,7 @@ import {
   Switch,
   useAmountFormatting,
   useDateFormatting,
+  Spinner,
 } from "@wealthfolio/ui";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -57,8 +68,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@wealthfolio/ui/compon
 import { Textarea } from "@wealthfolio/ui/components/ui/textarea";
 import { toast } from "@wealthfolio/ui/components/ui/use-toast";
 import type { TFunction } from "i18next";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Path, useFieldArray, useForm, useWatch } from "react-hook-form";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type Path, type Resolver, useFieldArray, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import * as z from "zod";
 import {
@@ -103,7 +114,11 @@ const assetFormSchema = (t: TFunction) =>
     // Optional/nullable is load-bearing: the Market Data tab submits this same
     // form, and a blocking error here would fail that save with no visible
     // FormMessage on that tab.
-    contractMultiplier: z.coerce.number().positive().optional().nullable(),
+    contractMultiplier: z.coerce
+      .number()
+      .positive({ message: t("activity:form.err_multiplier_gt_zero") })
+      .optional()
+      .nullable(),
     maturityDate: z.date().optional().nullable(),
     // min(0), not positive(): zero-coupon T-bills are valid and common.
     couponRate: z.coerce.number().min(0).optional().nullable(),
@@ -117,6 +132,7 @@ const normalizeMic = (mic?: string | null): string => mic?.trim().toUpperCase() 
 
 const PROVIDER_SYMBOL_HINTS: Record<string, string> = {
   YAHOO: "e.g. AAPL, LYMS.DE",
+  AMFI: "e.g. 122639, INF879O01027",
   COINGECKO: "e.g. bitcoin, ethereum",
   TWELVEDATA: "e.g. AAPL, EUR/USD",
 };
@@ -198,25 +214,35 @@ function PricingModeToggle({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const isAutomatic = !isManualMode;
+  // The switch inside the trigger is hidden from assistive tech, so the
+  // on/off description names the current state instead.
+  const descriptionId = useId();
 
   return (
     <div className="rounded-lg border p-4">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-1">
           <Label className="text-sm font-medium">{t("asset:editSheet.automatic_updates")}</Label>
-          <p className="text-muted-foreground text-xs">
+          <p id={descriptionId} className="text-muted-foreground text-xs">
             {isAutomatic
               ? t("asset:editSheet.automatic_on_description")
               : t("asset:editSheet.automatic_off_description")}
           </p>
         </div>
         <Popover open={open} onOpenChange={setOpen}>
-          <PopoverTrigger asChild>
-            <button type="button" className="shrink-0">
-              <Switch checked={isAutomatic} />
-            </button>
+          <PopoverTrigger
+            render={
+              <button
+                type="button"
+                className="shrink-0"
+                aria-label={t("asset:editSheet.automatic_updates")}
+                aria-describedby={descriptionId}
+              />
+            }
+          >
+            <Switch checked={isAutomatic} tabIndex={-1} aria-hidden="true" />
           </PopoverTrigger>
-          <PopoverContent className="w-[360px] p-4" align="end">
+          <PopoverContent className="w-90 p-4" align="end">
             <div className="space-y-4">
               <h4 className="font-medium">
                 {isAutomatic
@@ -228,7 +254,7 @@ function PricingModeToggle({
                   <p className="text-muted-foreground text-sm">
                     {t("asset:editSheet.disable_automatic_description")}
                   </p>
-                  <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
+                  <p className="text-warning text-sm font-medium">
                     {t("asset:editSheet.disable_automatic_warning")}
                   </p>
                 </>
@@ -237,7 +263,7 @@ function PricingModeToggle({
                   <p className="text-muted-foreground text-sm">
                     {t("asset:editSheet.enable_automatic_description")}
                   </p>
-                  <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
+                  <p className="text-warning text-sm font-medium">
                     {t("asset:editSheet.enable_automatic_warning")}
                   </p>
                 </>
@@ -379,7 +405,7 @@ function SymbolMappingRow({
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [symbol, provider, instrumentType, exchangeMic, quoteCcy, fieldId, onValidationChange]); // eslint-disable-line react-hooks/exhaustive-deps -- initialSymbol is intentionally captured at mount time only
+  }, [symbol, provider, instrumentType, exchangeMic, quoteCcy, fieldId, onValidationChange]); // oxlint-disable-line react/exhaustive-deps -- initialSymbol is intentionally captured at mount time only
 
   return (
     <tr className="border-b last:border-b-0">
@@ -388,9 +414,10 @@ function SymbolMappingRow({
           control={control}
           name={`providerConfig.${index}.provider` as Path<AssetFormValues>}
           render={({ field: providerField }) => (
-            <FormItem className="space-y-0">
+            <FormItem>
               <FormControl>
                 <ResponsiveSelect
+                  aria-label={t("asset:editSheet.data_provider")}
                   value={providerField.value as string | undefined}
                   onValueChange={providerField.onChange}
                   options={mappingProviderOptions}
@@ -408,42 +435,58 @@ function SymbolMappingRow({
           control={control}
           name={`providerConfig.${index}.symbol` as Path<AssetFormValues>}
           render={({ field: symbolField }) => (
-            <FormItem className="space-y-0">
+            <FormItem>
               <FormControl>
                 <div className="relative flex items-center">
                   <Input
-                    placeholder={getSymbolPlaceholder(provider ?? "")}
+                    placeholder={
+                      provider === "MOEX"
+                        ? t("asset:editSheet.moex_symbol_placeholder")
+                        : getSymbolPlaceholder(provider ?? "")
+                    }
                     {...{
                       ...symbolField,
                       value: (symbolField.value as string | undefined) ?? "",
                     }}
-                    className="h-9 pr-8"
+                    className="h-9 pe-8"
                   />
-                  <span className="absolute right-2 flex items-center">
+                  <span className="absolute end-2 flex items-center">
                     {validationStatus === "loading" && (
                       <span data-testid="symbol-validation-loading">
-                        <Icons.Spinner className="text-muted-foreground h-3.5 w-3.5 animate-spin" />
+                        <Spinner className="text-muted-foreground h-3.5 w-3.5" />
                       </span>
                     )}
                     {validationStatus === "valid" && (
                       <span data-testid="symbol-validation-valid">
-                        <Icons.Check className="h-3.5 w-3.5 text-green-500" />
+                        <Icons.Check className="text-success h-3.5 w-3.5" />
                       </span>
                     )}
                     {validationStatus === "invalid" && (
                       <span data-testid="symbol-validation-invalid">
-                        <Icons.AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                        <Icons.AlertCircle className="text-destructive h-3.5 w-3.5" />
                       </span>
                     )}
                   </span>
                 </div>
               </FormControl>
+              {provider === "MOEX" && (
+                <p className="text-muted-foreground text-xs">
+                  {t("asset:editSheet.moex_symbol_hint")}
+                </p>
+              )}
             </FormItem>
           )}
         />
       </td>
       <td className="px-2 py-2">
-        <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onRemove}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={onRemove}
+          aria-label={t("common:remove")}
+        >
           <Icons.Close className="h-4 w-4" />
         </Button>
       </td>
@@ -462,6 +505,7 @@ export function AssetEditSheet({
   const dateFormatting = useDateFormatting();
 
   const { t } = useTranslation();
+  const isMobile = useIsMobileViewport();
   const EDIT_INSTRUMENT_TYPE_OPTIONS = useMemo(
     () =>
       [
@@ -475,6 +519,8 @@ export function AssetEditSheet({
   );
   const [activeTab, setActiveTab] = useState<EditTab>(defaultTab);
   const [logoDialogOpen, setLogoDialogOpen] = useState(false);
+  const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const generalFormId = useId();
   const [symbolValidations, setSymbolValidations] = useState<
     Record<string, SymbolValidationStatus>
   >({});
@@ -543,8 +589,12 @@ export function AssetEditSheet({
       });
     }
 
+    // Funds that don't trade on an exchange, such as a broker's own funds. An
+    // empty value saves as null, which clears the exchange.
+    options.unshift({ value: "", label: t("asset:editSheet.no_exchange") });
+
     return options;
-  }, [exchanges, currentMic, asset?.exchangeName]);
+  }, [exchanges, currentMic, asset?.exchangeName, t]);
 
   // Split taxonomies by selection type
   const { singleSelectTaxonomies, multiSelectTaxonomies } = useMemo(() => {
@@ -556,7 +606,7 @@ export function AssetEditSheet({
   }, [taxonomies]);
 
   const form = useForm<AssetFormValues>({
-    resolver: zodResolver(assetFormSchema(t)),
+    resolver: zodResolver(assetFormSchema(t)) as Resolver<AssetFormValues>,
     defaultValues: {
       name: asset?.name ?? "",
       notes: asset?.notes ?? "",
@@ -591,7 +641,7 @@ export function AssetEditSheet({
   const defaultMultiplier = instrumentDefaultMultiplier(watchedInstrumentType);
 
   // Reset form when asset changes
-  useEffect(() => {
+  useEffectOnChange(() => {
     if (asset) {
       form.reset({
         name: asset.name ?? "",
@@ -614,7 +664,7 @@ export function AssetEditSheet({
   }, [asset, form]);
 
   // Reset tab and validation state when sheet opens
-  useEffect(() => {
+  useEffectOnChange(() => {
     if (open) {
       setActiveTab(defaultTab);
       setSymbolValidations({});
@@ -685,7 +735,10 @@ export function AssetEditSheet({
           instrumentType: values.instrumentType || null,
           quoteMode: values.quoteMode,
           quoteCcy: values.quoteCcy,
-          instrumentExchangeMic: normalizedMic || null,
+          // null clears the exchange, so send it only when there is one to
+          // clear; an untouched empty field leaves a newer stored one alone.
+          instrumentExchangeMic:
+            normalizedMic || (normalizeMic(asset.instrumentExchangeMic) ? null : undefined),
           providerConfig: serializedOverrides,
           metadata: newMetadata,
         });
@@ -701,6 +754,15 @@ export function AssetEditSheet({
 
   const isManualMode = form.watch("quoteMode") === QuoteMode.MANUAL;
   const isSaving = updateAssetProfileMutation.isPending;
+  const { isDirty } = form.formState;
+  const requestClose = () => {
+    if (isSaving) return;
+    if (isDirty) {
+      setShowDiscardDialog(true);
+    } else {
+      onOpenChange(false);
+    }
+  };
 
   // Check if current asset kind is system-managed (shouldn't allow editing)
   const isSystemManagedKind = asset?.kind === "FX";
@@ -708,8 +770,20 @@ export function AssetEditSheet({
   if (!asset) return null;
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="pb-safe flex h-full w-full flex-col sm:max-w-2xl">
+    <Sheet
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true);
+        else requestClose();
+      }}
+    >
+      <SheetContent
+        side={isMobile ? "bottom" : "inline-end"}
+        className={cn(
+          "flex h-full flex-col",
+          isMobile ? "mx-1 rounded-t-4xl [--overlay-max-height:90dvh]" : "w-full sm:max-w-2xl",
+        )}
+      >
         <SheetHeader className="shrink-0 pb-4">
           <div className="flex items-center gap-3">
             <EditableTickerAvatar
@@ -768,7 +842,11 @@ export function AssetEditSheet({
             {/* General Tab */}
             <TabsContent value="general" className="mt-0 h-full">
               <Form {...form}>
-                <form onSubmit={form.handleSubmit(handleSave)} className="space-y-6">
+                <form
+                  id={generalFormId}
+                  onSubmit={form.handleSubmit(handleSave)}
+                  className="space-y-6"
+                >
                   {/* FX: Base and Quote Currency (both disabled) */}
                   {asset.kind === "FX" ? (
                     <div className="space-y-6">
@@ -778,6 +856,7 @@ export function AssetEditSheet({
                             {t("asset:editSheet.base_currency")}
                           </label>
                           <Input
+                            aria-label={t("asset:editSheet.base_currency")}
                             value={asset.instrumentSymbol ?? ""}
                             disabled
                             className="bg-muted/50"
@@ -787,7 +866,12 @@ export function AssetEditSheet({
                           <label className="text-sm font-medium">
                             {t("asset:editSheet.quote_currency")}
                           </label>
-                          <Input value={asset.quoteCcy ?? ""} disabled className="bg-muted/50" />
+                          <Input
+                            aria-label={t("asset:editSheet.quote_currency")}
+                            value={asset.quoteCcy ?? ""}
+                            disabled
+                            className="bg-muted/50"
+                          />
                         </div>
                       </div>
 
@@ -844,17 +928,6 @@ export function AssetEditSheet({
                           </FormItem>
                         )}
                       />
-
-                      <div className="flex justify-end gap-3 pt-4">
-                        <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-                          {t("common:cancel")}
-                        </Button>
-                        <Button type="submit" disabled={isSaving}>
-                          {isSaving
-                            ? t("asset:editSheet.saving")
-                            : t("asset:editSheet.save_changes")}
-                        </Button>
-                      </div>
                     </div>
                   ) : (
                     /* Regular assets: Symbol, Currency, Name, Notes, Asset Type, Exchange */
@@ -864,7 +937,12 @@ export function AssetEditSheet({
                           <label className="text-sm font-medium">
                             {t("asset:editSheet.symbol")}
                           </label>
-                          <Input value={asset.displayCode ?? ""} disabled className="bg-muted/50" />
+                          <Input
+                            aria-label={t("asset:editSheet.symbol")}
+                            value={asset.displayCode ?? ""}
+                            disabled
+                            className="bg-muted/50"
+                          />
                         </div>
                         <FormField
                           control={form.control}
@@ -951,6 +1029,7 @@ export function AssetEditSheet({
                             <FormItem>
                               <FormLabel>{t("asset:editSheet.instrument_type")}</FormLabel>
                               <Select
+                                items={EDIT_INSTRUMENT_TYPE_OPTIONS}
                                 onValueChange={field.onChange}
                                 value={field.value ?? ""}
                                 disabled={isSystemManagedKind}
@@ -981,6 +1060,7 @@ export function AssetEditSheet({
                               <FormLabel>{t("asset:editSheet.exchange")}</FormLabel>
                               <FormControl>
                                 <SearchableSelect
+                                  aria-label={t("asset:editSheet.exchange")}
                                   options={exchangeOptions}
                                   value={field.value ?? ""}
                                   onValueChange={field.onChange}
@@ -1050,7 +1130,14 @@ export function AssetEditSheet({
                             render={({ field }) => (
                               <FormItem>
                                 <FormLabel>{t("asset:editSheet.coupon_frequency")}</FormLabel>
-                                <Select onValueChange={field.onChange} value={field.value ?? ""}>
+                                <Select
+                                  items={COUPON_FREQUENCIES.map((frequency) => ({
+                                    value: frequency,
+                                    label: t(`asset:editSheet.couponFrequency.${frequency}`),
+                                  }))}
+                                  onValueChange={field.onChange}
+                                  value={field.value ?? ""}
+                                >
                                   <FormControl>
                                     <SelectTrigger className="h-11">
                                       <SelectValue
@@ -1095,27 +1182,6 @@ export function AssetEditSheet({
                           />
                         </div>
                       )}
-
-                      <div className="flex justify-end gap-3 pt-4">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          onClick={() => onOpenChange(false)}
-                          disabled={isSaving}
-                        >
-                          {t("common:cancel")}
-                        </Button>
-                        <Button type="submit" disabled={isSaving}>
-                          {isSaving ? (
-                            <span className="flex items-center gap-2">
-                              <Icons.Spinner className="h-4 w-4 animate-spin" />{" "}
-                              {t("asset:editSheet.saving_short")}
-                            </span>
-                          ) : (
-                            t("asset:editSheet.save_changes_lower")
-                          )}
-                        </Button>
-                      </div>
                     </div>
                   )}
                 </form>
@@ -1143,7 +1209,7 @@ export function AssetEditSheet({
                       key={taxonomy.id}
                       taxonomyId={taxonomy.id}
                       assetId={asset.id}
-                      label={taxonomy.name}
+                      label={getTaxonomyLabel(t, taxonomy.id, taxonomy.name)}
                     />
                   ))}
 
@@ -1153,7 +1219,7 @@ export function AssetEditSheet({
                       key={taxonomy.id}
                       taxonomyId={taxonomy.id}
                       assetId={asset.id}
-                      label={taxonomy.name}
+                      label={getTaxonomyLabel(t, taxonomy.id, taxonomy.name)}
                     />
                   ))}
               </div>
@@ -1200,12 +1266,13 @@ export function AssetEditSheet({
                           </div>
                         </div>
                       ) : (
-                        <Alert variant="destructive" className="border-0 bg-transparent p-0">
-                          <Icons.AlertCircle className="h-4 w-4" />
-                          <AlertDescription>
-                            {t("asset:editSheet.price_fetch_error")}
-                          </AlertDescription>
-                        </Alert>
+                        <p
+                          role="alert"
+                          className="text-destructive flex items-center gap-2 text-sm"
+                        >
+                          <Icons.AlertCircle className="h-4 w-4 shrink-0" />
+                          {t("asset:editSheet.price_fetch_error")}
+                        </p>
                       )}
                     </div>
 
@@ -1231,6 +1298,14 @@ export function AssetEditSheet({
                             {customProviders.length > 0 ? (
                               <Select
                                 value={field.value ?? "__auto__"}
+                                items={[
+                                  { value: "__auto__", label: t("asset:editSheet.auto_default") },
+                                  ...builtinProviders.map((p) => ({ value: p.id, label: p.name })),
+                                  ...customProviders.map((cp) => ({
+                                    value: `CUSTOM:${cp.id}`,
+                                    label: cp.name,
+                                  })),
+                                ]}
                                 onValueChange={(v) =>
                                   field.onChange(v === "__auto__" ? undefined : v)
                                 }
@@ -1307,7 +1382,7 @@ export function AssetEditSheet({
                             size="sm"
                             onClick={() => appendOverride({ provider: "YAHOO", symbol: "" })}
                           >
-                            <Icons.Plus className="mr-1 h-3 w-3" />
+                            <Icons.Plus className="me-1 h-3 w-3" />
                             {t("asset:editSheet.add")}
                           </Button>
                         </div>
@@ -1329,10 +1404,10 @@ export function AssetEditSheet({
                             <table className="w-full">
                               <thead>
                                 <tr className="bg-muted/50 border-b">
-                                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                                  <th className="text-muted-foreground px-4 py-2 text-start text-xs font-medium">
                                     {t("asset:editSheet.provider")}
                                   </th>
-                                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                                  <th className="text-muted-foreground px-4 py-2 text-start text-xs font-medium">
                                     {t("asset:editSheet.symbol")}
                                   </th>
                                   <th className="w-10"></th>
@@ -1364,32 +1439,6 @@ export function AssetEditSheet({
                         )}
                       </div>
                     )}
-
-                    {/* Save Actions */}
-                    <div className="flex justify-end gap-3 border-t pt-4">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={() => onOpenChange(false)}
-                        disabled={isSaving}
-                      >
-                        {t("common:cancel")}
-                      </Button>
-                      <Button
-                        type="button"
-                        onClick={form.handleSubmit(handleSave)}
-                        disabled={isSaving}
-                      >
-                        {isSaving ? (
-                          <span className="flex items-center gap-2">
-                            <Icons.Spinner className="h-4 w-4 animate-spin" />{" "}
-                            {t("asset:editSheet.saving_short")}
-                          </span>
-                        ) : (
-                          t("asset:editSheet.save_changes_lower")
-                        )}
-                      </Button>
-                    </div>
                   </div>
                 </Form>
               </div>
@@ -1397,16 +1446,51 @@ export function AssetEditSheet({
           </div>
         </Tabs>
 
-        <div className="mt-auto border-t pt-4 sm:hidden">
+        <div className="mt-auto flex shrink-0 justify-end gap-3 border-t pt-4">
           <Button
             type="button"
-            variant="ghost"
-            className="w-full"
-            onClick={() => onOpenChange(false)}
+            variant="outline"
+            className="flex-1 sm:flex-none"
+            onClick={requestClose}
+            disabled={isSaving}
           >
-            {t("asset:editSheet.close")}
+            {activeTab === "classification" ? t("asset:editSheet.close") : t("common:cancel")}
           </Button>
+          {activeTab !== "classification" && (
+            <Button
+              type={activeTab === "general" ? "submit" : "button"}
+              form={activeTab === "general" ? generalFormId : undefined}
+              className="flex-1 sm:flex-none"
+              onClick={activeTab === "market-data" ? form.handleSubmit(handleSave) : undefined}
+              disabled={isSaving}
+            >
+              {isSaving
+                ? t("asset:editSheet.saving_short")
+                : t("asset:editSheet.save_changes_lower")}
+            </Button>
+          )}
         </div>
+        <AlertDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("holdings:discard_changes_title")}</AlertDialogTitle>
+              <AlertDialogDescription>{t("holdings:discard_changes_desc")}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("holdings:keep_editing")}</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => {
+                  form.reset();
+                  setShowDiscardDialog(false);
+                  onOpenChange(false);
+                }}
+              >
+                {t("holdings:discard")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </SheetContent>
     </Sheet>
   );

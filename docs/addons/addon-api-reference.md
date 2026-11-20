@@ -412,7 +412,10 @@ Addons using the review fields or asset patch semantics must set
 
 #### `saveMany(request: ActivityBulkMutationRequest): Promise<ActivityBulkMutationResult>`
 
-Creates, updates, and deletes activities in one request.
+Creates, updates, and deletes activities in one request. Update payloads expose
+only the public SDK fields, including the legacy `notes` alias for `comment`.
+Native controls such as `unlinkTransferPairId` are not forwarded by `update` or
+`saveMany`. Use `activities.unlinkTransfer` with its explicit function grant.
 
 ```typescript
 const result = await ctx.api.activities.saveMany({
@@ -463,6 +466,108 @@ omitted, `TRANSFER_IN` and `TRANSFER_OUT` default to internal at the portfolio
 boundary. For `CREDIT`, omission keeps the subtype default (`BONUS` is external;
 other credit subtypes are internal).
 
+An in-kind conversion (a fund switch carried at cost, such as a Spanish
+_traspaso_) is two `ADJUSTMENT` rows that share a `sourceGroupId`: the units
+that leave (`CONVERSION_OUT`) and the units that arrive (`CONVERSION_IN`), in
+one account on one day, without price, amount or fee. Import both rows together;
+a conversion row without its other row fails the import. Other rows ignore
+`sourceGroupId`.
+
+```typescript
+const conversion: ActivityImport[] = [
+  {
+    accountId: "account-123",
+    activityType: "ADJUSTMENT",
+    subtype: "CONVERSION_OUT",
+    date: "2026-09-04",
+    symbol: "FUNDA",
+    quantity: 25,
+    currency: "EUR",
+    sourceGroupId: "switch-2026-09-04",
+    isValid: true,
+    isDraft: false,
+  },
+  {
+    accountId: "account-123",
+    activityType: "ADJUSTMENT",
+    subtype: "CONVERSION_IN",
+    date: "2026-09-04",
+    symbol: "FUNDB",
+    quantity: 40,
+    currency: "EUR",
+    sourceGroupId: "switch-2026-09-04",
+    isValid: true,
+    isDraft: false,
+  },
+];
+```
+
+Use `charges` to keep the fee and tax lines a statement lists. Each line is a
+`fee` or `tax` with a free-text label and an amount in the row's currency. The
+fee lines must add up to `fee` and the tax lines to `tax`, or the row is
+rejected (`checkImport` reports it under `errors.charges`). Lines in a minor
+unit such as GBp are converted to the major unit with the totals. The lines are
+stored in the activity's `metadata.charges` and only describe the totals: every
+calculation keeps using `fee` and `tax`. Editing a total later without sending
+new lines drops them.
+
+```typescript
+const buy: ActivityImport = {
+  accountId: "account-123",
+  activityType: "BUY",
+  date: "2026-09-04",
+  symbol: "AZN.L",
+  quantity: 10,
+  unitPrice: 140.82,
+  currency: "GBP",
+  fee: 9.99,
+  tax: 7.04,
+  charges: [
+    { category: "fee", label: "Commission", amount: 8 },
+    { category: "fee", label: "Exchange fee", amount: 1.99 },
+    { category: "tax", label: "Stamp duty", amount: 7.04 },
+  ],
+  isValid: true,
+  isDraft: false,
+};
+```
+
+Use `sourceRecordId` to give each row the ID your source has for its
+transaction, such as a statement's reference. A row with an ID is a duplicate of
+the activity your add-on imported with the same ID into the same account,
+whatever its values or comment, and is skipped like other duplicates
+(`checkImport` sets `duplicateOfId`). Without IDs, two transactions with the
+same values and comment in one account are duplicates of each other; with
+different IDs, both import. Keep each ID the same in every import and different
+for every separate transaction. A row with an ID also matches an activity it
+would match without one that was imported before you sent IDs, so sending IDs
+doesn't import earlier rows again.
+
+Use `metadata` for details to keep with the activity. Your add-on's rows are
+stored with `sourceRecordId` `addon:<your add-on id>:<ID>` and the metadata
+under `metadata.addons[<your add-on id>]`. Matching by ID is scoped to your
+add-on; the values fallback can match any older import without an ID in the
+account, including CSV or another add-on's imports. Your metadata can't change
+the metadata keys Wealthfolio reads. `checkImport` and `import` return these
+fields without the host namespace. IDs are trimmed; blank IDs and null or
+omitted fields are omitted.
+
+```typescript
+const row: ActivityImport = {
+  accountId: "account-123",
+  activityType: "BUY",
+  date: "2026-09-04",
+  symbol: "AAPL",
+  quantity: 10,
+  unitPrice: 180,
+  currency: "USD",
+  sourceRecordId: "statement-2026-09/txn-0042",
+  metadata: { statementLine: 42 },
+  isValid: true,
+  isDraft: false,
+};
+```
+
 #### `checkImport(activities: ActivityImport[]): Promise<ActivityImport[]>`
 
 Validates and normalizes activities without importing them.
@@ -492,6 +597,8 @@ const savedMapping = await ctx.api.activities.saveImportMapping(mapping);
 
 Get the linked transfer pair for a given activity. Returns `null` when the
 activity has no pair; rejects only on failure, such as an unknown activity id.
+For a conversion row it returns the conversion: `transferOut` is the
+`CONVERSION_OUT` row and `transferIn` the `CONVERSION_IN` row.
 
 ```typescript
 const pair = await ctx.api.activities.getTransferPair("activity-123");
@@ -768,6 +875,58 @@ const performance = await ctx.api.performance.calculateAccountsSimple([
 
 ---
 
+## Allocation Targets API
+
+Read the user's allocation targets and how their holdings compare to them.
+Read-only: targets are created and edited only in the Wealthfolio UI. Requires a
+release shipping the Allocation Targets API. Both methods use the high-risk
+`allocation-targets` permission; declare only the methods your addon calls.
+
+Weights and differences are in basis points (10000 = 100%). Values are in the
+base currency.
+
+| Method               | Permission category       | Behavior                                                                                 |
+| -------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `getAll()`           | high `allocation-targets` | Live targets with scope, range settings and weights; archived targets are left out       |
+| `getDrift(targetId)` | high `allocation-targets` | Current against target by category over the target's own scope; `null` for an unknown id |
+
+### Methods
+
+#### `getAll(): Promise<AllocationTarget[]>`
+
+Returns every live target. Several targets can share a scope: `scopeType` is
+`'all'`, `'portfolio'` or `'account'`, and `scopeId` is the portfolio or account
+id (`null` for `'all'`). Each weight carries its category's `categoryId`,
+`categoryKey` and `categoryName`. Ids of user-created categories differ between
+installs, so match categories by `categoryKey`.
+
+```typescript
+const targets = await ctx.api.allocationTargets.getAll();
+const overall = targets.find((target) => target.scopeType === "all");
+const realEstateBps =
+  overall?.weights.find((weight) => weight.categoryKey === "REAL_ESTATE")
+    ?.targetBps ?? 0;
+```
+
+#### `getDrift(targetId: string): Promise<AllocationDrift | null>`
+
+Compares current holdings with the target over the target's own scope. There is
+one row per weighted category, and a `not_targeted` row for each held category
+without a weight. `status` is `'in_band'`, `'underweight'`, `'overweight'` or
+`'not_targeted'`, judged against `effectiveBandBps`. It values holdings live, so
+call it when the user opens a view rather than on a timer.
+
+```typescript
+const drift = await ctx.api.allocationTargets.getDrift(targetId);
+if (drift) {
+  for (const row of drift.rows) {
+    console.log(row.categoryName, row.currentBps, row.targetBps, row.driftBps);
+  }
+}
+```
+
+---
+
 ## Exchange Rates API
 
 Manage currency exchange rates for multi-currency portfolios.
@@ -851,15 +1010,36 @@ applying to future matching imports, not just the activities that exist when
 it's created.
 
 The categorization methods require Wealthfolio 3.8 or newer. `getReport` and
-`searchCashActivities` require a Wealthfolio release that ships those methods
-(unreleased at the time of writing). Most methods use the medium-risk `spending`
-permission. Transaction-level `searchCashActivities` uses the high-risk
-`activities` permission because it returns transaction records. Declare only the
-methods your addon calls.
+`searchCashActivities` require Wealthfolio 3.9 or newer. Most methods use the
+medium-risk `spending` permission. Transaction-level `searchCashActivities` uses
+the high-risk `activities` permission because it returns transaction records.
+Declare only the methods your addon calls.
 
 `kind` selects which of Wealthfolio's three fixed activity-scope taxonomies a
 category or rule belongs to: `"expense"`, `"income"`, or `"saving"`. Asset
 classification taxonomies aren't reachable through this API.
+
+### Context, budget, events and explicit metadata writes
+
+The following methods require a release shipping the expanded Spending API.
+Declare each exact function; existing addon grants are never widened.
+
+| Method                                         | Permission category | Behavior                                                                                                |
+| ---------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `getContext()`                                 | medium `spending`   | Enabled state, effective opted-in account IDs and excluded category IDs                                 |
+| `getBudget(periodKey?)`                        | medium `spending`   | Pure native snapshot with groups, mappings, targets, rollovers and computed actuals; no default seeding |
+| `getEvents()` / `getEventTypes()`              | medium `spending`   | Existing event definitions/type metadata                                                                |
+| `assignCategory(activityId, kind, categoryId)` | high `activities`   | Native manual assignment; protects split rows and validates the cashflow taxonomy                       |
+| `unassignCategory(activityId, kind)`           | high `activities`   | Clear the selected single assignment; split rows require the explicit native split workflow             |
+| `setEvent(activityId, eventIdOrNull)`          | high `activities`   | Tag/untag an eligible opted-in cash transaction; dates may lie outside the event                        |
+| `upsertBudgetTarget(target, periodKey?)`       | high `budgets`      | Native target write and resulting snapshot; `target.periodKey` explicitly selects default or month      |
+
+Defaults affect every month that inherits them, including historical months;
+monthly overrides remain authoritative. Missing-FX conversions are omitted from
+native totals; additive `calculationQuality` reports affected transaction counts
+and currencies on report periods, event summaries and `budget.computed`. Budget
+coverage includes historical actuals read for rollovers. A zero count only
+describes conversion coverage, not source-data completeness.
 
 ### Methods
 
@@ -882,6 +1062,9 @@ their cash-flow bucket, category assignments, splits, and effective spending
 amount. Filters supplied in `accountIds` are intersected with the configured
 Spending accounts. This method requires the high-risk
 `activities.searchCashActivities` permission.
+
+Split `amount` values are exact decimal strings. Wealthfolio 3.11.0 returned
+numbers; consumers should use explicit decimal arithmetic when totaling them.
 
 `netAmount` and `visibleSpendingAmount` use the activity's own `currency`.
 `netAmountBase`, when available, uses the response's `baseCurrency` with the
@@ -1243,6 +1426,47 @@ await ctx.api.storage.delete("prefs");
 
 Securely store and retrieve sensitive data like API keys and tokens. All data is
 scoped to your addon for security.
+
+On Windows, the host transparently splits values that exceed Credential
+Manager's per-entry limit and reassembles them on reads. Add-ons do not need to
+split values or inspect platform error messages. Each value may contain up to 1
+MiB of UTF-8 data on Windows, subject to the system credential store's available
+capacity. Existing single-entry credentials remain readable, and deleting a
+secret removes its chunks. A missing or invalid chunk causes `get` to reject; it
+does not return a partial value or `null`.
+
+Chunked values require a host version that supports this format. Older host
+versions cannot reconstruct values written in chunks. They also cannot remove
+the chunks or their metadata when replacing or deleting a secret. If you
+downgrade, replace or delete that secret, and upgrade again, the old chunked
+value can reappear because its metadata still takes precedence. Before
+downgrading, delete affected secrets using this API in a host that supports
+chunking, then configure them again in the older host.
+
+Other platforms continue to use their existing native or file-backed secret
+storage.
+
+Rejected host calls expose a stable `code` property on the `Error` when the host
+can classify the failure. `SECRET_TOO_LARGE` means the value exceeds the storage
+limit; `SECRET_STORE_UNAVAILABLE` means the system credential store cannot be
+accessed or has insufficient capacity. A refused chunked write preserves the
+previous value. Messages are localized and must not be parsed to identify a
+failure. Older host versions may omit `code`.
+
+```typescript
+try {
+  await ctx.api.secrets.set("auth-token", userAuthToken);
+} catch (error) {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    error.code === "SECRET_STORE_UNAVAILABLE"
+  ) {
+    // Ask the user to check credential store access and available capacity.
+  }
+  throw error;
+}
+```
 
 ### Methods
 

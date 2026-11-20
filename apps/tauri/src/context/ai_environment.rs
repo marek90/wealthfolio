@@ -3,17 +3,32 @@
 //! Provides the wealthfolio-ai crate with access to Tauri services
 //! for tool execution and settings management.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
+
+use tauri::AppHandle;
 
 use wealthfolio_ai::{AgentEnvironment, AiEnvironment, ChatRepositoryTrait};
 use wealthfolio_core::{
-    accounts::AccountServiceTrait, activities::ActivityServiceTrait,
-    allocation::AllocationServiceTrait, assets::AssetServiceTrait, goals::GoalServiceTrait,
-    health::HealthServiceTrait, holdings::HoldingsServiceTrait, income::IncomeServiceTrait,
-    limits::ContributionLimitServiceTrait, performance::PerformanceServiceTrait,
-    portfolio::net_worth::NetWorthServiceTrait, portfolios::PortfolioServiceTrait,
-    quotes::QuoteServiceTrait, secrets::SecretStore, settings::SettingsServiceTrait,
-    taxonomies::TaxonomyServiceTrait, valuation::ValuationServiceTrait,
+    accounts::AccountServiceTrait,
+    activities::ActivityServiceTrait,
+    allocation::AllocationServiceTrait,
+    assets::{AlternativeAssetServiceTrait, AssetServiceTrait},
+    custom_provider::{CustomProviderService, CustomProviderWithSources},
+    fx::FxServiceTrait,
+    goals::GoalServiceTrait,
+    health::{HealthServiceTrait, HealthStatus},
+    holdings::HoldingsServiceTrait,
+    income::IncomeServiceTrait,
+    limits::ContributionLimitServiceTrait,
+    lots::LotRepositoryTrait,
+    performance::PerformanceServiceTrait,
+    portfolio::{net_worth::NetWorthServiceTrait, snapshot::SnapshotServiceTrait},
+    portfolios::PortfolioServiceTrait,
+    quotes::{MarketSyncMode, QuoteServiceTrait},
+    secrets::SecretStore,
+    settings::SettingsServiceTrait,
+    taxonomies::TaxonomyServiceTrait,
+    valuation::ValuationServiceTrait,
 };
 use wealthfolio_spending::activity_assignments::ActivityTaxonomyAssignmentService;
 use wealthfolio_spending::cash_activities::{CashActivityService, CashActivityServiceTrait};
@@ -21,12 +36,19 @@ use wealthfolio_spending::categorization_rules::{
     CategorizationRulesService, CategorizationRulesServiceTrait,
 };
 
+/// The app handle and profile context portfolio jobs run with. The context
+/// owns this environment, so the environment is built first and the binding
+/// is set once the context is installed; it holds the context weakly so the
+/// profile can still close.
+pub type PortfolioJobBinding = Arc<OnceLock<(AppHandle, Weak<super::ServiceContext>)>>;
+
 /// Tauri-side implementation of AiEnvironment.
 ///
 /// Wraps existing services from ServiceContext to provide access
 /// to the AI crate for tool execution.
 pub struct TauriAiEnvironment {
     base_currency: Arc<RwLock<String>>,
+    timezone: Arc<RwLock<String>>,
     account_service: Arc<dyn AccountServiceTrait + Send + Sync>,
     activity_service: Arc<dyn ActivityServiceTrait + Send + Sync>,
     holdings_service: Arc<dyn HoldingsServiceTrait + Send + Sync>,
@@ -48,6 +70,17 @@ pub struct TauriAiEnvironment {
     cash_activity_service: Arc<CashActivityService>,
     activity_taxonomy_assignment_service: Arc<ActivityTaxonomyAssignmentService>,
     categorization_rules_service: Arc<CategorizationRulesService>,
+    budget_service: Arc<dyn wealthfolio_spending::budget::BudgetServiceTrait>,
+    spending_events_service: Arc<dyn wealthfolio_spending::events::EventsServiceTrait>,
+    spending_analytics_service: Arc<dyn wealthfolio_spending::analytics::AnalyticsServiceTrait>,
+    spending_insight_service: Arc<dyn wealthfolio_spending::insight::InsightServiceTrait>,
+    // Read by the health checks and the holdings snapshot tools.
+    snapshot_service: Arc<dyn SnapshotServiceTrait + Send + Sync>,
+    lot_repository: Arc<dyn LotRepositoryTrait + Send + Sync>,
+    custom_provider_service: Arc<CustomProviderService>,
+    portfolio_jobs: PortfolioJobBinding,
+    fx_service: Arc<dyn FxServiceTrait + Send + Sync>,
+    alternative_asset_service: Arc<dyn AlternativeAssetServiceTrait + Send + Sync>,
 }
 
 impl TauriAiEnvironment {
@@ -55,6 +88,7 @@ impl TauriAiEnvironment {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_currency: Arc<RwLock<String>>,
+        timezone: Arc<RwLock<String>>,
         account_service: Arc<dyn AccountServiceTrait + Send + Sync>,
         activity_service: Arc<dyn ActivityServiceTrait + Send + Sync>,
         holdings_service: Arc<dyn HoldingsServiceTrait + Send + Sync>,
@@ -76,9 +110,20 @@ impl TauriAiEnvironment {
         cash_activity_service: Arc<CashActivityService>,
         activity_taxonomy_assignment_service: Arc<ActivityTaxonomyAssignmentService>,
         categorization_rules_service: Arc<CategorizationRulesService>,
+        budget_service: Arc<dyn wealthfolio_spending::budget::BudgetServiceTrait>,
+        spending_events_service: Arc<dyn wealthfolio_spending::events::EventsServiceTrait>,
+        spending_analytics_service: Arc<dyn wealthfolio_spending::analytics::AnalyticsServiceTrait>,
+        spending_insight_service: Arc<dyn wealthfolio_spending::insight::InsightServiceTrait>,
+        snapshot_service: Arc<dyn SnapshotServiceTrait + Send + Sync>,
+        lot_repository: Arc<dyn LotRepositoryTrait + Send + Sync>,
+        custom_provider_service: Arc<CustomProviderService>,
+        portfolio_jobs: PortfolioJobBinding,
+        fx_service: Arc<dyn FxServiceTrait + Send + Sync>,
+        alternative_asset_service: Arc<dyn AlternativeAssetServiceTrait + Send + Sync>,
     ) -> Self {
         Self {
             base_currency,
+            timezone,
             account_service,
             activity_service,
             holdings_service,
@@ -100,11 +145,38 @@ impl TauriAiEnvironment {
             cash_activity_service,
             activity_taxonomy_assignment_service,
             categorization_rules_service,
+            budget_service,
+            spending_events_service,
+            spending_analytics_service,
+            spending_insight_service,
+            snapshot_service,
+            lot_repository,
+            custom_provider_service,
+            portfolio_jobs,
+            fx_service,
+            alternative_asset_service,
         }
     }
 }
 
+#[async_trait::async_trait]
 impl AgentEnvironment for TauriAiEnvironment {
+    fn budget_service(&self) -> Arc<dyn wealthfolio_spending::budget::BudgetServiceTrait> {
+        self.budget_service.clone()
+    }
+    fn spending_events_service(&self) -> Arc<dyn wealthfolio_spending::events::EventsServiceTrait> {
+        self.spending_events_service.clone()
+    }
+    fn spending_analytics_service(
+        &self,
+    ) -> Arc<dyn wealthfolio_spending::analytics::AnalyticsServiceTrait> {
+        self.spending_analytics_service.clone()
+    }
+    fn spending_insight_service(
+        &self,
+    ) -> Arc<dyn wealthfolio_spending::insight::InsightServiceTrait> {
+        self.spending_insight_service.clone()
+    }
     fn base_currency(&self) -> String {
         self.base_currency
             .read()
@@ -182,6 +254,62 @@ impl AgentEnvironment for TauriAiEnvironment {
 
     fn categorization_rules_service(&self) -> Arc<dyn CategorizationRulesServiceTrait> {
         self.categorization_rules_service.clone()
+    }
+
+    fn custom_providers(&self) -> wealthfolio_core::Result<Vec<CustomProviderWithSources>> {
+        self.custom_provider_service.get_all()
+    }
+
+    async fn request_portfolio_job(&self, mode: MarketSyncMode) -> wealthfolio_core::Result<()> {
+        let unavailable = || {
+            wealthfolio_core::Error::Unexpected(
+                "The profile is not ready to refresh market data".to_string(),
+            )
+        };
+        let (handle, context) = self.portfolio_jobs.get().ok_or_else(unavailable)?;
+        let context = context.upgrade().ok_or_else(unavailable)?;
+        let payload = crate::events::PortfolioRequestPayload::builder()
+            .account_ids(None)
+            .market_sync_mode(mode)
+            .build();
+        crate::listeners::handle_portfolio_request(handle.clone(), context, payload, false);
+        Ok(())
+    }
+
+    fn snapshot_service(&self) -> Option<Arc<dyn SnapshotServiceTrait>> {
+        Some(self.snapshot_service.clone())
+    }
+
+    fn fx_service(&self) -> Option<Arc<dyn FxServiceTrait>> {
+        Some(self.fx_service.clone())
+    }
+
+    fn alternative_asset_service(&self) -> Option<Arc<dyn AlternativeAssetServiceTrait>> {
+        Some(self.alternative_asset_service.clone())
+    }
+
+    async fn run_health_checks(&self) -> wealthfolio_core::Result<HealthStatus> {
+        let configured_timezone = self
+            .timezone
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.health_service
+            .run_full_checks(
+                &self.base_currency(),
+                self.account_service.clone(),
+                self.holdings_service.clone(),
+                self.quote_service.clone(),
+                self.asset_service.clone(),
+                self.taxonomy_service.clone(),
+                self.valuation_service.clone(),
+                self.snapshot_service.clone(),
+                self.activity_service.clone(),
+                self.lot_repository.clone(),
+                Some(configured_timezone.as_str()),
+                None,
+            )
+            .await
     }
 }
 

@@ -13,7 +13,8 @@ import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import { Holding, HOLDING_GROUP_ORDER } from "@/lib/types";
 import { AccountType, AssetKind, HoldingType } from "@/lib/constants";
 import { getBaseHoldingPerformancePercent } from "@/lib/holding-performance";
-import { cn, safeDivide } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { sumAmounts } from "@/lib/monetary-value";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -51,7 +52,7 @@ interface HoldingsGroupedTableProps {
 interface HoldingGroup {
   name: string;
   holdings: HoldingWithMeta[];
-  totalValue: number;
+  totalValue: number | null;
   order: number;
 }
 
@@ -124,11 +125,14 @@ export function HoldingsGroupedTable({
         const valueB = Math.abs(b.marketValue?.base ?? 0);
         return valueB - valueA;
       }),
-      totalValue: holdings.reduce((sum, h) => {
-        const value = h.marketValue?.base ?? 0;
-        // Liabilities are stored as positive but should reduce total
-        return sum + (h.isLiability ? -value : value);
-      }, 0),
+      totalValue: holdings.some((holding) => holding.weight == null)
+        ? null
+        : sumAmounts(
+            holdings.map((holding) => {
+              const value = holding.marketValue?.base;
+              return value == null ? null : holding.isLiability ? -value : value;
+            }),
+          ),
       order: HOLDING_GROUP_ORDER[name] ?? 99,
     }));
 
@@ -147,29 +151,31 @@ export function HoldingsGroupedTable({
           open={!collapsedGroups.has(group.name)}
           onOpenChange={() => toggleGroup(group.name)}
         >
-          <CollapsibleTrigger asChild>
-            <Button
-              variant="ghost"
-              className="hover:bg-muted/50 flex w-full items-center justify-between px-3 py-2"
-            >
-              <div className="flex items-center gap-2">
-                <Icons.ChevronDown
-                  className={cn(
-                    "h-4 w-4 transition-transform duration-200",
-                    collapsedGroups.has(group.name) && "-rotate-90",
-                  )}
-                />
-                <span className="font-medium">{getGroupLabel(t, group.name)}</span>
-                <span className="text-muted-foreground text-sm">({group.holdings.length})</span>
-              </div>
-              <AmountDisplay
-                value={group.totalValue}
-                currency={group.holdings[0]?.baseCurrency ?? baseCurrency}
-                isHidden={isBalanceHidden}
-                colorFormat={group.name === "Liabilities"}
-                className="font-medium"
+          <CollapsibleTrigger
+            render={
+              <Button
+                variant="ghost"
+                className="hover:bg-muted/50 flex w-full items-center justify-between px-3 py-2"
               />
-            </Button>
+            }
+          >
+            <div className="flex items-center gap-2">
+              <Icons.ChevronDown
+                className={cn(
+                  "h-4 w-4 transition-transform duration-200",
+                  collapsedGroups.has(group.name) && "-rotate-90",
+                )}
+              />
+              <span className="font-medium">{getGroupLabel(t, group.name)}</span>
+              <span className="text-muted-foreground text-sm">({group.holdings.length})</span>
+            </div>
+            <AmountDisplay
+              value={group.totalValue}
+              currency={group.holdings[0]?.baseCurrency ?? baseCurrency}
+              isHidden={isBalanceHidden}
+              colorFormat={group.name === "Liabilities"}
+              className="font-medium"
+            />
           </CollapsibleTrigger>
           <CollapsibleContent>
             <div className="divide-y">
@@ -224,32 +230,30 @@ function HoldingRow({
   const isClickable = !!holding.instrument?.id;
 
   // Calculate display values
-  const fxRate = holding.fxRate ?? 1;
-  const marketValueBase = holding.marketValue?.base ?? 0;
-  const marketValue = showConvertedValues ? marketValueBase : safeDivide(marketValueBase, fxRate);
+  const marketValue = showConvertedValues ? holding.marketValue.base : holding.marketValue.local;
   const currency = showConvertedValues ? holding.baseCurrency : holding.localCurrency;
 
   // For liabilities, display value as negative
-  const displayValue = holding.isLiability ? -Math.abs(marketValue) : marketValue;
+  const displayValue =
+    marketValue == null ? null : holding.isLiability ? -Math.abs(marketValue) : marketValue;
 
   const gainValue =
     performanceMode === "return"
       ? showConvertedValues
-        ? (holding.totalReturn?.base ?? holding.totalGain?.base ?? 0)
-        : (holding.totalReturn?.local ?? holding.totalGain?.local ?? 0)
+        ? holding.totalReturn?.base
+        : holding.totalReturn?.local
       : performanceMode === "pnl"
         ? showConvertedValues
-          ? (holding.totalGain?.base ?? 0)
-          : (holding.totalGain?.local ?? 0)
+          ? holding.totalGain?.base
+          : holding.totalGain?.local
         : showConvertedValues
-          ? (holding.dayChange?.base ?? 0)
-          : (holding.dayChange?.local ?? 0);
+          ? holding.dayChange?.base
+          : holding.dayChange?.local;
   const gainPct =
     performanceMode === "return"
       ? showConvertedValues
-        ? (getBaseHoldingPerformancePercent(holding, "totalReturn") ??
-          getBaseHoldingPerformancePercent(holding, "totalGain"))
-        : (holding.totalReturnPct ?? holding.totalGainPct)
+        ? getBaseHoldingPerformancePercent(holding, "totalReturn")
+        : holding.totalReturnPct
       : performanceMode === "pnl"
         ? showConvertedValues
           ? getBaseHoldingPerformancePercent(holding, "totalGain")
@@ -262,7 +266,7 @@ function HoldingRow({
         className={cn(
           "flex items-center gap-4 px-3 py-3",
           isClickable && "hover:bg-muted/50 cursor-pointer transition-colors",
-          isIndented && "pl-10",
+          isIndented && "ps-10",
         )}
         onClick={isClickable ? handleNavigate : undefined}
       >
@@ -291,12 +295,12 @@ function HoldingRow({
         </div>
 
         {/* Quantity Column */}
-        <div className="hidden w-24 flex-shrink-0 text-right md:block">
+        <div className="hidden w-24 flex-shrink-0 text-end md:block">
           <QuantityDisplay value={holding.quantity} isHidden={isBalanceHidden} />
         </div>
 
         {/* Value Column */}
-        <div className="w-28 flex-shrink-0 text-right">
+        <div className="w-28 flex-shrink-0 text-end">
           <AmountDisplay
             value={displayValue}
             currency={currency}
@@ -307,11 +311,11 @@ function HoldingRow({
         </div>
 
         {/* Gain/Loss Column */}
-        <div className="hidden w-28 flex-shrink-0 text-right sm:block">
+        <div className="hidden w-28 flex-shrink-0 text-end sm:block">
           {!holding.isLiability && (
             <>
               <AmountDisplay
-                value={gainValue ?? 0}
+                value={gainValue}
                 currency={currency}
                 isHidden={isBalanceHidden}
                 colorFormat={true}
@@ -324,7 +328,9 @@ function HoldingRow({
 
         {/* Actions Column */}
         <div className="w-8 flex-shrink-0">
-          {isClickable && <Icons.ChevronRight className="text-muted-foreground h-4 w-4" />}
+          {isClickable && (
+            <Icons.ChevronRight className="text-muted-foreground h-4 w-4 rtl:rotate-180" />
+          )}
         </div>
       </div>
 

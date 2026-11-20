@@ -112,6 +112,7 @@ pub fn normalize(raw: RawFacts) -> Result<Normalized, EngineError> {
     });
 
     let transfer_pairs = resolve_transfer_pairs(&activities, &mut diagnostics);
+    let conversions = resolve_conversions(&activities);
 
     let quotes = normalize_quotes(raw.quotes, &assets, &mut diagnostics);
 
@@ -211,6 +212,7 @@ pub fn normalize(raw: RawFacts) -> Result<Normalized, EngineError> {
             assets,
             activities,
             transfer_pairs,
+            conversions,
             quotes,
             fx_rates,
             observed_snapshots,
@@ -448,10 +450,7 @@ fn asset_facts(id: &AssetId, asset: &RawAsset, diagnostics: &mut Vec<Diagnostic>
         .instrument_type
         .as_deref()
         .map(|s| s.trim().to_ascii_uppercase());
-    let alternative = matches!(
-        kind.as_str(),
-        "PROPERTY" | "VEHICLE" | "COLLECTIBLE" | "PRECIOUS_METAL"
-    );
+    let alternative = asset.alternative;
     let is_option = instrument.as_deref() == Some("OPTION");
     let equity_like =
         kind == "INVESTMENT" && matches!(instrument.as_deref(), None | Some("EQUITY"));
@@ -485,6 +484,11 @@ fn asset_facts(id: &AssetId, asset: &RawAsset, diagnostics: &mut Vec<Diagnostic>
         contract_multiplier,
         allows_negative_lots: is_option || equity_like,
         requires_explicit_short_intent: equity_like,
+        instrument: match instrument.as_deref() {
+            Some("OPTION") => InstrumentClass::Option,
+            Some(_) => InstrumentClass::NotOption,
+            None => InstrumentClass::Untyped,
+        },
     }
 }
 
@@ -601,7 +605,6 @@ fn canonical_activity(
             .map(|g| g.trim().to_string())
             .filter(|g| !g.is_empty()),
         external_transfer: raw.external_transfer,
-        fx_conversion: raw.fx_conversion,
         is_security_transfer,
         source_system: raw
             .source_system
@@ -679,6 +682,8 @@ fn canonical_subtype(
         "POSITION_CLOSE" => Some(Subtype::PositionClose),
         "RETURN_OF_CAPITAL" => Some(Subtype::ReturnOfCapital),
         "NOTIONAL_DISTRIBUTION" => Some(Subtype::NotionalDistribution),
+        "CONVERSION_OUT" => Some(Subtype::ConversionOut),
+        "CONVERSION_IN" => Some(Subtype::ConversionIn),
         _ => None,
     };
     if shared.is_none() {
@@ -689,6 +694,119 @@ fn canonical_subtype(
         ));
     }
     shared
+}
+
+/// Whether a posted activity is a conversion row (rules R7.5).
+pub(crate) fn is_conversion_row(activity: &Activity) -> bool {
+    activity.kind == ActivityKind::Adjustment
+        && matches!(
+            activity.subtype,
+            Some(Subtype::ConversionOut | Subtype::ConversionIn)
+        )
+}
+
+/// Pairs conversion rows by `source_group_id` (rules R7.5). A group with a
+/// conversion row is a conversion: exactly one `CONVERSION_OUT` and one
+/// `CONVERSION_IN` ADJUSTMENT row and nothing else, in one account on one
+/// business day, with two different non-cash assets, units on both rows and
+/// no fee or tax. Every posted row of a group that breaks this, and a
+/// conversion row without a group, is rejected whole. Core's
+/// `ConversionPairResolution` applies the same rule when writing; a table
+/// test keeps the two in agreement.
+fn resolve_conversions(activities: &[Activity]) -> Conversions {
+    let mut conversions = Conversions::default();
+    let mut groups: BTreeMap<&str, Vec<&Activity>> = BTreeMap::new();
+    for activity in activities {
+        if let Some(group) = conversion_group(activity) {
+            groups.entry(group).or_default().push(activity);
+        }
+    }
+    for activity in activities.iter().filter(|a| is_conversion_row(a)) {
+        if conversion_group(activity).is_none() {
+            conversions.reject(
+                activity.id.clone(),
+                "a conversion row must be linked to its other row by a group".into(),
+            );
+        }
+    }
+    for (group, rows) in groups {
+        if !rows.iter().any(|row| is_conversion_row(row)) {
+            continue;
+        }
+        match build_conversion(group, &rows) {
+            Ok(pair) => conversions.insert(pair),
+            // The group's conversion rows are rejected; its other rows fold
+            // as they would alone, so no reader of them disagrees with the fold.
+            Err(reason) => {
+                for row in rows.into_iter().filter(|row| is_conversion_row(row)) {
+                    conversions.reject(row.id.clone(), reason.clone());
+                }
+            }
+        }
+    }
+    conversions
+}
+
+/// A row's group id; a blank one is none.
+fn conversion_group(activity: &Activity) -> Option<&str> {
+    activity
+        .source_group_id
+        .as_deref()
+        .filter(|group| !group.trim().is_empty())
+}
+
+fn build_conversion(group: &str, rows: &[&Activity]) -> Result<ConversionPair, String> {
+    let (out_leg, in_leg) = match rows {
+        [first, second] => match (first.subtype, second.subtype) {
+            (Some(Subtype::ConversionOut), Some(Subtype::ConversionIn)) => (*first, *second),
+            (Some(Subtype::ConversionIn), Some(Subtype::ConversionOut)) => (*second, *first),
+            _ => {
+                return Err(
+                    "a conversion must be one CONVERSION_OUT row and one CONVERSION_IN row".into(),
+                )
+            }
+        },
+        _ => {
+            return Err(format!(
+                "a conversion must be two rows, and its group has {}",
+                rows.len()
+            ))
+        }
+    };
+    if !is_conversion_row(out_leg) || !is_conversion_row(in_leg) {
+        return Err("both rows of a conversion must be adjustments".into());
+    }
+    if out_leg.account != in_leg.account {
+        return Err("both rows of a conversion must be in one account".into());
+    }
+    if out_leg.date != in_leg.date {
+        return Err("both rows of a conversion must be on one day".into());
+    }
+    let asset = |leg: &Activity| {
+        leg.asset
+            .as_ref()
+            .filter(|asset| !is_cash_symbol(asset.as_str()))
+            .map(|asset| asset.as_str().to_ascii_uppercase())
+    };
+    match (asset(out_leg), asset(in_leg)) {
+        (Some(from), Some(to)) if from != to => {}
+        _ => return Err("a conversion must exchange two different assets".into()),
+    }
+    if out_leg.quantity.is_zero() || in_leg.quantity.is_zero() {
+        return Err("both rows of a conversion must have units".into());
+    }
+    if [out_leg, in_leg]
+        .iter()
+        .any(|leg| !leg.fee.is_zero() || !leg.tax.is_zero())
+    {
+        return Err("a conversion must not have a fee or tax".into());
+    }
+    Ok(ConversionPair {
+        group_id: group.to_string(),
+        out_activity: out_leg.id.clone(),
+        in_activity: in_leg.id.clone(),
+        account: out_leg.account.clone(),
+    })
 }
 
 /// Pairs transfer legs by `source_group_id` (legacy `TransferPairResolution`):
@@ -793,35 +911,16 @@ fn build_pair(group: &str, legs: &[&Activity]) -> Result<TransferPair, String> {
     })
 }
 
-/// A same-account cash FX conversion whose legs both carry the import
-/// linker's record of it (internal flow, `implied_from_import`, matching
-/// currencies and amounts). Structural pairing alone is deliberately not
-/// enough to make a conversion contribution-neutral.
+/// A same-account cash FX conversion whose legs are both explicitly internal
+/// (`flow.is_external: false`), as the pair form, the transfer link and the
+/// import linker record it, whatever the legs' source. A structurally valid
+/// pair without that mark keeps the legacy behaviour.
 fn is_recorded_fx_conversion(transfer_in: &Activity, transfer_out: &Activity) -> bool {
-    if transfer_in.account != transfer_out.account
-        || transfer_in.is_security_transfer
-        || transfer_out.is_security_transfer
-    {
-        return false;
-    }
-    let (Some(source_amount), Some(destination_amount)) = (transfer_out.amount, transfer_in.amount)
-    else {
-        return false;
-    };
-    [transfer_in, transfer_out].iter().all(|leg| {
-        leg.external_transfer == Some(false)
-            && leg.fx_conversion.as_ref().is_some_and(|fx| {
-                fx.rate_source == "implied_from_import"
-                    && fx
-                        .source_currency
-                        .eq_ignore_ascii_case(transfer_out.currency.as_str())
-                    && fx
-                        .destination_currency
-                        .eq_ignore_ascii_case(transfer_in.currency.as_str())
-                    && fx.source_amount.map(|a| a.abs()) == Some(source_amount)
-                    && fx.destination_amount.map(|a| a.abs()) == Some(destination_amount)
-            })
-    })
+    transfer_in.account == transfer_out.account
+        && !transfer_in.is_security_transfer
+        && !transfer_out.is_security_transfer
+        && transfer_in.external_transfer == Some(false)
+        && transfer_out.external_transfer == Some(false)
 }
 
 #[cfg(test)]
@@ -892,7 +991,6 @@ mod tests {
             fx_rate: None,
             source_group_id: None,
             external_transfer: None,
-            fx_conversion: None,
             source_system: None,
             is_user_modified: false,
             created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),

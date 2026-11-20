@@ -8,17 +8,19 @@ use super::model::{
 
 #[async_trait]
 pub trait BudgetRepositoryTrait: Send + Sync {
+    async fn apply_reviewed(
+        &self,
+        expected: super::model::BudgetSnapshotState,
+        operation: super::model::BudgetOperation,
+    ) -> Result<()>;
     async fn list_groups(&self) -> Result<Vec<BudgetGroup>>;
     async fn create_group(&self, new_group: NewBudgetGroup) -> Result<BudgetGroup>;
     async fn update_group(&self, id: &str, patch: UpdateBudgetGroup) -> Result<BudgetGroup>;
     async fn delete_group(&self, id: &str) -> Result<()>;
-    async fn delete_group_and_reassign(
-        &self,
-        id: &str,
-        reassign_to_group_id: &str,
-        reassignments: Vec<NewBudgetGroupAssignment>,
-    ) -> Result<()>;
+    async fn delete_group_and_reassign(&self, id: &str, reassign_to_group_id: &str) -> Result<()>;
     async fn upsert_system_groups(&self, groups: Vec<NewBudgetGroup>) -> Result<Vec<BudgetGroup>>;
+
+    async fn reset_groups(&self) -> Result<()>;
 
     async fn list_group_assignments(&self) -> Result<Vec<BudgetGroupAssignment>>;
     async fn upsert_group_assignment(
@@ -56,4 +58,62 @@ pub trait BudgetRepositoryTrait: Send + Sync {
         target_period_key: &str,
         overwrite: bool,
     ) -> Result<Vec<BudgetTarget>>;
+}
+
+/// Service surface consumed directly by agent tools, shared by both hosts.
+#[async_trait]
+pub trait BudgetServiceTrait: Send + Sync {
+    async fn prepare_change(
+        &self,
+        operation: super::model::BudgetOperation,
+        period_key: Option<String>,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetReview>;
+    async fn commit_change(
+        &self,
+        review: super::model::BudgetReview,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetSnapshot>;
+
+    async fn get_readonly(
+        &self,
+        period_key: Option<String>,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetSnapshot>;
+}
+
+#[async_trait]
+impl BudgetServiceTrait for super::service::BudgetService {
+    async fn prepare_change(
+        &self,
+        operation: super::model::BudgetOperation,
+        period_key: Option<String>,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetReview> {
+        super::service::BudgetService::prepare_change(
+            self, operation, period_key, currency, timezone,
+        )
+        .await
+    }
+    async fn commit_change(
+        &self,
+        review: super::model::BudgetReview,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetSnapshot> {
+        super::service::BudgetService::commit_change(self, review, currency, timezone).await
+    }
+
+    async fn get_readonly(
+        &self,
+        period_key: Option<String>,
+        currency: &str,
+        timezone: &str,
+    ) -> Result<super::model::BudgetSnapshot> {
+        super::service::BudgetService::get_readonly(self, period_key, currency, timezone).await
+    }
 }

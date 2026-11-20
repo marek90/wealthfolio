@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { FormattingProvider } from "@wealthfolio/ui";
+import { DirectionProvider, FormattingProvider, type TextDirection } from "@wealthfolio/ui";
 import { cloneElement, isValidElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -52,24 +52,26 @@ const range = spendingRangeToReportsRange(
   timezone,
 );
 
-function setup(custom: boolean) {
+function setup(custom: boolean, direction: TextDirection = "ltr") {
   render(
     <MemoryRouter>
-      <FormattingProvider locale="en-US" timezone={timezone}>
-        <WhereIAmStage
-          range={range}
-          priorRange={custom ? comparisonRange(range, "prior", timezone)! : undefined}
-          currentReport={report(300)}
-          priorReport={report(150)}
-          months={[]}
-          taxonomyCategories={[]}
-          incomeCategories={[]}
-          savingsCategories={[]}
-          budget={undefined}
-          currency="USD"
-          isLoading={false}
-        />
-      </FormattingProvider>
+      <DirectionProvider direction={direction}>
+        <FormattingProvider locale="en-US" timezone={timezone}>
+          <WhereIAmStage
+            range={range}
+            priorRange={custom ? comparisonRange(range, "prior", timezone)! : undefined}
+            currentReport={report(300)}
+            priorReport={report(150)}
+            months={[]}
+            taxonomyCategories={[]}
+            incomeCategories={[]}
+            savingsCategories={[]}
+            budget={undefined}
+            currency="USD"
+            isLoading={false}
+          />
+        </FormattingProvider>
+      </DirectionProvider>
     </MemoryRouter>,
   );
 }
@@ -115,7 +117,11 @@ describe("Where I am subcategories", () => {
     count: 1,
   });
 
-  const stage = (stageRange: typeof range, extraBuckets: ReturnType<typeof day>[] = []) => (
+  const stage = (
+    stageRange: typeof range,
+    extraBuckets: ReturnType<typeof day>[] = [],
+    stageBudget: BudgetSnapshot = budget,
+  ) => (
     <MemoryRouter>
       <FormattingProvider locale="en-US" timezone={timezone}>
         <WhereIAmStage
@@ -189,7 +195,7 @@ describe("Where I am subcategories", () => {
           ]}
           incomeCategories={[]}
           savingsCategories={[]}
-          budget={budget}
+          budget={stageBudget}
           currency="USD"
           isLoading={false}
         />
@@ -229,6 +235,29 @@ describe("Where I am subcategories", () => {
     expect(plan.getAllByText("1 of 1 category shown").length).toBeGreaterThan(0);
   });
 
+  it("lists an expense category moved into the Savings group under that group", () => {
+    // Insight returns the Savings group once it holds spending; the group is
+    // where the category is listed, not whether its money is spending.
+    const savingsGroupBudget = {
+      computed: {
+        totals: { spendingPlanned: 0 },
+        groupRows: [
+          {
+            group: { id: "savings", name: "Savings", key: "savings", color: "#6B8E54" },
+            plannedTotal: 0,
+            actual: 300,
+            categories: [{ ...housing, groupId: "savings" }],
+          },
+        ],
+      },
+    } as unknown as BudgetSnapshot;
+    render(stage(range, [], savingsGroupBudget));
+    const plan = within(document.getElementById("breakdown")!);
+
+    const group = plan.getByText("Savings").closest("tr")!;
+    expect(group).toHaveTextContent("$300.00");
+  });
+
   it("starts a new date range at the overview", () => {
     const view = render(stage(range));
     fireEvent.click(screen.getByRole("button", { name: "Needs, $300. Show every category" }));
@@ -261,5 +290,67 @@ describe("Where I am comparison labels", () => {
     setup(false);
     expect(screen.getByText("SPENT THIS MONTH")).toBeInTheDocument();
     expect(screen.getByText(/vs Feb/)).toBeInTheDocument();
+  });
+  it("keeps the whole short month in a right-to-left page", () => {
+    // Formatted values carry bidi isolates there; cutting the string kept "Fe".
+    setup(false, "rtl");
+    expect(screen.getByText(/vs \u2068Feb\u2069/)).toBeInTheDocument();
+  });
+});
+
+describe("Net cashflow with money brought back from savings", () => {
+  function renderMonth(saved: number, fromSavings: number) {
+    const base = report(1500);
+    const month = {
+      iso: "2025-03-01",
+      label: "Mar",
+      report: {
+        ...base,
+        current: {
+          income: 1000,
+          outflow: 1500,
+          saved,
+          fromSavings,
+          net: 1000 - 1500 - saved + fromSavings,
+          count: 4,
+        },
+      },
+      isLoading: false,
+    };
+    render(
+      <MemoryRouter>
+        <FormattingProvider locale="en-US" timezone={timezone}>
+          <WhereIAmStage
+            range={range}
+            currentReport={base}
+            priorReport={report(150)}
+            months={[month]}
+            taxonomyCategories={[]}
+            incomeCategories={[]}
+            savingsCategories={[]}
+            budget={undefined}
+            currency="USD"
+            isLoading={false}
+          />
+        </FormattingProvider>
+      </MemoryRouter>,
+    );
+    // The label sits in the card's header row.
+    return screen.getByText("NET CASHFLOW").parentElement!.parentElement!;
+  }
+
+  it("adds back what was drawn from savings, with no Net saved bar for a net withdrawal", () => {
+    const card = renderMonth(200, 900);
+
+    expect(card).toHaveTextContent(/\+\$200/);
+    expect(within(card).queryByText("Net saved")).not.toBeInTheDocument();
+  });
+
+  it("shows only what stayed in savings as saved", () => {
+    const card = renderMonth(900, 200);
+
+    expect(card).toHaveTextContent(/−\$1,200/);
+    const saved = within(card).getByText("Net saved").parentElement!;
+    expect(saved).toHaveTextContent(/\$700/);
   });
 });

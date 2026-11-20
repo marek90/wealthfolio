@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@/test/render";
+import { act, fireEvent, render, screen, waitFor } from "@/test/render";
+import { createInstance } from "i18next";
+import { I18nextProvider } from "react-i18next";
+import en from "@/i18n/locales/en/common.json";
+import fr from "@/i18n/locales/fr/common.json";
+import ar from "@/i18n/locales/ar/common.json";
+import enSettings from "@/i18n/locales/en/settings.json";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,15 +16,6 @@ import { CustomProviderForm } from "./custom-provider-form";
 const createProvider = vi.fn();
 const updateProvider = vi.fn();
 const testSource = vi.fn();
-
-// jsdom lacks ResizeObserver, which the Radix radio group measures with.
-if (typeof ResizeObserver === "undefined") {
-  globalThis.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as typeof ResizeObserver;
-}
 
 function setInputValue(input: HTMLElement, value: string) {
   fireEvent.change(input, { target: { value } });
@@ -41,11 +38,11 @@ vi.mock("@/adapters", () => ({
 
 vi.mock("@/hooks/use-custom-providers", () => ({
   useCreateCustomProvider: () => ({
-    mutate: createProvider,
+    mutateAsync: createProvider,
     isPending: false,
   }),
   useUpdateCustomProvider: () => ({
-    mutate: updateProvider,
+    mutateAsync: updateProvider,
     isPending: false,
   }),
   useTestCustomProviderSource: () => ({
@@ -66,6 +63,54 @@ describe("CustomProviderForm", () => {
     updateProvider.mockReset();
     testSource.mockReset();
   });
+
+  it.each(["fetch", "verification"])(
+    "translates retained %s transport failures when the language changes",
+    async (flow) => {
+      const i18n = createInstance();
+      await i18n.init({
+        lng: "en",
+        fallbackLng: "en",
+        resources: {
+          en: { common: en, settings: enSettings },
+          fr: { common: fr },
+          ar: { common: ar },
+        },
+      });
+      const failure = {
+        success: false,
+        errorCode: "provider_unavailable",
+        error: "FAKE-KEY-2531 /private/portfolio.db",
+      };
+      testSource.mockImplementation((_request, callbacks) => callbacks.onSuccess(failure));
+      if (flow === "verification") {
+        testSource.mockImplementationOnce((_request, callbacks) =>
+          callbacks.onSuccess({ success: true, rawResponse: '{"price":42}' }),
+        );
+      }
+      render(
+        <I18nextProvider i18n={i18n}>
+          <CustomProviderForm open onOpenChange={vi.fn()} />
+        </I18nextProvider>,
+      );
+      setInputValue(screen.getByLabelText(/url template/i), "https://example.test/quotes");
+      setInputValue(screen.getByPlaceholderText("e.g. AAPL"), "AAPL");
+      fireEvent.click(screen.getByRole("button", { name: /^fetch$/i }));
+      if (flow === "verification") {
+        fireEvent.click((await screen.findByText('"price"')).closest('[role="button"]')!);
+        await waitFor(() => expect(testSource).toHaveBeenCalledTimes(2));
+      }
+      expect(await screen.findByText(en.backendErrors.providerUnavailable)).toBeInTheDocument();
+      await act(() => i18n.changeLanguage("fr"));
+      expect(screen.getByText(fr.backendErrors.providerUnavailable)).toBeInTheDocument();
+      await act(() => i18n.changeLanguage("ar"));
+      expect(i18n.dir()).toBe("rtl");
+      expect(screen.getByText(ar.backendErrors.providerUnavailable)).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("FAKE-KEY");
+      expect(document.body.textContent).not.toContain("/private");
+      expect(testSource).toHaveBeenCalledTimes(flow === "fetch" ? 1 : 2);
+    },
+  );
 
   it("keeps latest and historical source values separate while switching tabs", async () => {
     const user = userEvent.setup();
@@ -153,6 +198,30 @@ describe("CustomProviderForm", () => {
     expect(screen.queryByLabelText(/request body/i)).not.toBeInTheDocument();
   });
 
+  it("applies the method and body of a POST quick-start template", async () => {
+    const user = userEvent.setup();
+
+    render(<CustomProviderForm open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /tmx money/i }));
+
+    expect(screen.getByLabelText(/http method/i)).toHaveValue("POST");
+    const body = (screen.getByLabelText(/request body/i) as HTMLTextAreaElement).value;
+    expect(JSON.parse(body).variables.symbol).toBe("{SYMBOL}");
+
+    await user.click(screen.getByRole("button", { name: /^fetch$/i }));
+
+    expect(testSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "https://app-money.tmx.com/graphql",
+        method: "POST",
+        body,
+        symbol: "RBF556",
+      }),
+      expect.any(Object),
+    );
+  });
+
   it("clears the request body when switching between GET and POST", async () => {
     const user = userEvent.setup();
 
@@ -195,13 +264,10 @@ describe("CustomProviderForm", () => {
     render(<CustomProviderForm open onOpenChange={vi.fn()} />);
 
     screen.getByRole("radio", { name: /only securities assigned/i }).focus();
-    // Radix moves focus on the next tick and selects only while the arrow key is
-    // still down, so hold it the way a real key press does.
-    await user.keyboard("{ArrowDown>}");
+    await user.keyboard("{ArrowDown}");
     await waitFor(() =>
       expect(screen.getByRole("radio", { name: /also as a fallback/i })).toBeChecked(),
     );
-    await user.keyboard("{/ArrowDown}");
 
     expect(screen.getByLabelText(/order among fallbacks/i)).toBeInTheDocument();
   });

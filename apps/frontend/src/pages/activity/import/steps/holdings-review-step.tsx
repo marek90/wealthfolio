@@ -7,10 +7,13 @@ import { checkHoldingsImport } from "@/adapters";
 import { useImportContext } from "../context";
 import { setParsedData, setHoldingsCheckPassed, setIsValidating } from "../context/import-actions";
 import { ImportAlert } from "../components/import-alert";
+import { NumericFormatAlert } from "../components/numeric-format-alert";
+import { resolveNumericDecimalSeparator } from "../utils/numeric-format";
 import { HoldingsFormat } from "./holdings-mapping-step";
 import {
   CASH_SYMBOL,
   analyzeDateColumn,
+  analyzeHoldingsNumericColumns,
   buildHoldingsRowResolutionMap,
   type HoldingsRowResolution,
   parseDateToYMD,
@@ -35,6 +38,12 @@ function buildHoldingsRows(
   rowResolutions?: Record<number, HoldingsRowResolution>,
 ): HoldingsRow[] {
   const { dateFormat, decimalSeparator, thousandsSeparator, defaultCurrency } = parseOptions;
+  const numericColumns = analyzeHoldingsNumericColumns(
+    headers,
+    parsedRows,
+    fieldMappings,
+    parseOptions,
+  );
 
   const { order: dateOrder } = analyzeDateColumn(headers, parsedRows, fieldMappings, dateFormat);
 
@@ -70,9 +79,17 @@ function buildHoldingsRows(
 
     const normalizedDate = parseDateToYMD(rawDate, dateFormat, dateOrder) ?? rawDate;
     const quantity =
-      parseNumericValue(rawQuantity, decimalSeparator, thousandsSeparator) ?? rawQuantity;
+      parseNumericValue(
+        rawQuantity,
+        numericColumns[HoldingsFormat.QUANTITY]?.decimalSeparator ?? decimalSeparator,
+        thousandsSeparator,
+      ) ?? rawQuantity;
     const avgCost =
-      parseNumericValue(rawAvgCost, decimalSeparator, thousandsSeparator) ?? rawAvgCost;
+      parseNumericValue(
+        rawAvgCost,
+        numericColumns[HoldingsFormat.AVG_COST]?.decimalSeparator ?? decimalSeparator,
+        thousandsSeparator,
+      ) ?? rawAvgCost;
     const currency = rawCurrency || defaultCurrency;
     const isCash = rawSymbol === CASH_SYMBOL;
     const resolvedSymbol = isCash
@@ -121,6 +138,10 @@ export function HoldingsReviewStep() {
   const dateColumn = useMemo(
     () => analyzeDateColumn(headers, parsedRows, fieldMappings, parseConfig.dateFormat),
     [headers, parsedRows, fieldMappings, parseConfig.dateFormat],
+  );
+  const numericColumns = useMemo(
+    () => analyzeHoldingsNumericColumns(headers, parsedRows, fieldMappings, parseOptions),
+    [headers, parsedRows, fieldMappings, parseOptions],
   );
   const rowResolutions = useMemo(
     () => buildHoldingsRowResolutionMap(draftActivities),
@@ -228,7 +249,7 @@ export function HoldingsReviewStep() {
       cancelled = true;
       dispatch(setIsValidating(false));
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [accountId, validationSnapshots, checkRetryRevision, dateColumn.needsExplicitFormat]);
 
   // Handle data changes from the grid (quantity, avgCost, currency edits)
@@ -236,6 +257,20 @@ export function HoldingsReviewStep() {
     (nextRows: HoldingsRow[]) => {
       // Map grid edits back to parsedRows
       const updatedParsedRows = [...parsedRows];
+      const previousRows = new Map(holdingsRows.map((row) => [row.rowIndex, row]));
+      const numericChanged = nextRows.some((row) => {
+        const previous = previousRows.get(row.rowIndex);
+        return row.quantity !== previous?.quantity || row.avgCost !== previous?.avgCost;
+      });
+      const editDecimal = resolveNumericDecimalSeparator(
+        "",
+        parseConfig.decimalSeparator,
+        parseConfig.thousandsSeparator,
+      );
+      const formatEdit = (value: string | null | undefined) => {
+        const normalized = value ?? "";
+        return editDecimal === "," ? normalized.replace(".", ",") : normalized;
+      };
 
       const quantityIndex = fieldMappings[HoldingsFormat.QUANTITY]
         ? headers.indexOf(fieldMappings[HoldingsFormat.QUANTITY])
@@ -249,19 +284,24 @@ export function HoldingsReviewStep() {
 
       for (const row of nextRows) {
         const origRow = [...(updatedParsedRows[row.rowIndex] || [])];
-        if (quantityIndex >= 0) origRow[quantityIndex] = row.quantity;
-        if (avgCostIndex >= 0) origRow[avgCostIndex] = row.avgCost;
-        if (currencyIndex >= 0) origRow[currencyIndex] = row.currency;
+        // Preserve both normalized columns together: clearing a quantity can hide
+        // the only row that establishes either column's number format.
+        if (numericChanged && quantityIndex >= 0) origRow[quantityIndex] = formatEdit(row.quantity);
+        if (numericChanged && avgCostIndex >= 0) origRow[avgCostIndex] = formatEdit(row.avgCost);
+        if (currencyIndex >= 0 && row.currency !== previousRows.get(row.rowIndex)?.currency) {
+          origRow[currencyIndex] = row.currency;
+        }
         updatedParsedRows[row.rowIndex] = origRow;
       }
 
       dispatch(setParsedData(headers, updatedParsedRows));
     },
-    [parsedRows, headers, fieldMappings, dispatch],
+    [parsedRows, headers, fieldMappings, dispatch, holdingsRows, parseConfig],
   );
 
   return (
     <div className="flex flex-col gap-6">
+      <NumericFormatAlert columns={numericColumns} fieldMappings={fieldMappings} />
       {dateColumn.needsExplicitFormat && (
         <ImportAlert
           variant="warning"
@@ -330,7 +370,7 @@ export function HoldingsReviewStep() {
                 className="mt-2 h-7"
                 onClick={() => setCheckRetryRevision((revision) => revision + 1)}
               >
-                <Icons.RefreshCw className="mr-2 h-3.5 w-3.5" />
+                <Icons.RefreshCw className="me-2 h-3.5 w-3.5" />
                 {t("activity:import.validationAlert.retry")}
               </Button>
             </ImportAlert>

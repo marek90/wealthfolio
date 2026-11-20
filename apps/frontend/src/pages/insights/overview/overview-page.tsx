@@ -1,14 +1,17 @@
+import { isValuationComplete } from "@/lib/valuation";
 import { TopMoversCard, ConcentrationCard } from "./holdings-highlight-cards";
+import { HoldingsDonutCard } from "./holdings-donut-card";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useCurrentValuation } from "@/hooks/use-current-account-valuations";
 import { useHoldings } from "@/hooks/use-holdings";
+import { HoldingsScopeNotice } from "@/components/holdings-scope-notice";
 import { usePortfolioAllocations } from "@/hooks/use-portfolio-allocations";
 import { usePortfolios } from "@/hooks/use-portfolios";
-import { HoldingType, isAlternativeAssetKind } from "@/lib/constants";
+import { isAlternativeAssetKind } from "@/lib/constants";
 import { useSettingsContext } from "@/lib/settings-provider";
 import type { AccountScope, AllocationTarget, TaxonomyAllocation } from "@/lib/types";
 import { OverviewTab } from "@/pages/allocation-targets/components/overview-tab";
-import { RebalanceTab } from "@/pages/allocation-targets/components/rebalance-tab";
+import { AllocationWorksheetTab } from "@/pages/allocation-targets/components/allocation-worksheet-tab";
 import {
   TargetDetailHeader,
   TargetToolbarActions,
@@ -23,11 +26,22 @@ import { UnsavedTargetChangesDialog } from "@/pages/allocation-targets/component
 import { useAllocationTargetDrift } from "@/pages/allocation-targets/hooks/use-allocation-target-drift";
 import { useAllocationTargets } from "@/pages/allocation-targets/hooks/use-allocation-targets";
 import { AllocationDetailSheet } from "@/pages/holdings/components/allocation-detail-sheet";
-import { Button, EmptyPlaceholder, Icons, Skeleton } from "@wealthfolio/ui";
+import {
+  Button,
+  Icons,
+  Skeleton,
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "@wealthfolio/ui";
 import { PortfolioComposition } from "@/pages/holdings/components/composition-chart";
 import { DrillableAccountChart } from "@/pages/holdings/components/drillable-account-chart";
 import { DrillableDonutChart } from "@/pages/holdings/components/drillable-donut-chart";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { usePersistentState } from "@/hooks/use-persistent-state";
 import { useTranslation } from "react-i18next";
 import { computeValueStrip, valueStripFromCurrentSummary } from "./allocation-derivations";
 import { PortfolioExplorer } from "./portfolio-explorer";
@@ -42,8 +56,10 @@ interface OverviewPageProps {
   onCustomizeActionChange?: (action: ReactNode | null) => void;
 }
 
-type WorkspaceView = "current" | "details" | "targets" | "rebalance";
+type WorkspaceView = "current" | "details" | "targets" | "worksheet";
 type TargetEditorMode = "create" | "edit";
+
+const SELECTED_TARGETS_STORAGE_KEY = "insights-selected-targets";
 
 export function OverviewPage({
   filter: filterProp,
@@ -58,11 +74,8 @@ export function OverviewPage({
   const accountFilter: AccountScope = useMemo(() => filterProp ?? { type: "all" }, [filterProp]);
   const selectedAccountScopeKey = accountScopeKey(accountFilter);
 
-  const {
-    holdings,
-    dataUpdatedAt: holdingsUpdatedAt,
-    isLoading: holdingsLoading,
-  } = useHoldings(accountFilter);
+  const holdingsQuery = useHoldings(accountFilter);
+  const { holdings, dataUpdatedAt: holdingsUpdatedAt, isLoading: holdingsLoading } = holdingsQuery;
   const { currentValuation, isLoading: currentValuationLoading } = useCurrentValuation(
     accountFilter,
     { includeAccounts: true },
@@ -72,25 +85,36 @@ export function OverviewPage({
   const { data: portfolios = [] } = usePortfolios();
   const { targets, isLoading: targetsLoading } = useAllocationTargets();
 
-  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
+  const [selectedTargetIds, setSelectedTargetIds] = usePersistentState<Record<string, string>>(
+    SELECTED_TARGETS_STORAGE_KEY,
+    {},
+  );
+  const storedTargetId = selectedTargetIds?.[selectedAccountScopeKey];
+  const selectedTargetId = typeof storedTargetId === "string" ? storedTargetId : null;
+  const setSelectedTargetId = useCallback(
+    (targetId: string, scopeKey = selectedAccountScopeKey) => {
+      setSelectedTargetIds((current) => ({
+        ...(current && typeof current === "object" && !Array.isArray(current) ? current : {}),
+        [scopeKey]: targetId,
+      }));
+    },
+    [selectedAccountScopeKey, setSelectedTargetIds],
+  );
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("current");
   const [targetEditorMode, setTargetEditorMode] = useState<TargetEditorMode>("edit");
   const [targetEditorDirty, setTargetEditorDirty] = useState(false);
   const [pendingWorkspaceView, setPendingWorkspaceView] = useState<WorkspaceView | null>(null);
   const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
 
-  useEffect(() => {
-    setSelectedTargetId(null);
-  }, [selectedAccountScopeKey]);
-
   const scopedTargets = useMemo(
     () => filterTargetsByScope(targets, accountFilter),
     [targets, accountFilter],
   );
-  const scopedLiveTargets = useMemo(
-    () => scopedTargets.filter((p) => !p.archivedAt),
-    [scopedTargets],
-  );
+  const scopedLiveTargets = useMemo(() => {
+    const live = scopedTargets.filter((target) => !target.archivedAt);
+    const selected = live.find((target) => target.id === selectedTargetId);
+    return selected ? [selected, ...live.filter((target) => target.id !== selected.id)] : live;
+  }, [scopedTargets, selectedTargetId]);
   const isCreatingTarget = workspaceView === "targets" && targetEditorMode === "create";
   const effectiveTargetId =
     !isCreatingTarget &&
@@ -110,7 +134,7 @@ export function OverviewPage({
     dataUpdatedAt: driftUpdatedAt,
     isLoading: driftLoading,
   } = useAllocationTargetDrift(effectiveTargetId, accountFilter, {
-    includeHoldings: workspaceView === "details",
+    includeHoldings: workspaceView === "details" || workspaceView === "worksheet",
   });
 
   const isLoading = holdingsLoading || allocationsLoading || currentValuationLoading;
@@ -138,15 +162,7 @@ export function OverviewPage({
     () => portfolioHoldings.filter((h) => h.holdingType?.toLowerCase() !== "cash"),
     [portfolioHoldings],
   );
-  const totalCash = useMemo(
-    () =>
-      holdings
-        .filter((h) => h.holdingType === HoldingType.CASH)
-        .reduce((sum, h) => sum + (h.marketValue.base ?? 0), 0),
-    [holdings],
-  );
-  const availableCash = driftReport?.deployableCash ?? totalCash;
-  const rebalanceSourceVersion = `${holdingsUpdatedAt}:${driftUpdatedAt}:${effectiveTarget?.updatedAt ?? ""}`;
+  const worksheetSourceVersion = `${holdingsUpdatedAt}:${driftUpdatedAt}:${effectiveTarget?.updatedAt ?? ""}`;
 
   const valueStrip = useMemo(
     () =>
@@ -196,7 +212,7 @@ export function OverviewPage({
       setTargetEditorMode("edit");
       setSelectedTargetId(targetId);
     },
-    [targetEditorDirty],
+    [targetEditorDirty, setSelectedTargetId],
   );
 
   function backTo(view: WorkspaceView) {
@@ -243,7 +259,10 @@ export function OverviewPage({
     }
     setTargetEditorDirty(false);
     setTargetEditorMode("edit");
-    setSelectedTargetId(target.id);
+    setSelectedTargetId(
+      target.id,
+      savedScope ? accountScopeKey(savedScope) : selectedAccountScopeKey,
+    );
     setWorkspaceView("details");
   }
 
@@ -284,14 +303,14 @@ export function OverviewPage({
               <Button
                 variant="ghost"
                 size="sm"
-                className="-ml-2"
+                className="-ms-2"
                 onClick={() => backTo(effectiveTargetId ? "details" : "current")}
               >
-                <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
+                <Icons.ArrowLeft className="me-1.5 h-4 w-4 rtl:rotate-180" />
                 {t("insights:insights.back_to_allocation")}
               </Button>
               <span className="bg-border hidden h-5 w-px sm:block" />
-              <h2 className="text-foreground text-[16px] font-semibold">
+              <h2 className="text-foreground text-base font-semibold">
                 {t("insights:insights.target_allocation")}
               </h2>
             </div>
@@ -333,34 +352,31 @@ export function OverviewPage({
     );
   }
 
-  if (workspaceView === "rebalance") {
+  if (workspaceView === "worksheet") {
     return (
-      <div>
-        <div className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-2">
+      <AllocationWorksheetTab
+        backAction={
           <Button
             variant="ghost"
             size="sm"
-            className="-ml-2 shrink-0"
+            className="-ms-2 shrink-0"
             onClick={() => backTo("details")}
           >
-            <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
+            <Icons.ArrowLeft className="me-1.5 h-4 w-4 rtl:rotate-180" />
             {t("insights:insights.back_to_overview")}
           </Button>
-          <span className="bg-border hidden h-5 w-px sm:block" />
-          <h2 className="text-foreground min-w-0 text-[16px] font-semibold">
-            {t("insights:insights.rebalance")}
+        }
+        heading={
+          <h2 className="text-foreground min-w-0 text-base font-semibold">
+            {t("allocation:worksheet.title")}
           </h2>
-        </div>
-        <RebalanceTab
-          profile={effectiveTarget ?? null}
-          driftReport={driftReport ?? null}
-          accountScope={accountFilter}
-          holdings={holdings}
-          availableCash={availableCash}
-          sourceVersion={rebalanceSourceVersion}
-          isSourceLoading={holdingsLoading || driftLoading || !driftReport}
-        />
-      </div>
+        }
+        profile={effectiveTarget ?? null}
+        driftReport={driftReport ?? null}
+        accountScope={accountFilter}
+        sourceVersion={worksheetSourceVersion}
+        isSourceLoading={holdingsLoading || driftLoading || !driftReport}
+      />
     );
   }
 
@@ -383,7 +399,7 @@ export function OverviewPage({
             taxonomyId={effectiveTarget?.taxonomyId ?? "asset_classes"}
             targetName={effectiveTarget?.name}
             target={effectiveTarget}
-            onRebalanceClick={() => setWorkspaceView("rebalance")}
+            onWorksheetClick={() => setWorkspaceView("worksheet")}
           />
         ) : targetLoading ? (
           <div className="space-y-5">
@@ -394,15 +410,22 @@ export function OverviewPage({
             <Skeleton className="h-48 w-full" />
           </div>
         ) : (
-          <EmptyPlaceholder
-            icon={<Icons.Target className="text-muted-foreground h-10 w-10" />}
-            title={t("insights:insights.no_target_selected")}
-            description={t("insights:insights.no_target_selected_description")}
-          >
-            <Button size="sm" onClick={handleCreateTarget}>
-              {t("insights:insights.set_target_allocation")}
-            </Button>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                {<Icons.Target className="text-muted-foreground size-10" />}
+              </EmptyMedia>
+              <EmptyTitle>{t("insights:insights.no_target_selected")}</EmptyTitle>
+              <EmptyDescription>
+                {t("insights:insights.no_target_selected_description")}
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button size="sm" onClick={handleCreateTarget}>
+                {t("insights:insights.set_target_allocation")}
+              </Button>
+            </EmptyContent>
+          </Empty>
         )}
       </div>
     );
@@ -411,12 +434,14 @@ export function OverviewPage({
   return (
     <>
       <InsightsDashboard
+        loading={isLoading || (driftLoading && !driftReport)}
         onCustomizeActionChange={onCustomizeActionChange}
         widgets={{
           value: (
             <ValueWidget
               metric="value"
               data={valueStrip}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               currency={baseCurrency}
               isLoading={isLoading}
             />
@@ -425,6 +450,7 @@ export function OverviewPage({
             <ValueWidget
               metric="cash"
               data={valueStrip}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               currency={baseCurrency}
               isLoading={isLoading}
             />
@@ -433,6 +459,7 @@ export function OverviewPage({
             <ValueWidget
               metric="invested"
               data={valueStrip}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               currency={baseCurrency}
               isLoading={isLoading}
             />
@@ -441,6 +468,7 @@ export function OverviewPage({
             <ValueWidget
               metric="bookCost"
               data={valueStrip}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               currency={baseCurrency}
               isLoading={isLoading}
             />
@@ -449,6 +477,7 @@ export function OverviewPage({
             <ValueWidget
               metric="pnl"
               data={valueStrip}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               currency={baseCurrency}
               isLoading={isLoading}
             />
@@ -456,6 +485,7 @@ export function OverviewPage({
           accounts: (
             <DrillableAccountChart
               isLoading={isLoading}
+              isUnavailable={!isValuationComplete(currentValuation?.summary.valueStatus)}
               accountIds={filteredAccountIds}
               accountValuations={currentValuation?.accounts}
             />
@@ -496,7 +526,12 @@ export function OverviewPage({
               onCardClick={() => openAllocationSheet(allocations?.sectors)}
             />
           ),
-          composition: <PortfolioComposition holdings={nonCashHoldings} isLoading={isLoading} />,
+          composition:
+            holdingsQuery.isComplete || holdingsLoading ? (
+              <PortfolioComposition holdings={nonCashHoldings} isLoading={isLoading} />
+            ) : (
+              <HoldingsScopeNotice {...holdingsQuery} />
+            ),
           targets: (
             <TargetRailsCard
               targets={scopedLiveTargets}
@@ -508,32 +543,51 @@ export function OverviewPage({
               onViewDetails={() => setWorkspaceView("details")}
             />
           ),
-          movers: (
-            <TopMoversCard
-              holdings={portfolioHoldings}
-              currency={baseCurrency}
-              isLoading={isLoading}
-            />
-          ),
-          concentration: (
-            <ConcentrationCard
-              holdings={portfolioHoldings}
-              currency={baseCurrency}
-              isLoading={isLoading}
-            />
-          ),
-          breakdown: (
-            <PortfolioExplorer
-              allocations={allocations}
-              holdings={holdings ?? []}
-              accounts={accounts}
-              accountIds={filteredAccountIds}
-              accountValuations={currentValuation?.accounts}
-              currency={baseCurrency}
-              isLoading={isLoading}
-              onOpenAllocation={openAllocationSheet}
-            />
-          ),
+          movers:
+            !holdingsQuery.isComplete && !holdingsLoading ? (
+              <HoldingsScopeNotice {...holdingsQuery} />
+            ) : (
+              <TopMoversCard
+                holdings={portfolioHoldings}
+                currency={baseCurrency}
+                isLoading={isLoading}
+              />
+            ),
+          concentration:
+            !holdingsQuery.isComplete && !holdingsLoading ? (
+              <HoldingsScopeNotice {...holdingsQuery} />
+            ) : (
+              <ConcentrationCard
+                holdings={portfolioHoldings}
+                currency={baseCurrency}
+                isLoading={isLoading}
+              />
+            ),
+          holdings:
+            !holdingsQuery.isComplete && !holdingsLoading ? (
+              <HoldingsScopeNotice {...holdingsQuery} />
+            ) : (
+              <HoldingsDonutCard
+                holdings={portfolioHoldings}
+                currency={baseCurrency}
+                isLoading={isLoading}
+              />
+            ),
+          breakdown:
+            !holdingsQuery.isComplete && !holdingsLoading ? (
+              <HoldingsScopeNotice {...holdingsQuery} />
+            ) : (
+              <PortfolioExplorer
+                allocations={allocations}
+                holdings={holdings ?? []}
+                accounts={accounts}
+                accountIds={filteredAccountIds}
+                accountValuations={currentValuation?.accounts}
+                currency={baseCurrency}
+                isLoading={isLoading}
+                onOpenAllocation={openAllocationSheet}
+              />
+            ),
         }}
       />
 

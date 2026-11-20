@@ -1,6 +1,12 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
-export const BASE_URL = process.env.WF_E2E_BASE_URL || "http://localhost:1420";
+// `pnpm test:e2e` starts one server per Playwright worker and lists them in
+// WF_E2E_WORKER_URLS; a worker uses the one at its parallel index.
+const workerUrls = process.env.WF_E2E_WORKER_URLS?.split(",").filter(Boolean) ?? [];
+export const BASE_URL =
+  process.env.WF_E2E_BASE_URL ||
+  workerUrls[Number(process.env.TEST_PARALLEL_INDEX ?? 0)] ||
+  "http://localhost:1420";
 export const TEST_PASSWORD = "password001";
 
 const ACTIVITY_TYPE_TEST_IDS: Record<string, string> = {
@@ -19,6 +25,7 @@ const ACTIVITY_TYPE_TEST_IDS: Record<string, string> = {
 interface E2ESettings {
   language?: string;
   onboardingCompleted?: boolean;
+  autoUpdateCheckEnabled?: boolean;
 }
 
 interface AuthStatus {
@@ -69,10 +76,22 @@ async function getE2ESettings(page: Page) {
 
 async function canSkipLoginAndOnboardingUi(page: Page) {
   const [authDisabled, settings] = await Promise.all([isAuthDisabled(page), getE2ESettings(page)]);
+  if (authDisabled) await disableAutoUpdateCheck(page, settings);
   if (!authDisabled || !settings?.onboardingCompleted) return false;
 
   await ensureE2ELanguage(page, settings);
   return true;
+}
+
+// When the release feed has a newer version than this checkout, the app opens an
+// update dialog that blocks clicks. Turn the check off before the app loads.
+async function disableAutoUpdateCheck(page: Page, settings: E2ESettings | null) {
+  if (settings?.autoUpdateCheckEnabled === false) return;
+
+  const updated = await putApiJson<E2ESettings>(page, "/settings", {
+    autoUpdateCheckEnabled: false,
+  });
+  expect(updated?.autoUpdateCheckEnabled, "turn off automatic update checks").toBe(false);
 }
 
 async function ensureE2ELanguage(page: Page, settings?: E2ESettings | null) {
@@ -145,6 +164,36 @@ async function waitForLoginOnboardingOrApp(page: Page, timeout: number) {
     .not.toBe("loading");
 }
 
+// Every app load asks for a portfolio update; when it finishes, the app
+// refetches what is on screen. A spec that measures layout or clicks while that
+// lands can flake, so it can count the updates the page has seen finish
+// (`trackPortfolioUpdates` before loading) and wait for the next one.
+export async function trackPortfolioUpdates(page: Page) {
+  await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    const state = window as unknown as { __wfPortfolioUpdates: number };
+    state.__wfPortfolioUpdates = 0;
+    window.EventSource = class extends NativeEventSource {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        this.addEventListener("portfolio:update-complete", () => {
+          state.__wfPortfolioUpdates += 1;
+        });
+      }
+    };
+  });
+}
+
+export async function waitForPortfolioUpdates(page: Page, count = 1, timeout = 60_000) {
+  await page.waitForFunction(
+    (expected) =>
+      ((window as unknown as { __wfPortfolioUpdates?: number }).__wfPortfolioUpdates ?? 0) >=
+      expected,
+    count,
+    { timeout },
+  );
+}
+
 export async function gotoAppPath(page: Page, path: string) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const targetUrl = `${BASE_URL}${normalizedPath}`;
@@ -215,7 +264,7 @@ export async function fillDateField(page: Page, daysAgo: number) {
 
 export async function waitForOverlayClose(page: Page) {
   await page
-    .locator('[data-state="open"][aria-hidden="true"]')
+    .locator('[data-slot$="-overlay"][data-open]')
     .waitFor({ state: "hidden", timeout: 5000 })
     .catch(() => {});
 }
@@ -245,10 +294,16 @@ export async function selectActivityType(page: Page, type: string) {
   await page.waitForTimeout(200);
 }
 
+// A select mounts its options, hidden, once its trigger has had focus, and a
+// select that just closed keeps showing them while it animates out, so options are
+// looked up in the open popup.
+const OPEN_SELECT = '[data-slot="select-content"][data-open]';
+
 export async function selectFirstAccount(page: Page) {
   await page.getByTestId("account-select").click();
-  await expect(page.getByTestId("account-option").first()).toBeAttached({ timeout: 5000 });
-  await page.keyboard.press("Enter");
+  const option = page.locator(OPEN_SELECT).getByTestId("account-option").first();
+  await expect(option).toBeVisible({ timeout: 5000 });
+  await option.click();
   await page.waitForTimeout(200);
 }
 
@@ -264,6 +319,7 @@ export async function selectAccountOption(
 ) {
   await accountSelect.click();
   const option = page
+    .locator(OPEN_SELECT)
     .locator(
       `[data-testid="account-option"][data-account-name="${cssAttributeValue(
         accountName,

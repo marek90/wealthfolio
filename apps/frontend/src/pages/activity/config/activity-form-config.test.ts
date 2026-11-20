@@ -1,7 +1,131 @@
 import { describe, expect, it } from "vitest";
-import { ActivityType } from "@/lib/constants";
+import { ActivityType, InstrumentType, METADATA_CONTRACT_MULTIPLIER } from "@/lib/constants";
 import { mapActivityTypeToPicker } from "../utils/activity-form-utils";
+import { feeFormSchema } from "../components/forms/fee-form";
+import { taxFormSchema } from "../components/forms/tax-form";
 import { ACTIVITY_FORM_CONFIG, hasActivityForm } from "./activity-form-config";
+
+describe("trade asset identity defaults", () => {
+  it.each(["BUY", "SELL"] as const)(
+    "preserves the stored %s instrument type and quote currency without reselection",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(
+        {
+          assetId: "asset-usdt",
+          assetSymbol: "USDT",
+          instrumentType: InstrumentType.CRYPTO,
+          assetQuoteCcy: "USD",
+          currency: "CAD",
+        },
+        [],
+      );
+
+      expect(defaults).toMatchObject({
+        assetId: "USDT",
+        symbolInstrumentType: InstrumentType.CRYPTO,
+        symbolQuoteCcy: "USD",
+        currency: "CAD",
+      });
+    },
+  );
+});
+
+describe("charge defaults", () => {
+  const charges = {
+    BUY: ["fee", "tax"],
+    SELL: ["fee", "tax"],
+    DIVIDEND: ["tax"],
+    INTEREST: ["tax"],
+  };
+
+  it.each(Object.entries(charges))(
+    "leaves %s charges empty when new or saved as 0, so typing replaces them",
+    (type, fields) => {
+      const config = ACTIVITY_FORM_CONFIG[type as keyof typeof charges];
+      const added = config.getDefaults(undefined, []) as Record<string, unknown>;
+      const edited = config.getDefaults({ fee: "0", tax: "0" }, []) as Record<string, unknown>;
+      const charged = config.getDefaults({ fee: "1.5", tax: "-2" }, []) as Record<string, unknown>;
+
+      for (const field of fields) {
+        expect(added[field]).toBeUndefined();
+        expect(edited[field]).toBeUndefined();
+      }
+      expect(charged.tax).toBe(2);
+    },
+  );
+});
+
+describe("fee and tax lines", () => {
+  // Payloads are typed per form; only the line-bearing ones carry metadata.
+  const metadataOf = (payload: object) => (payload as { metadata?: unknown }).metadata;
+
+  const stored = {
+    fee: "9.99",
+    tax: "1.5",
+    metadata: {
+      charges: [
+        { category: "fee", label: "Commission", amount: "8.00" },
+        { category: "fee", label: "Exchange fee", amount: "1.99" },
+        { category: "tax", label: "Stamp duty", amount: "1.50" },
+      ],
+    },
+  };
+
+  it.each(["BUY", "SELL"] as const)("opens and saves a %s's lines", (type) => {
+    const config = ACTIVITY_FORM_CONFIG[type];
+    const defaults = config.getDefaults(stored, []);
+    expect(defaults).toMatchObject({
+      feeLines: [
+        { label: "Commission", amount: 8 },
+        { label: "Exchange fee", amount: 1.99 },
+      ],
+      taxLines: [{ label: "Stamp duty", amount: 1.5 }],
+      hadChargeLines: true,
+    });
+
+    expect(metadataOf(config.toPayload(defaults as never))).toEqual({
+      charges: [
+        { category: "fee", label: "Commission", amount: "8" },
+        { category: "fee", label: "Exchange fee", amount: "1.99" },
+        { category: "tax", label: "Stamp duty", amount: "1.5" },
+      ],
+    });
+    expect(
+      metadataOf(config.toPayload({ ...defaults, feeLines: [], taxLines: [] } as never)),
+    ).toEqual({ charges: null });
+  });
+
+  it("saves an option's lines next to its contract multiplier", () => {
+    const payload = ACTIVITY_FORM_CONFIG.BUY.toPayload({
+      symbolInstrumentType: InstrumentType.OPTION,
+      contractMultiplier: 10,
+      fee: 1,
+      feeLines: [{ label: "Commission", amount: 1 }],
+    } as never);
+    expect(metadataOf(payload)).toEqual({
+      [METADATA_CONTRACT_MULTIPLIER]: 10,
+      charges: [{ category: "fee", label: "Commission", amount: "1" }],
+    });
+  });
+
+  it.each(["DIVIDEND", "INTEREST"] as const)(
+    "leaves a %s's fee lines alone, having no fee field",
+    (type) => {
+      const config = ACTIVITY_FORM_CONFIG[type];
+      const defaults = config.getDefaults(stored, []);
+      expect(defaults).toMatchObject({ chargeLinesLocked: true });
+      expect(defaults).not.toHaveProperty("taxLines");
+      expect(config.toPayload(defaults as never)).not.toHaveProperty("metadata");
+    },
+  );
+
+  it.each(["BUY", "DIVIDEND"] as const)("sends no metadata for a %s without lines", (type) => {
+    const config = ACTIVITY_FORM_CONFIG[type];
+    expect(config.toPayload(config.getDefaults({ tax: "1" }, []) as never)).not.toHaveProperty(
+      "metadata",
+    );
+  });
+});
 
 describe("cash transfer defaults", () => {
   it.each([ActivityType.TRANSFER_OUT, ActivityType.TRANSFER_IN])(
@@ -32,6 +156,49 @@ describe("cash transfer defaults", () => {
         transferRate: 0.12820513,
         fxRate: 0.13,
       });
+    },
+  );
+});
+
+describe("charge FX rate", () => {
+  it.each([
+    ["FEE", feeFormSchema],
+    ["TAX", taxFormSchema],
+  ] as const)("carries a stated FX rate from defaults to the %s payload", (type, schema) => {
+    const config = ACTIVITY_FORM_CONFIG[type];
+    const defaults = config.getDefaults(
+      { activityType: type, accountId: "a", amount: "5", currency: "EUR", fxRate: "1.08" },
+      [],
+    );
+    const parsed = schema.parse({ ...defaults, activityDate: new Date() });
+    expect(config.toPayload(parsed)).toMatchObject({ fxRate: 1.08 });
+  });
+});
+
+describe("option defaults", () => {
+  const option = {
+    activityType: ActivityType.BUY,
+    instrumentType: "OPTION",
+    assetSymbol: "AAPL270618C01234500",
+    currency: "CAD",
+  };
+
+  it.each(["BUY", "SELL"] as const)(
+    "starts the %s quote currency from the option's, not the activity's",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(
+        { ...option, assetQuoteCcy: "USD" },
+        [],
+      );
+      expect(defaults).toMatchObject({ currency: "CAD", symbolQuoteCcy: "USD" });
+    },
+  );
+
+  it.each(["BUY", "SELL"] as const)(
+    "starts the %s quote currency from the activity's when the option's is unknown",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(option, []);
+      expect(defaults).toMatchObject({ symbolQuoteCcy: "CAD" });
     },
   );
 });
@@ -77,5 +244,75 @@ describe("hasActivityForm", () => {
     expect(hasActivityForm(ActivityType.TRANSFER_IN)).toBe(false);
     expect(hasActivityForm(mapActivityTypeToPicker(ActivityType.TRANSFER_IN))).toBe(true);
     expect(hasActivityForm(mapActivityTypeToPicker(ActivityType.TRANSFER_OUT))).toBe(true);
+  });
+});
+describe("conversion defaults", () => {
+  it.each(["CONVERSION_OUT", "CONVERSION_IN"])(
+    "maps an ADJUSTMENT %s row to the conversion form",
+    (subtype) => {
+      expect(mapActivityTypeToPicker(ActivityType.ADJUSTMENT, subtype)).toBe("CONVERSION");
+      expect(mapActivityTypeToPicker(ActivityType.ADJUSTMENT, subtype.toLowerCase())).toBe(
+        "CONVERSION",
+      );
+    },
+  );
+
+  it("keeps other adjustments on the adjustment form", () => {
+    expect(mapActivityTypeToPicker(ActivityType.ADJUSTMENT, "RETURN_OF_CAPITAL")).toBe(
+      ActivityType.ADJUSTMENT,
+    );
+    expect(mapActivityTypeToPicker(ActivityType.BUY, "CONVERSION_OUT")).toBe(ActivityType.BUY);
+  });
+
+  it.each([
+    ["CONVERSION_OUT", "FUNDA", "FUNDB"],
+    ["CONVERSION_IN", "FUNDB", "FUNDA"],
+    // Any accepted spelling of the subtype.
+    ["conversion-out", "FUNDA", "FUNDB"],
+  ])("puts each side in place when editing the %s row", (subtype, own, other) => {
+    const defaults = ACTIVITY_FORM_CONFIG.CONVERSION.getDefaults(
+      {
+        id: "row",
+        accountId: "acc-1",
+        activityType: ActivityType.ADJUSTMENT,
+        subtype,
+        assetId: `asset-${own}`,
+        assetSymbol: own,
+        quantity: own === "FUNDA" ? "25" : "40",
+        currency: "EUR",
+        counterpartAssetId: `asset-${other}`,
+        counterpartAssetSymbol: other,
+        counterpartQuantity: other === "FUNDA" ? "25" : "40",
+        counterpartCurrency: "EUR",
+      },
+      [],
+    );
+    expect(defaults).toMatchObject({
+      accountId: "acc-1",
+      fromAssetId: "FUNDA",
+      fromExistingAssetId: "asset-FUNDA",
+      fromQuantity: 25,
+      toAssetId: "FUNDB",
+      toExistingAssetId: "asset-FUNDB",
+      toQuantity: 40,
+    });
+  });
+
+  it.each([
+    ["2026-02-03T12:00:00Z", "2026-02-03T10:00:00Z", "2026-02-03T10:00:00Z"],
+    ["2026-02-03T10:00:00Z", "2026-02-03T12:00:00Z", "2026-02-03T10:00:00Z"],
+  ])("starts at the pair's first row (row %s, other row %s)", (own, other, first) => {
+    const defaults = ACTIVITY_FORM_CONFIG.CONVERSION.getDefaults(
+      {
+        id: "row",
+        accountId: "acc-1",
+        activityType: ActivityType.ADJUSTMENT,
+        subtype: "CONVERSION_IN",
+        date: new Date(own),
+        counterpartDate: other,
+      },
+      [],
+    ) as { activityDate: Date };
+    expect(defaults.activityDate.toISOString()).toBe(new Date(first).toISOString());
   });
 });

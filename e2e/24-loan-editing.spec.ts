@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures";
 import { BASE_URL, completeOnboardingIfNeeded } from "./helpers";
 
 test.use({ actionTimeout: 15_000 });
@@ -174,9 +174,9 @@ test("active mortgage terms, previous terms and event editing stay consistent", 
   await checkSheetLayout();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(sheet).not.toContainText("Keep existing");
-  await sheet.getByRole("button", { name: "Interest calculation", exact: true }).click();
+  await sheet.getByRole("combobox", { name: "Interest calculation", exact: true }).click();
   const methodSheet = page.getByRole("dialog", { name: "Interest calculation", exact: true });
-  await methodSheet.getByRole("button", { name: "Compounded semiannually", exact: true }).click();
+  await methodSheet.getByRole("option", { name: "Compounded semiannually", exact: true }).click();
   await expect(async () => {
     await sheet.screenshot({ path: test.info().outputPath("loan-renewal-editor-mobile.png") });
   }).toPass();
@@ -185,11 +185,13 @@ test("active mortgage terms, previous terms and event editing stay consistent", 
     "Confirm balance",
     "Extra Repayment",
     "Renew mortgage",
+    "Change interest rate",
     "Recalculate Schedule",
     "Edit loan details",
     "Close Loan",
   ]) {
-    await page.locator('button.h-9.w-9[aria-haspopup="dialog"]').click();
+    // On a phone the Holdings list stays mounted, hidden, under the loan page.
+    await page.locator('button.h-9.w-9[aria-haspopup="dialog"]').filter({ visible: true }).click();
     await page.getByRole("button", { name: action, exact: true }).click();
     await checkSheetLayout();
     await expect(async () => {

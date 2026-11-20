@@ -2,6 +2,7 @@ import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 import { useSettingsContext } from "@/lib/settings-provider";
 import { cn } from "@/lib/utils";
+import { sumAmounts } from "@/lib/monetary-value";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import { makeAssistantToolUI } from "@assistant-ui/react";
 import {
@@ -50,7 +51,7 @@ interface HoldingDto {
   name?: string | null;
   holdingType: string;
   quantity: number;
-  marketValueBase: number;
+  marketValueBase: number | null;
   costBasisBase?: number | null;
   unrealizedGainPct?: number | null;
   totalGainBase?: number | null;
@@ -60,13 +61,13 @@ interface HoldingDto {
   totalReturnPct?: number | null;
   returnBasisBase?: number | null;
   dayChangePct?: number | null;
-  weight: number;
+  weight: number | null;
   currency: string;
 }
 
 interface GetHoldingsOutput {
   holdings: HoldingDto[];
-  totalValue: number;
+  totalValue: number | null;
   currency: string;
   accountScope: string;
   viewMode?: ViewMode;
@@ -120,11 +121,10 @@ function normalizeResult(result: unknown, fallbackCurrency: string): GetHoldings
         (entry.holding_type as string | undefined) ??
         "Security",
       quantity: Number(entry.quantity ?? 0),
-      marketValueBase: Number(
-        (entry.marketValueBase as number | string | undefined) ??
-          (entry.market_value_base as number | string | undefined) ??
-          0,
-      ),
+      marketValueBase:
+        entry.marketValueBase != null || entry.market_value_base != null
+          ? Number(entry.marketValueBase ?? entry.market_value_base)
+          : null,
       costBasisBase:
         entry.costBasisBase != null || entry.cost_basis_base != null
           ? Number(entry.costBasisBase ?? entry.cost_basis_base)
@@ -161,17 +161,16 @@ function normalizeResult(result: unknown, fallbackCurrency: string): GetHoldings
         entry.dayChangePct != null || entry.day_change_pct != null
           ? Number(entry.dayChangePct ?? entry.day_change_pct)
           : null,
-      weight: Number(entry.weight ?? 0),
+      weight: entry.weight == null ? null : Number(entry.weight),
       currency: (entry.currency as string | undefined) ?? fallbackCurrency,
     }));
 
   return {
     holdings,
-    totalValue: Number(
-      (candidate.totalValue as number | string | undefined) ??
-        (candidate.total_value as number | string | undefined) ??
-        0,
-    ),
+    totalValue:
+      candidate.totalValue != null || candidate.total_value != null
+        ? Number(candidate.totalValue ?? candidate.total_value)
+        : null,
     currency: (candidate.currency as string | undefined) ?? fallbackCurrency,
     accountScope:
       (candidate.accountScope as string | undefined) ??
@@ -201,7 +200,7 @@ function getColorScale(gain: number, maxGain: number, minGain: number): ColorSca
   if (isNaN(gain) || isNaN(maxGain) || isNaN(minGain)) {
     return {
       opacity: 0.5,
-      className: isGain ? "fill-success" : "fill-destructive",
+      className: isGain ? "fill-gain" : "fill-loss",
     };
   }
 
@@ -216,7 +215,7 @@ function getColorScale(gain: number, maxGain: number, minGain: number): ColorSca
 
   return {
     opacity,
-    className: isGain ? "fill-success" : "fill-destructive",
+    className: isGain ? "fill-gain" : "fill-loss",
   };
 }
 
@@ -341,7 +340,7 @@ const TreemapTooltip: FC<TreemapTooltipProps> = ({ active, payload, currency = "
           </div>
           <div className="flex items-center justify-between gap-4 text-xs">
             <span className="text-muted-foreground">{t("ai:holdings.today")}</span>
-            <span className={cn("font-medium", isPositive ? "text-success" : "text-destructive")}>
+            <span className={cn("font-medium", isPositive ? "text-gain" : "text-loss")}>
               {isPositive ? "+" : ""}
               {numberFormatting.formatPercent(gain)}
             </span>
@@ -385,7 +384,9 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
   // Sort holdings by marketValueBase descending
   const sortedHoldings = useMemo(() => {
     if (!parsed?.holdings) return [];
-    return [...parsed.holdings].sort((a, b) => b.marketValueBase - a.marketValueBase);
+    return [...parsed.holdings].sort(
+      (a, b) => (b.marketValueBase ?? -Infinity) - (a.marketValueBase ?? -Infinity),
+    );
   }, [parsed?.holdings]);
 
   const currency = parsed?.currency ?? baseCurrency;
@@ -396,7 +397,9 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
       return { totalValue: 0, totalPnl: 0, totalPnlPct: 0, totalReturn: 0, totalReturnPct: 0 };
     }
     const value =
-      parsed?.totalValue ?? sortedHoldings.reduce((sum, h) => sum + h.marketValueBase, 0);
+      parsed?.totalValue == null
+        ? null
+        : sumAmounts(sortedHoldings.map((holding) => holding.marketValueBase));
     const performance = calculateBasePortfolioPerformance(sortedHoldings);
     return {
       totalValue: value,
@@ -413,7 +416,10 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
     const dailyPerformance = calculateDailyPortfolioPerformance(sortedHoldings);
 
     const data = sortedHoldings
-      .filter((h) => h.marketValueBase !== 0)
+      .filter(
+        (h): h is HoldingDto & { marketValueBase: number } =>
+          h.marketValueBase != null && h.marketValueBase !== 0,
+      )
       .map((h) => {
         const gain =
           returnType === "daily"
@@ -468,7 +474,8 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
   const holdingsCount = sortedHoldings.length;
 
   // Format value with privacy
-  const formatValue = (value: number) => {
+  const formatValue = (value: number | null | undefined) => {
+    if (value == null) return "—";
     if (isBalanceHidden) {
       return "******";
     }
@@ -493,16 +500,16 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
           </div>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="max-h-[320px] overflow-y-auto">
+          <div className="max-h-80 overflow-y-auto">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="pl-4 text-xs">{t("ai:holdings.colSymbol")}</TableHead>
-                  <TableHead className="text-right text-xs">{t("ai:holdings.colValue")}</TableHead>
-                  <TableHead className="hidden text-right text-xs sm:table-cell">
+                  <TableHead className="ps-4 text-xs">{t("ai:holdings.colSymbol")}</TableHead>
+                  <TableHead className="text-end text-xs">{t("ai:holdings.colValue")}</TableHead>
+                  <TableHead className="hidden text-end text-xs sm:table-cell">
                     {t("ai:holdings.colWeight")}
                   </TableHead>
-                  <TableHead className="pr-4 text-right text-xs">
+                  <TableHead className="pe-4 text-end text-xs">
                     {t("ai:holdings.colGain")}
                   </TableHead>
                 </TableRow>
@@ -510,17 +517,17 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
               <TableBody>
                 {Array.from({ length: 5 }).map((_, i) => (
                   <TableRow key={i} className="text-xs">
-                    <TableCell className="py-2 pl-4">
+                    <TableCell className="py-2 ps-4">
                       <Skeleton className="h-4 w-16" />
                     </TableCell>
-                    <TableCell className="py-2 text-right">
-                      <Skeleton className="ml-auto h-4 w-20" />
+                    <TableCell className="py-2 text-end">
+                      <Skeleton className="ms-auto h-4 w-20" />
                     </TableCell>
-                    <TableCell className="hidden py-2 text-right sm:table-cell">
-                      <Skeleton className="ml-auto h-4 w-12" />
+                    <TableCell className="hidden py-2 text-end sm:table-cell">
+                      <Skeleton className="ms-auto h-4 w-12" />
                     </TableCell>
-                    <TableCell className="py-2 pr-4 text-right">
-                      <Skeleton className="ml-auto h-4 w-14" />
+                    <TableCell className="py-2 pe-4 text-end">
+                      <Skeleton className="ms-auto h-4 w-14" />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -565,66 +572,80 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
         : t("ai:holdings.totalPnl");
 
   // Treemap view component
-  const TreemapView = () => (
-    <div className="pb-2 pt-4">
-      <div className="flex flex-wrap items-start justify-between gap-2 px-4 pb-2">
-        <div>
-          <p className="text-sm font-medium">
-            {t("ai:holdings.portfolioReturn", { label: returnLabel })}
-          </p>
-          <p className="text-muted-foreground mt-1 text-xs">
-            {t("ai:holdings.positions", { count: holdingsCount })} · {returnLabel}
-            {accountLabel !== "Portfolio" && (
-              <Badge variant="outline" className="ml-2 text-xs uppercase">
-                {accountLabel}
-              </Badge>
-            )}
-          </p>
-        </div>
-        <div className="text-right">
-          <span className="text-xl font-bold">{formatValue(totalValue)}</span>
-          {!isBalanceHidden && (
-            <p
-              className={cn(
-                "text-sm font-medium",
-                portfolioChange == null
-                  ? "text-muted-foreground"
-                  : portfolioChange >= 0
-                    ? "text-success"
-                    : "text-destructive",
-              )}
-            >
-              {portfolioChange == null ? (
-                "-"
-              ) : (
-                <>
-                  {portfolioChange > 0 ? "+" : ""}
-                  {numberFormatting.formatPercent(portfolioChange)}{" "}
-                  {returnType === "daily"
-                    ? t("ai:holdings.todaySuffix")
-                    : returnType === "return"
-                      ? t("ai:holdings.returnSuffix")
-                      : t("ai:holdings.pnlSuffix")}
-                </>
+  const chartUnavailable = sortedHoldings.some(
+    (holding) =>
+      holding.marketValueBase == null ||
+      (returnType === "daily"
+        ? holding.dayChangePct
+        : returnType === "return"
+          ? holding.totalReturnPct
+          : holding.totalGainPct) == null,
+  );
+  const TreemapView = () =>
+    chartUnavailable ? (
+      <p role="status" className="p-4">
+        {t("holdings:scope_unavailable")}
+      </p>
+    ) : (
+      <div className="pt-4 pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-2 px-4 pb-2">
+          <div>
+            <p className="text-sm font-medium">
+              {t("ai:holdings.portfolioReturn", { label: returnLabel })}
+            </p>
+            <p className="text-muted-foreground mt-1 text-xs">
+              {t("ai:holdings.positions", { count: holdingsCount })} · {returnLabel}
+              {accountLabel !== "Portfolio" && (
+                <Badge variant="outline" className="ms-2 text-xs uppercase">
+                  {accountLabel}
+                </Badge>
               )}
             </p>
-          )}
+          </div>
+          <div className="text-end">
+            <span className="text-xl font-bold">{formatValue(totalValue)}</span>
+            {!isBalanceHidden && (
+              <p
+                className={cn(
+                  "text-sm font-medium",
+                  portfolioChange == null
+                    ? "text-muted-foreground"
+                    : portfolioChange >= 0
+                      ? "text-gain"
+                      : "text-loss",
+                )}
+              >
+                {portfolioChange == null ? (
+                  "-"
+                ) : (
+                  <>
+                    {portfolioChange > 0 ? "+" : ""}
+                    {numberFormatting.formatPercent(portfolioChange)}{" "}
+                    {returnType === "daily"
+                      ? t("ai:holdings.todaySuffix")
+                      : returnType === "return"
+                        ? t("ai:holdings.returnSuffix")
+                        : t("ai:holdings.pnlSuffix")}
+                  </>
+                )}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="h-60 px-2">
+          <ResponsiveContainer width="100%" height="100%">
+            <Treemap
+              data={treemapData}
+              dataKey="marketValue"
+              animationDuration={100}
+              content={(props) => <TreemapContent {...props} />}
+            >
+              <ChartTooltip content={<TreemapTooltip currency={currency} />} />
+            </Treemap>
+          </ResponsiveContainer>
         </div>
       </div>
-      <div className="h-[240px] px-2">
-        <ResponsiveContainer width="100%" height="100%">
-          <Treemap
-            data={treemapData}
-            dataKey="marketValue"
-            animationDuration={100}
-            content={(props) => <TreemapContent {...props} />}
-          >
-            <ChartTooltip content={<TreemapTooltip currency={currency} />} />
-          </Treemap>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
+    );
 
   // Table view component
   const TableView = ({ showHeader = true }: { showHeader?: boolean }) => {
@@ -643,28 +664,28 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
               <p className="text-muted-foreground mt-1 text-xs">
                 {t("ai:holdings.positions", { count: holdingsCount })}
                 {accountLabel !== "Portfolio" && (
-                  <Badge variant="outline" className="ml-2 text-xs uppercase">
+                  <Badge variant="outline" className="ms-2 text-xs uppercase">
                     {accountLabel}
                   </Badge>
                 )}
                 {parsed?.truncated && parsed.originalCount && (
-                  <Badge variant="secondary" className="ml-1 text-xs">
+                  <Badge variant="secondary" className="ms-1 text-xs">
                     {holdingsCount} / {parsed.originalCount}
                   </Badge>
                 )}
               </p>
             </div>
-            <div className="text-right">
+            <div className="text-end">
               <span className="text-xl font-bold">{formatValue(totalValue)}</span>
               {!isBalanceHidden && (
                 <p
                   className={cn(
                     "text-sm font-medium",
-                    gainAmount >= 0 ? "text-success" : "text-destructive",
+                    gainAmount != null && (gainAmount >= 0 ? "text-gain" : "text-loss"),
                   )}
                 >
-                  {gainAmount > 0 ? "+" : ""}
-                  {amountFormatting.formatAmount(gainAmount, currency)} (
+                  {gainAmount != null && gainAmount > 0 ? "+" : ""}
+                  {formatValue(gainAmount)} (
                   {gainPct == null ? (
                     "-"
                   ) : (
@@ -679,16 +700,16 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
             </div>
           </div>
         )}
-        <div className="max-h-[320px] overflow-y-auto">
+        <div className="max-h-80 overflow-y-auto">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4 text-xs">{t("ai:holdings.colSymbol")}</TableHead>
-                <TableHead className="text-right text-xs">{t("ai:holdings.colValue")}</TableHead>
-                <TableHead className="hidden text-right text-xs sm:table-cell">
+                <TableHead className="ps-4 text-xs">{t("ai:holdings.colSymbol")}</TableHead>
+                <TableHead className="text-end text-xs">{t("ai:holdings.colValue")}</TableHead>
+                <TableHead className="hidden text-end text-xs sm:table-cell">
                   {t("ai:holdings.colWeight")}
                 </TableHead>
-                <TableHead className="pr-4 text-right text-xs">
+                <TableHead className="pe-4 text-end text-xs">
                   {returnType === "daily"
                     ? t("ai:holdings.today")
                     : returnType === "return"
@@ -703,33 +724,35 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
                   returnType === "daily"
                     ? (holding.dayChangePct ?? null)
                     : returnType === "return"
-                      ? (holding.totalReturnPct ?? holding.totalGainPct ?? null)
-                      : (holding.totalGainPct ?? holding.unrealizedGainPct ?? null);
+                      ? (holding.totalReturnPct ?? null)
+                      : (holding.totalGainPct ?? null);
                 return (
                   <TableRow key={`${holding.account}-${holding.symbol}`} className="text-xs">
-                    <TableCell className="py-2 pl-4">
+                    <TableCell className="py-2 ps-4">
                       <div>
                         <div className="font-medium">{holding.symbol}</div>
                         {holding.name && (
-                          <div className="text-muted-foreground max-w-[120px] truncate text-[10px] sm:max-w-[200px]">
+                          <div className="text-muted-foreground text-2xs max-w-30 truncate sm:max-w-50">
                             {holding.name}
                           </div>
                         )}
                       </div>
                     </TableCell>
-                    <TableCell className="py-2 text-right font-medium tabular-nums">
+                    <TableCell className="py-2 text-end font-medium tabular-nums">
                       <div>{formatValue(holding.marketValueBase)}</div>
-                      <div className="text-muted-foreground text-[10px]">{holding.currency}</div>
+                      <div className="text-muted-foreground text-2xs">{holding.currency}</div>
                     </TableCell>
-                    <TableCell className="hidden py-2 text-right tabular-nums sm:table-cell">
-                      {(holding.weight * 100).toFixed(1)}%
+                    <TableCell className="hidden py-2 text-end tabular-nums sm:table-cell">
+                      {holding.weight == null
+                        ? "—"
+                        : numberFormatting.formatPercent(holding.weight, { digits: 1 })}
                     </TableCell>
-                    <TableCell className="py-2 pr-4 text-right">
+                    <TableCell className="py-2 pe-4 text-end">
                       {tableGainPct != null ? (
                         <span
                           className={cn(
                             "tabular-nums",
-                            tableGainPct >= 0 ? "text-success" : "text-destructive",
+                            tableGainPct >= 0 ? "text-gain" : "text-loss",
                           )}
                         >
                           {tableGainPct > 0 ? "+" : ""}
@@ -798,7 +821,7 @@ function HoldingsContentImpl({ args, result, status }: HoldingsContentProps) {
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-0">
         {ReturnTypeToggle}
       </CardHeader>
-      <CardContent className="px-0 pb-0 pt-4">
+      <CardContent className="px-0 pt-4 pb-0">
         <TableView />
       </CardContent>
     </Card>

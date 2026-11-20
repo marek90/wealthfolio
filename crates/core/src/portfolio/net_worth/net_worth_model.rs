@@ -15,6 +15,12 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetWorthHistoryPoint {
+    /// All numeric values are known subtotals unless complete. Do not calculate
+    /// returns across incomplete points.
+    #[serde(default)]
+    pub value_status: crate::portfolio::valuation::ValuationStatus,
+    #[serde(default)]
+    pub missing_fx: Vec<crate::fx::FxConversionIssue>,
     /// Date of this data point
     pub date: NaiveDate,
 
@@ -61,6 +67,10 @@ pub struct BreakdownItem {
     /// Optional: asset ID for individual items (liabilities, specific holdings)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+    /// First day the item carried a balance, when known (credit-card liabilities).
+    /// Tells a card paid off before a range apart from one opened during it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_value_date: Option<NaiveDate>,
     /// Individual items rolled up into this category, for drill-down. Empty for
     /// leaf items and for the Investments category (use allocation drill-down).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -105,6 +115,11 @@ pub struct StaleAssetInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetWorthResponse {
+    /// Totals and breakdowns are known subtotals unless complete.
+    #[serde(default)]
+    pub value_status: crate::portfolio::valuation::ValuationStatus,
+    #[serde(default)]
+    pub missing_fx: Vec<crate::fx::FxConversionIssue>,
     /// The date for which net worth is calculated
     pub date: NaiveDate,
     /// Assets section with total and breakdown
@@ -125,6 +140,8 @@ impl NetWorthResponse {
     /// Create a new empty net worth response for the given date and currency.
     pub fn empty(date: NaiveDate, currency: String) -> Self {
         Self {
+            value_status: Default::default(),
+            missing_fx: Vec::new(),
             date,
             assets: AssetsSection::default(),
             liabilities: LiabilitiesSection::default(),

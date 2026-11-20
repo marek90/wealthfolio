@@ -1,11 +1,19 @@
 import { useState, useMemo, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { AssistantRuntimeProvider, useThreadRuntime } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useAui } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { EmptyPlaceholder } from "@wealthfolio/ui";
+import {
+  buttonVariants,
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "@wealthfolio/ui";
 import {
   Sheet,
   SheetContent,
@@ -36,6 +44,13 @@ import {
   RecordActivityToolUI,
   RecordActivitiesToolUI,
   ValuationToolUI,
+  ListSpendingEventsToolUI,
+  SpendingBudgetToolUI,
+  SpendingContextToolUI,
+  SpendingEventsToolUI,
+  SpendingInsightToolUI,
+  SpendingReportToolUI,
+  SpendingTransactionsToolUI,
 } from "./tool-uis";
 import { ChatModelProvider, useChatModelContext } from "../hooks/use-chat-model-context";
 import { useChatRuntime } from "../hooks/use-chat-runtime";
@@ -59,11 +74,9 @@ function ButtonWithTooltip({
 }) {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Button {...props}>
-          {children}
-          <span className="sr-only">{tooltip}</span>
-        </Button>
+      <TooltipTrigger render={<Button {...props} />}>
+        {children}
+        <span className="sr-only">{tooltip}</span>
       </TooltipTrigger>
       <TooltipContent side={side}>{tooltip}</TooltipContent>
     </Tooltip>
@@ -77,11 +90,11 @@ function Sidebar({ collapsed }: { collapsed?: boolean }) {
   return (
     <aside
       className={cn(
-        "bg-muted/30 flex h-full flex-col border-r transition-all duration-200",
-        collapsed ? "w-0 overflow-hidden opacity-0" : "w-[260px] opacity-100",
+        "bg-muted/30 flex h-full flex-col border-e transition-all duration-200 motion-reduce:transition-opacity",
+        collapsed ? "w-0 overflow-hidden opacity-0" : "w-65 opacity-100",
       )}
     >
-      <div className="flex-1 overflow-y-auto p-3">
+      <div className="flex-1 scrollbar-thin overflow-y-auto p-3">
         <ThreadList />
       </div>
     </aside>
@@ -95,23 +108,20 @@ function MobileSidebar() {
   const { t } = useTranslation();
   return (
     <Sheet>
-      <SheetTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-9 shrink-0 md:hidden">
-          <Icons.PanelLeft className="size-4" />
-          <span className="sr-only">{t("ai:shell.toggleMenu")}</span>
-        </Button>
-      </SheetTrigger>
-      <SheetContent
-        side="left"
-        className="flex w-[280px] flex-col gap-0 px-0 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)]"
+      <SheetTrigger
+        render={<Button variant="ghost" size="icon" className="size-9 shrink-0 md:hidden" />}
       >
+        <Icons.PanelLeft className="size-4" />
+        <span className="sr-only">{t("ai:shell.toggleMenu")}</span>
+      </SheetTrigger>
+      <SheetContent side="inline-start" className="flex w-70 flex-col gap-0 px-0 py-3">
         <SheetHeader className="sr-only">
           <SheetTitle>{t("ai:shell.conversations")}</SheetTitle>
         </SheetHeader>
         <div className="flex h-14 items-center border-b px-4">
           <span className="font-semibold">{t("ai:shell.conversations")}</span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        <div className="min-h-0 flex-1 scrollbar-thin overflow-y-auto p-3">
           <ThreadList />
         </div>
       </SheetContent>
@@ -156,18 +166,21 @@ function NoProvidersEmptyState({ className }: { className?: string }) {
   const { t } = useTranslation();
   return (
     <div className={cn("flex h-full w-full items-center justify-center", className)}>
-      <EmptyPlaceholder
-        icon={<Icons.Sparkles className="text-muted-foreground h-10 w-10" />}
-        title={t("ai:empty.noProviderTitle")}
-        description={t("ai:empty.noProviderDescription")}
-      >
-        <Button asChild>
-          <Link to="/settings/ai-providers">
-            <Icons.Settings className="mr-2 h-4 w-4" />
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            {<Icons.Sparkles className="text-muted-foreground size-10" />}
+          </EmptyMedia>
+          <EmptyTitle>{t("ai:empty.noProviderTitle")}</EmptyTitle>
+          <EmptyDescription>{t("ai:empty.noProviderDescription")}</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Link to="/settings/ai-providers" className={buttonVariants()}>
+            <Icons.Settings className="me-2 h-4 w-4" />
             {t("ai:empty.configureProviders")}
           </Link>
-        </Button>
-      </EmptyPlaceholder>
+        </EmptyContent>
+      </Empty>
     </div>
   );
 }
@@ -185,7 +198,7 @@ const consumedPromptKeys = new Set<string>();
 function InitialPromptSender() {
   const location = useLocation();
   const navigate = useNavigate();
-  const threadRuntime = useThreadRuntime();
+  const aui = useAui();
 
   useEffect(() => {
     const prompt = (location.state as { aiPrompt?: string } | null)?.aiPrompt;
@@ -193,8 +206,8 @@ function InitialPromptSender() {
     consumedPromptKeys.add(location.key);
     // Clear navigation state first so a refresh or back nav won't resend.
     navigate(location.pathname, { replace: true, state: null });
-    threadRuntime.append(prompt);
-  }, [location, navigate, threadRuntime]);
+    aui.thread.append(prompt);
+  }, [location, navigate, aui]);
 
   return null;
 }
@@ -255,6 +268,13 @@ function ChatShellInner({ className }: ChatShellProps) {
         <AssetClassificationToolUI />
         <ListCategorizationContextToolUI />
         <CategorizationProposalsToolUI />
+        <SpendingContextToolUI />
+        <ListSpendingEventsToolUI />
+        <SpendingInsightToolUI />
+        <SpendingReportToolUI />
+        <SpendingTransactionsToolUI />
+        <SpendingBudgetToolUI />
+        <SpendingEventsToolUI />
 
         <InitialPromptSender />
 

@@ -75,8 +75,8 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
           setSheetOpen(open);
         }}
       >
-        <SheetTrigger asChild>{triggerButton}</SheetTrigger>
-        <SheetContent side="bottom" className="rounded-t-4xl mx-1 flex max-h-[85vh] flex-col p-0">
+        <SheetTrigger render={triggerButton} />
+        <SheetContent side="bottom" className="mx-1 flex max-h-[85vh] flex-col rounded-t-4xl p-0">
           <SheetHeader className="border-border border-b px-6 py-4">
             <SheetTitle>{t("ui:dateRange.customRange", "Custom range")}</SheetTitle>
           </SheetHeader>
@@ -88,7 +88,9 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
                   {t("ui:dateRange.start", "Start")}
                 </div>
                 <div className="text-foreground mt-1 truncate text-sm font-medium">
-                  {draft?.from ? formatDate(draft.from, dateFormatting) : t("ui:dateRange.notSet", "Not set")}
+                  {draft?.from
+                    ? formatDate(draft.from, dateFormatting)
+                    : t("ui:dateRange.notSet", "Not set")}
                 </div>
               </div>
               <div className="border-border/70 bg-muted/30 rounded-lg border px-3 py-2">
@@ -96,7 +98,9 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
                   {t("ui:dateRange.end", "End")}
                 </div>
                 <div className="text-foreground mt-1 truncate text-sm font-medium">
-                  {draft?.to ? formatDate(draft.to, dateFormatting) : t("ui:dateRange.notSet", "Not set")}
+                  {draft?.to
+                    ? formatDate(draft.to, dateFormatting)
+                    : t("ui:dateRange.notSet", "Not set")}
                 </div>
               </div>
             </div>
@@ -153,9 +157,9 @@ export function ChartRangePicker({ value, onChange, isActive, className }: Chart
         setDraft(undefined);
       }}
     >
-      <PopoverTrigger asChild>{triggerButton}</PopoverTrigger>
+      <PopoverTrigger render={triggerButton} />
       <PopoverContent
-        className="max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] w-auto overflow-y-auto overscroll-contain p-0"
+        className="max-h-[min(var(--available-height,80vh),80vh)] w-auto overflow-y-auto overscroll-contain p-0"
         align="center"
       >
         <Calendar

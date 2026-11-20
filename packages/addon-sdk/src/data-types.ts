@@ -95,6 +95,10 @@ export const ACTIVITY_SUBTYPES = {
   // Liability subtypes
   LIABILITY_INTEREST_ACCRUAL: 'LIABILITY_INTEREST_ACCRUAL',
   LIABILITY_PRINCIPAL_PAYMENT: 'LIABILITY_PRINCIPAL_PAYMENT',
+
+  // Adjustment subtypes: the two rows of an in-kind conversion
+  CONVERSION_OUT: 'CONVERSION_OUT',
+  CONVERSION_IN: 'CONVERSION_IN',
 } as const;
 
 export type ActivitySubtype = (typeof ACTIVITY_SUBTYPES)[keyof typeof ACTIVITY_SUBTYPES];
@@ -154,7 +158,6 @@ export interface Account {
   name: string;
   accountType: AccountType;
   group?: string;
-  balance: number;
   currency: string;
   isDefault: boolean;
   isActive: boolean;
@@ -464,7 +467,48 @@ export interface ActivityImport {
    * `metadata.flow.is_external` because false is the default.
    */
   isExternal?: boolean;
+  /**
+   * Links the two rows of a conversion: ADJUSTMENT rows with subtype
+   * CONVERSION_OUT and CONVERSION_IN, imported together. Other rows ignore
+   * it; an import links a transfer's two legs itself.
+   */
+  sourceGroupId?: string;
   comment?: string;
+  /**
+   * Labelled lines that make up `fee` and `tax`, such as commission and stamp
+   * duty. Lines must add up to both totals or the row is rejected; they are
+   * stored in the activity's `metadata.charges` and change no calculation.
+   */
+  charges?: ActivityCharge[];
+  /**
+   * Your own ID for the transaction this row records, such as a statement's
+   * reference. A row with one is a duplicate of the activity your add-on
+   * imported with the same ID into the same account, whatever its values or
+   * comment, and is skipped like other duplicates. Keep each ID the same in
+   * every import and different for every separate transaction. A row with an
+   * ID also matches an activity it would match without one that was imported
+   * without an ID, so sending IDs doesn't import earlier rows again. The
+   * activity stores it as `addon:<your add-on id>:<ID>` in `sourceRecordId`.
+   * IDs are trimmed; blank IDs are treated as absent. Matching by ID is scoped
+   * to your add-on, but the values fallback can match any import without an ID
+   * in the account, including CSV or another add-on's imports.
+   */
+  sourceRecordId?: string;
+  /**
+   * Details to keep with the activity, stored in its metadata under
+   * `addons[<your add-on id>]`, apart from the keys Wealthfolio reads.
+   */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * One labelled part of an activity's fee or tax, in the activity's currency
+ * (a GBp line is converted to GBP like the totals).
+ */
+export interface ActivityCharge {
+  category: 'fee' | 'tax';
+  label: string;
+  amount: number | string;
 }
 
 export interface ImportActivitiesSummary {
@@ -757,10 +801,19 @@ export interface SpendingReportRequest {
   accountIds?: string[];
 }
 
+/** Coverage of native FX conversion attempts, not source-data completeness. */
+export interface SpendingCalculationQuality {
+  missingFxTransactions: number;
+  missingFxCurrencies: string[];
+}
+
 export interface SpendingPeriodSummary {
+  calculationQuality?: SpendingCalculationQuality;
   income: number;
   outflow: number;
   saved: number;
+  /** Money brought back from savings; `net = income - outflow - saved + fromSavings`. */
+  fromSavings?: number;
   net: number;
   count: number;
 }
@@ -799,8 +852,8 @@ export interface SpendingReport {
 }
 
 export interface MonetaryValue {
-  local: number;
-  base: number;
+  local: number | null;
+  base: number | null;
 }
 
 export interface Lot {
@@ -861,7 +914,7 @@ export interface Holding {
   dayChange?: MonetaryValue | null;
   dayChangePct?: number | null;
   prevCloseValue?: MonetaryValue | null;
-  weight: number;
+  weight: number | null;
   asOfDate: string;
 }
 
@@ -969,8 +1022,17 @@ export interface QuoteUpdate {
 }
 
 export interface Settings {
+  /** Theme ID (palette and shape). Absent on hosts without themes. */
+  themeId?: string;
+  /**
+   * Gain and loss colours: 'green-up', 'red-up' or 'red-up-blue-down'; synced across
+   * the user's devices. Absent on older hosts, which show green up.
+   */
+  gainColors?: string;
   theme: string;
   font: string;
+  /** Text size name (small, default, large, extra-large). Absent on hosts without it. */
+  textSize?: string;
   baseCurrency: string;
   defaultReturnMetric: 'twr' | 'irr' | 'valueReturn';
   timezone?: string;
@@ -1037,7 +1099,10 @@ export interface IncomeByAsset {
   kind: AssetKind;
   symbol: string;
   name: string;
+  /** Income of every type. */
   income: number;
+  /** The part of `income` that is dividends; absent on older hosts. */
+  dividendIncome?: number;
 }
 
 export interface IncomeSummary {
@@ -1050,6 +1115,8 @@ export interface IncomeSummary {
   currency: string;
   monthlyAverage: number;
   yoyGrowth: number | null;
+  /** Currencies with no exchange rate to `currency`, left out of the converted totals. */
+  unconvertedCurrencies: string[];
 }
 
 export interface DateRange {
@@ -1172,6 +1239,7 @@ export interface ContributionLimit {
   accountIds?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  isRecurring?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1435,4 +1503,323 @@ export interface SnapshotImportResult {
   snapshotsImported: number;
   snapshotsFailed: number;
   errors: string[];
+}
+
+// Spending budget and event configuration shared by the public host API.
+export type BudgetTargetType = 'category' | 'group_buffer';
+export type BudgetRolloverTargetType = 'category' | 'group';
+
+export interface BudgetGroup {
+  id: string;
+  name: string;
+  key: string;
+  color: string | null;
+  icon: string | null;
+  sortOrder: number;
+  isSystem: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewBudgetGroup {
+  id?: string;
+  name: string;
+  key?: string;
+  color?: string | null;
+  icon?: string | null;
+  sortOrder?: number;
+  isSystem?: boolean;
+}
+
+export interface UpdateBudgetGroup {
+  name?: string;
+  color?: string | null;
+  icon?: string | null;
+  sortOrder?: number;
+}
+
+export interface BudgetGroupAssignment {
+  id: string;
+  groupId: string;
+  taxonomyId: string;
+  categoryId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BudgetTarget {
+  id: string;
+  periodKey: string;
+  targetType: BudgetTargetType;
+  taxonomyId: string | null;
+  categoryId: string | null;
+  groupId: string | null;
+  amount: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewBudgetTarget {
+  id?: string;
+  periodKey: string;
+  targetType: BudgetTargetType;
+  taxonomyId?: string | null;
+  categoryId?: string | null;
+  groupId?: string | null;
+  amount: string;
+}
+
+export interface BudgetRolloverSetting {
+  id: string;
+  targetType: BudgetRolloverTargetType;
+  taxonomyId: string | null;
+  categoryId: string | null;
+  groupId: string | null;
+  enabled: boolean;
+  startMonth: string;
+  startingBalance: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewBudgetRolloverSetting {
+  id?: string;
+  targetType: BudgetRolloverTargetType;
+  taxonomyId?: string | null;
+  categoryId?: string | null;
+  groupId?: string | null;
+  enabled?: boolean;
+  startMonth: string;
+  startingBalance: string;
+}
+
+export interface BudgetCategoryRow {
+  taxonomyId: string;
+  categoryId: string;
+  groupId: string | null;
+  parentId: string | null;
+  name: string;
+  color: string | null;
+  icon: string | null;
+  target: number;
+  actual: number;
+  rolloverIn: number;
+  rolloverOut: number;
+  remaining: number;
+  overspent: boolean;
+  hasDefaultTarget: boolean;
+  hasMonthOverride: boolean;
+  rolloverEnabled: boolean;
+}
+
+export interface BudgetGroupRow {
+  group: BudgetGroup;
+  categoryTargetTotal: number;
+  buffer: number;
+  plannedTotal: number;
+  actual: number;
+  rolloverIn: number;
+  rolloverOut: number;
+  remaining: number;
+  overspent: boolean;
+  rolloverEnabled: boolean;
+  /** Savings categories listed in the group: a goal, outside the figures above. */
+  savingsTargetTotal: number;
+  savingsActual: number;
+  categories: BudgetCategoryRow[];
+}
+
+/**
+ * `spending*` is consumption (expense categories and group buffers), a limit.
+ * `savings*` is the savings goal and the money moved to savings. The plan's total
+ * allocation, to compare with income, is `spendingPlanned + savingsPlanned`.
+ */
+export interface BudgetTotals {
+  spendingPlanned: number;
+  spendingActual: number;
+  spendingRemaining: number;
+  savingsPlanned: number;
+  savingsActual: number;
+  incomePlanned: number;
+  incomeActual: number;
+  groupBuffer: number;
+  rolloverIn: number;
+  rolloverOut: number;
+  overspentCount: number;
+}
+
+export interface BudgetSnapshot {
+  state: {
+    groups: BudgetGroup[];
+    groupAssignments: BudgetGroupAssignment[];
+    targets: BudgetTarget[];
+    rolloverSettings: BudgetRolloverSetting[];
+  };
+  computed: {
+    /** Includes conversions for historical months needed by rollovers. */
+    calculationQuality?: SpendingCalculationQuality;
+    currency: string;
+    periodKey: string;
+    fxAsOf: string | null;
+    groupRows: BudgetGroupRow[];
+    ungroupedRows: BudgetCategoryRow[];
+    incomeRows: BudgetCategoryRow[];
+    totals: BudgetTotals;
+  };
+}
+
+export interface EventType {
+  id: string;
+  /** Stable slug for seeded types (Travel, Wedding, ...). User-created types
+   *  have this `null`. UIs can use it as an i18n lookup key. */
+  key?: string | null;
+  name: string;
+  color?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewEventType {
+  id?: string | null;
+  name: string;
+  color?: string | null;
+}
+
+export interface SpendingEvent {
+  id: string;
+  name: string;
+  description?: string | null;
+  eventTypeId: string;
+  startDate: string;
+  endDate: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewSpendingEvent {
+  id?: string | null;
+  name: string;
+  description?: string | null;
+  eventTypeId: string;
+  startDate: string;
+  endDate: string;
+}
+
+export interface UpdateSpendingEvent {
+  name?: string;
+  description?: string | null;
+  eventTypeId?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+/** Event joined with its EventType.name for UI display. */
+export interface EventWithTypeName extends SpendingEvent {
+  eventTypeName: string;
+}
+
+export interface EventCategorySpending {
+  categoryId: string | null;
+  categoryName: string;
+  color: string | null;
+  amount: number;
+  transactionCount: number;
+}
+
+export interface EventSpendingSummary {
+  calculationQuality?: SpendingCalculationQuality;
+  eventId: string;
+  eventName: string;
+  eventTypeId: string;
+  eventTypeName: string;
+  eventTypeColor: string | null;
+  startDate: string;
+  endDate: string;
+  totalSpending: number;
+  transactionCount: number;
+  currency: string;
+  byCategory: Record<string, EventCategorySpending>;
+  dailySpending: Record<string, number>;
+}
+
+export interface EventSummariesRequest {
+  startDate?: string | null;
+  endDate?: string | null;
+  currency?: string | null;
+}
+
+export interface SpendingContext {
+  enabled: boolean;
+  accountIds: string[];
+  excludedCategoryIds: string[];
+}
+
+// Allocation targets shared by the public host API. Read-only; targets are
+// created and edited only in the Wealthfolio UI. Weights and drift are in
+// basis points (10000 = 100%).
+export type AllocationTargetScopeType = 'all' | 'portfolio' | 'account';
+export type AllocationBandType = 'absolute' | 'hybrid';
+export type AllocationDriftStatus =
+  | 'in_band'
+  | 'underweight'
+  | 'overweight'
+  | 'not_targeted';
+
+export interface AllocationTargetWeight {
+  /** Category id within the target's taxonomy. */
+  categoryId: string;
+  /** The category's stable key, e.g. `REAL_ESTATE`; ids differ between installs. */
+  categoryKey: string;
+  categoryName: string;
+  targetBps: number;
+}
+
+export interface AllocationTarget {
+  id: string;
+  name: string;
+  scopeType: AllocationTargetScopeType;
+  /** Account id or portfolio id; null when `scopeType` is `'all'`. */
+  scopeId: string | null;
+  /** Taxonomy the weights' categories belong to, e.g. `asset_classes`. */
+  taxonomyId: string;
+  /** Absolute range in bps; for `'hybrid'` bands, the floor of the range. */
+  driftBandBps: number;
+  bandType: AllocationBandType;
+  /** Relative part of a hybrid range, in bps of the category's target. */
+  relativeFactorBps: number;
+  allowSells: boolean;
+  wholeSharesOnly: boolean;
+  /** Decimal string in the base currency. */
+  minTradeAmount: string;
+  maxTurnoverBps: number | null;
+  weights: AllocationTargetWeight[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AllocationDriftRow {
+  categoryId: string;
+  categoryName: string;
+  currentBps: number;
+  targetBps: number;
+  driftBps: number;
+  currentValue: number;
+  targetValue: number;
+  valueDelta: number;
+  /** Range applied to this category after resolving a hybrid band. */
+  effectiveBandBps: number;
+  status: AllocationDriftStatus;
+  isCash: boolean;
+}
+
+export interface AllocationDrift {
+  targetId: string;
+  scopeType: AllocationTargetScopeType;
+  scopeId: string | null;
+  baseCurrency: string;
+  totalValue: number;
+  maxDriftBps: number;
+  outOfBandCount: number;
+  deployableCash: number;
+  rows: AllocationDriftRow[];
 }

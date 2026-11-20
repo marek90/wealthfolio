@@ -1,24 +1,35 @@
-import { useHapticFeedback } from "@/hooks";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
-import { useIsMobileViewport } from "@/hooks/use-platform";
+import { useChartScrubHaptic } from "@/hooks/use-chart-scrub-haptic";
+import { useIsMobileViewport, useViewportBelow } from "@/hooks/use-platform";
 import { formatDate } from "@/lib/utils";
 import { AmountDisplay, useDateFormatting } from "@wealthfolio/ui";
 import { ChartConfig, ChartContainer } from "@wealthfolio/ui/components/ui/chart";
 import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Area, AreaChart, Brush, ReferenceArea, ReferenceDot, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Area,
+  AreaChart,
+  Brush,
+  ReferenceArea,
+  ReferenceDot,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import type { MouseHandlerDataParam } from "recharts/types/synchronisation/types";
 import {
   HistoryChartActiveDot,
   HistoryChartMarkerShape,
+  lineColorAt,
+  type HistoryChartMarkerTone,
   type RechartsActiveDotProps,
   type RechartsMarkerShapeProps,
 } from "./history-chart-marker";
 import { getAutomaticHistoryChartScale, type HistoryChartScaleMode } from "./history-chart-scale";
 
-const CHART_SCRUB_HAPTIC_INTERVAL_MS = 80;
-
 export interface HistoryChartData {
+  /** An unknown value must form a gap, never a zero or a line between neighbours. */
+  isUnavailable?: boolean;
   date: string;
   totalValue: number;
   netContribution: number;
@@ -30,6 +41,8 @@ interface HistoryChartProps {
   isLoading?: boolean;
   /** Dates with manual snapshots (YYYY-MM-DD format) */
   snapshotDates?: string[];
+  /** Per-date letter markers; dates without an entry render as snapshot dots */
+  markerLabels?: Map<string, { label: string; tone: HistoryChartMarkerTone }>;
   /** Toggle visibility of snapshot markers */
   showMarkers?: boolean;
   /** Callback when a marker is clicked */
@@ -43,6 +56,8 @@ interface HistoryChartProps {
   /** Called when the brush selection changes. Receives the visible date window (YYYY-MM-DD strings),
    *  or undefined when the brush spans the full dataset. Client-side only — no refetch. */
   onVisibleRangeChange?: (range: { from: string; to: string } | undefined) => void;
+  /** The line's colour at or above zero, e.g. `var(--investments)`; below zero it is --loss. */
+  color?: string;
 }
 
 interface TooltipEntry {
@@ -58,6 +73,7 @@ interface TooltipBaseProps {
 interface CustomTooltipProps extends TooltipBaseProps {
   isBalanceHidden: boolean;
   isChartHovered: boolean;
+  color: string;
 }
 
 const CustomTooltip = ({
@@ -65,6 +81,7 @@ const CustomTooltip = ({
   payload,
   isBalanceHidden,
   isChartHovered,
+  color,
 }: CustomTooltipProps) => {
   const dateFormatting = useDateFormatting();
 
@@ -85,12 +102,12 @@ const CustomTooltip = ({
   const tvPayload = totalValueData?.payload;
   const ncPayload = netContributionData?.payload;
 
-  if (!tvPayload) {
+  if (!tvPayload || tvPayload.isUnavailable) {
     return null;
   }
 
   const netContributionPayload = ncPayload ?? tvPayload;
-  const tooltipColor = tvPayload.totalValue >= 0 ? "var(--success)" : "var(--destructive)";
+  const tooltipColor = lineColorAt(tvPayload.totalValue, color);
 
   return (
     <div className="bg-popover pointer-events-none grid grid-cols-1 gap-1.5 rounded-md border p-2 shadow-md">
@@ -134,43 +151,67 @@ const CustomTooltip = ({
 };
 
 export function HistoryChart({
-  data,
+  data: sourceData,
   isLoading,
   snapshotDates,
+  markerLabels,
   showMarkers,
   onMarkerClick,
   scaleMode,
   netContributionMaxDomainSpanRatio,
   minDomainSpanRatio,
   onVisibleRangeChange,
+  color = "var(--gain)",
 }: HistoryChartProps) {
   const { t } = useTranslation();
   const dateFormatting = useDateFormatting();
-  const { triggerHaptic } = useHapticFeedback();
+  const scrubHaptic = useChartScrubHaptic();
   const { isBalanceHidden } = useBalancePrivacy();
   const [isChartHovered, setIsChartHovered] = useState(false);
   const [hoveredMarker, setHoveredMarker] = useState(false);
   const isMobile = useIsMobileViewport();
+  // globals.css clips flex overflow through 1024px; useViewportBelow is exclusive.
+  const keepTooltipInside = useViewportBelow(1025);
   const isTouchScrubbingRef = useRef(false);
-  const lastHapticLabelRef = useRef<string | number | undefined>(undefined);
-  const lastHapticAtRef = useRef(0);
   const id = useId();
   const fillGradientId = `historyFill-${id}`;
   const strokeGradientId = `historyStroke-${id}`;
+  const data = useMemo(() => sourceData.filter((point) => !point.isUnavailable), [sourceData]);
+  const plotData = useMemo(
+    () =>
+      sourceData.map((point) =>
+        point.isUnavailable ? { ...point, totalValue: null, netContribution: null } : point,
+      ),
+    [sourceData],
+  );
 
-  const [brushIndices, setBrushIndices] = useState<{ startIndex: number; endIndex: number } | null>(null);
-  const [prevData, setPrevData] = useState(data);
-  if (data !== prevData) {
-    setPrevData(data);
+  // Brush indices address the PLOTTED series (`plotData`, same order/length as `sourceData`,
+  // including unavailable gap points) — that is the array Recharts' <Brush> indexes. `data`
+  // (gaps filtered out) is only for scaling/markers.
+  const [brushIndices, setBrushIndices] = useState<{ startIndex: number; endIndex: number } | null>(
+    null,
+  );
+  const [prevData, setPrevData] = useState(sourceData);
+  if (sourceData !== prevData) {
+    setPrevData(sourceData);
     setBrushIndices(null);
   }
-  const lastDataIndex = Math.max(0, data.length - 1);
+  const lastDataIndex = Math.max(0, sourceData.length - 1);
   const startIndex = Math.min(brushIndices?.startIndex ?? 0, lastDataIndex);
   const endIndex = Math.min(brushIndices?.endIndex ?? lastDataIndex, lastDataIndex);
   const visibleData = useMemo(
-    () => (brushIndices ? data.slice(startIndex, endIndex + 1) : data),
-    [data, brushIndices, startIndex, endIndex],
+    () =>
+      brushIndices
+        ? sourceData.slice(startIndex, endIndex + 1).filter((point) => !point.isUnavailable)
+        : data,
+    [sourceData, data, brushIndices, startIndex, endIndex],
   );
+  // date -> index in the plotted series, for drag-to-select (activeLabel is a plotted date).
+  const plotIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    sourceData.forEach((item, index) => map.set(item.date, index));
+    return map;
+  }, [sourceData]);
 
   // Drag-to-select state (FB1). Tracked by date label (activeLabel) rather than index, so it
   // stays correct even when the chart is already brush-zoomed (indices become view-relative).
@@ -208,8 +249,8 @@ export function HistoryChart({
   // shorter array, producing `data[i] === undefined` and crashing on `.date`.
   const brushIndicesRef = useRef(brushIndices);
   brushIndicesRef.current = brushIndices;
-  const dataRef = useRef(data);
-  dataRef.current = data;
+  const dataRef = useRef(sourceData);
+  dataRef.current = sourceData;
 
   // iOS synthesizes mouse events after touch; timestamp touches so the mouse-only
   // drag-to-select can ignore those phantom events (a source of the mobile crash).
@@ -222,7 +263,7 @@ export function HistoryChart({
   const BRUSH_HEIGHT = 20;
   const BRUSH_MARGIN_BOTTOM = 28;
 
-  const lastIndex = Math.max(1, data.length - 1);
+  const lastIndex = Math.max(1, sourceData.length - 1);
   const brushUsableWidth = Math.max(0, containerWidth - BRUSH_MARGIN * 2 - BRUSH_TRAVELLER_WIDTH);
   // Approximate pixel x of a given data index along the brush track. Used only to tell which of
   // the two <Brush traveller> render-prop calls is the start vs. end handle — Recharts passes no
@@ -397,25 +438,12 @@ export function HistoryChart({
     if (!isMobile || !isTouchScrubbingRef.current || !chartState.isTooltipActive) {
       return;
     }
-
-    const activeLabel = chartState.activeLabel;
-    if (activeLabel == null || activeLabel === lastHapticLabelRef.current) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastHapticAtRef.current < CHART_SCRUB_HAPTIC_INTERVAL_MS) {
-      return;
-    }
-
-    lastHapticLabelRef.current = activeLabel;
-    lastHapticAtRef.current = now;
-    triggerHaptic();
+    scrubHaptic.tick(chartState.activeLabel);
   };
 
   const resetTouchScrubState = () => {
     isTouchScrubbingRef.current = false;
-    lastHapticLabelRef.current = undefined;
+    scrubHaptic.reset();
   };
 
   const handleChartMove = (chartState: MouseHandlerDataParam) => {
@@ -441,319 +469,334 @@ export function HistoryChart({
         className="history-brush h-full w-full"
         data-no-swipe-drag
       >
-      <AreaChart
-        data={data}
-        stackOffset="sign"
-        style={{
-          cursor: dragRange
-            ? "col-resize"
-            : showMarkers && isChartHovered && hoveredMarker
-              ? "pointer"
-              : undefined,
-        }}
-        margin={{
-          top: 0,
-          right: BRUSH_MARGIN,
-          left: BRUSH_MARGIN,
-          bottom: BRUSH_MARGIN_BOTTOM,
-        }}
-        onDoubleClick={() => {
-          if (brushIndices) {
-            setBrushIndices(null);
-            onVisibleRangeChange?.(undefined);
-          }
-        }}
-        onMouseEnter={() => setIsChartHovered(true)}
-        onMouseLeave={() => {
-          setIsChartHovered(false);
-          setHoveredMarker(false);
-          resetTouchScrubState();
-          if (isDraggingRef.current) {
+        <AreaChart
+          data={plotData}
+          stackOffset="sign"
+          style={{
+            cursor: dragRange
+              ? "col-resize"
+              : showMarkers && isChartHovered && hoveredMarker
+                ? "pointer"
+                : undefined,
+          }}
+          margin={{
+            top: 0,
+            right: BRUSH_MARGIN,
+            left: BRUSH_MARGIN,
+            bottom: BRUSH_MARGIN_BOTTOM,
+          }}
+          onDoubleClick={() => {
+            if (brushIndices) {
+              setBrushIndices(null);
+              onVisibleRangeChange?.(undefined);
+            }
+          }}
+          onMouseEnter={() => setIsChartHovered(true)}
+          onMouseLeave={() => {
+            setIsChartHovered(false);
+            setHoveredMarker(false);
+            resetTouchScrubState();
+            if (isDraggingRef.current) {
+              isDraggingRef.current = false;
+              dragRangeRef.current = null;
+              setDragRange(null);
+            }
+          }}
+          onMouseMove={handleChartMove}
+          onMouseDown={(chartState) => {
+            // Ignore mouse events synthesized right after a touch — otherwise a phantom
+            // drag-to-select fires on mobile (the chart-body zoom is a mouse-only affordance).
+            if (Date.now() - lastTouchAtRef.current < 700) return;
+            const label = (chartState as unknown as MouseHandlerDataParam).activeLabel;
+            if (label == null) return;
+            const s = String(label);
+            isDraggingRef.current = true;
+            dragRangeRef.current = { start: s, end: s };
+            setDragRange({ start: s, end: s });
+          }}
+          onMouseUp={() => {
+            if (!isDraggingRef.current) return;
             isDraggingRef.current = false;
+            const drag = dragRangeRef.current;
             dragRangeRef.current = null;
             setDragRange(null);
-          }
-        }}
-        onMouseMove={handleChartMove}
-        onMouseDown={(chartState) => {
-          // Ignore mouse events synthesized right after a touch — otherwise a phantom
-          // drag-to-select fires on mobile (the chart-body zoom is a mouse-only affordance).
-          if (Date.now() - lastTouchAtRef.current < 700) return;
-          const label = (chartState as unknown as MouseHandlerDataParam).activeLabel;
-          if (label == null) return;
-          const s = String(label);
-          isDraggingRef.current = true;
-          dragRangeRef.current = { start: s, end: s };
-          setDragRange({ start: s, end: s });
-        }}
-        onMouseUp={() => {
-          if (!isDraggingRef.current) return;
-          isDraggingRef.current = false;
-          const drag = dragRangeRef.current;
-          dragRangeRef.current = null;
-          setDragRange(null);
-          if (drag && drag.start !== drag.end) {
-            const a = dateToIndexMap.get(drag.start);
-            const b = dateToIndexMap.get(drag.end);
-            if (a == null || b == null) return;
-            const lo = Math.min(a, b);
-            const hi = Math.max(a, b);
-            setBrushIndices({ startIndex: lo, endIndex: hi });
-            didDragRef.current = true;
-            onVisibleRangeChange?.({ from: data[lo].date, to: data[hi].date });
-          }
-        }}
-        onClick={(chartState) => {
-          if (didDragRef.current) {
-            didDragRef.current = false;
-            return;
-          }
-          if (!showMarkers || chartState?.activeLabel == null) return;
-          const clickedDate = String(chartState.activeLabel);
-          if (markerDateSet.has(clickedDate)) {
-            onMarkerClick?.(clickedDate);
-          }
-        }}
-        onTouchStart={(chartState) => {
-          lastTouchAtRef.current = Date.now();
-          isTouchScrubbingRef.current = true;
-          setIsChartHovered(true);
-          handleChartMove(chartState);
-        }}
-        onTouchMove={(chartState) => {
-          lastTouchAtRef.current = Date.now();
-          handleChartMove(chartState);
-        }}
-        onTouchEnd={() => {
-          lastTouchAtRef.current = Date.now();
-          setIsChartHovered(false);
-          setHoveredMarker(false);
-          resetTouchScrubState();
-        }}
-      >
-        <defs>
-          <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
-            {allNegative ? (
-              <>
-                <stop offset="5%" stopColor="var(--destructive)" stopOpacity={0.2} />
-                <stop offset="70%" stopColor="var(--destructive)" stopOpacity={0.12} />
-                <stop offset="100%" stopColor="var(--destructive)" stopOpacity={0} />
-              </>
-            ) : allPositive ? (
-              <>
-                <stop offset="5%" stopColor="var(--success)" stopOpacity={0.2} />
-                <stop offset="70%" stopColor="var(--success)" stopOpacity={0.12} />
-                <stop offset="100%" stopColor="var(--success)" stopOpacity={0} />
-              </>
-            ) : (
-              <>
-                <stop offset="0%" stopColor="var(--success)" stopOpacity={0.2} />
-                <stop offset={zeroPercent} stopColor="var(--success)" stopOpacity={0.05} />
-                <stop offset={zeroPercent} stopColor="var(--destructive)" stopOpacity={0.05} />
-                <stop offset="100%" stopColor="var(--destructive)" stopOpacity={0.2} />
-              </>
+            if (drag && drag.start !== drag.end) {
+              const a = plotIndexMap.get(drag.start);
+              const b = plotIndexMap.get(drag.end);
+              if (a == null || b == null) return;
+              const lo = Math.min(a, b);
+              const hi = Math.max(a, b);
+              setBrushIndices({ startIndex: lo, endIndex: hi });
+              didDragRef.current = true;
+              onVisibleRangeChange?.({ from: sourceData[lo].date, to: sourceData[hi].date });
+            }
+          }}
+          onClick={(chartState) => {
+            if (didDragRef.current) {
+              didDragRef.current = false;
+              return;
+            }
+            if (!showMarkers || chartState?.activeLabel == null) return;
+            const clickedDate = String(chartState.activeLabel);
+            if (markerDateSet.has(clickedDate)) {
+              onMarkerClick?.(clickedDate);
+            }
+          }}
+          onTouchStart={(chartState) => {
+            lastTouchAtRef.current = Date.now();
+            isTouchScrubbingRef.current = true;
+            setIsChartHovered(true);
+            handleChartMove(chartState);
+          }}
+          onTouchMove={(chartState) => {
+            lastTouchAtRef.current = Date.now();
+            handleChartMove(chartState);
+          }}
+          onTouchEnd={() => {
+            lastTouchAtRef.current = Date.now();
+            setIsChartHovered(false);
+            setHoveredMarker(false);
+            resetTouchScrubState();
+          }}
+        >
+          <defs>
+            <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
+              {allNegative ? (
+                <>
+                  <stop offset="5%" stopColor="var(--loss)" stopOpacity={0.2} />
+                  <stop offset="70%" stopColor="var(--loss)" stopOpacity={0.12} />
+                  <stop offset="100%" stopColor="var(--loss)" stopOpacity={0} />
+                </>
+              ) : allPositive ? (
+                <>
+                  <stop offset="5%" stopColor={color} stopOpacity={0.2} />
+                  <stop offset="70%" stopColor={color} stopOpacity={0.12} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0} />
+                </>
+              ) : (
+                <>
+                  <stop offset="0%" stopColor={color} stopOpacity={0.2} />
+                  <stop offset={zeroPercent} stopColor={color} stopOpacity={0.05} />
+                  <stop offset={zeroPercent} stopColor="var(--loss)" stopOpacity={0.05} />
+                  <stop offset="100%" stopColor="var(--loss)" stopOpacity={0.2} />
+                </>
+              )}
+            </linearGradient>
+            <linearGradient id={strokeGradientId} x1="0" y1="0" x2="0" y2="1">
+              {allNegative ? (
+                <stop offset="0%" stopColor="var(--loss)" />
+              ) : allPositive ? (
+                <stop offset="0%" stopColor={color} />
+              ) : (
+                <>
+                  <stop offset={zeroPercent} stopColor={color} />
+                  <stop offset={zeroPercent} stopColor="var(--loss)" />
+                </>
+              )}
+            </linearGradient>
+          </defs>
+          <Tooltip
+            position={keepTooltipInside ? { y: 60 } : { y: -20 }}
+            cursor={{ stroke: "var(--border)", strokeWidth: 1, pointerEvents: "none" }}
+            wrapperStyle={{ pointerEvents: "none" }}
+            content={(props) => (
+              <CustomTooltip
+                {...(props as unknown as TooltipBaseProps)}
+                isBalanceHidden={isBalanceHidden}
+                isChartHovered={isChartHovered}
+                color={color}
+              />
             )}
-          </linearGradient>
-          <linearGradient id={strokeGradientId} x1="0" y1="0" x2="0" y2="1">
-            {allNegative ? (
-              <stop offset="0%" stopColor="var(--destructive)" />
-            ) : allPositive ? (
-              <stop offset="0%" stopColor="var(--success)" />
-            ) : (
-              <>
-                <stop offset={zeroPercent} stopColor="var(--success)" />
-                <stop offset={zeroPercent} stopColor="var(--destructive)" />
-              </>
-            )}
-          </linearGradient>
-        </defs>
-        <Tooltip
-          position={isMobile ? { y: 60 } : { y: -20 }}
-          cursor={{ stroke: "var(--border)", strokeWidth: 1, pointerEvents: "none" }}
-          wrapperStyle={{ pointerEvents: "none" }}
-          content={(props) => (
-            <CustomTooltip
-              {...(props as unknown as TooltipBaseProps)}
-              isBalanceHidden={isBalanceHidden}
-              isChartHovered={isChartHovered}
-            />
-          )}
-        />
-        <XAxis hide dataKey="date" type="category" />
-        <YAxis
-          hide
-          type="number"
-          scale={scaleConfig.scale === "log" ? "log" : "auto"}
-          domain={scaleConfig.domain}
-        />
-        <Area
-          isAnimationActive={true}
-          animationDuration={300}
-          animationEasing="ease-out"
-          connectNulls={true}
-          type="monotone"
-          dataKey="totalValue"
-          stroke={`url(#${strokeGradientId})`}
-          activeDot={(props: RechartsActiveDotProps & { payload?: HistoryChartData }) =>
-            showMarkers && props.payload?.date && markerDateSet.has(props.payload.date) ? null : (
-              <HistoryChartActiveDot {...props} stroke="var(--success)" />
-            )
-          }
-          fillOpacity={1}
-          fill={`url(#${fillGradientId})`}
-          style={{ pointerEvents: "none" }}
-        />
-        {scaleConfig.showNetContribution && (
+          />
+          <XAxis hide dataKey="date" type="category" />
+          <YAxis
+            hide
+            type="number"
+            scale={scaleConfig.scale === "log" ? "log" : "auto"}
+            domain={scaleConfig.domain}
+          />
           <Area
-            isAnimationActive={true}
             animationDuration={300}
             animationEasing="ease-out"
-            connectNulls={true}
+            connectNulls={false}
             type="monotone"
-            dataKey="netContribution"
-            stroke="var(--muted-foreground)"
-            activeDot={false}
-            fill="transparent"
-            strokeDasharray="5 5"
-            strokeOpacity={isChartHovered ? 0.8 : 0}
+            dataKey="totalValue"
+            stroke={`url(#${strokeGradientId})`}
+            activeDot={(props: RechartsActiveDotProps & { payload?: HistoryChartData }) =>
+              showMarkers && props.payload?.date && markerDateSet.has(props.payload.date) ? null : (
+                <HistoryChartActiveDot
+                  {...props}
+                  stroke={lineColorAt(props.payload?.totalValue ?? 0, color)}
+                />
+              )
+            }
+            fillOpacity={1}
+            fill={`url(#${fillGradientId})`}
             style={{ pointerEvents: "none" }}
           />
-        )}
-        {showMarkers &&
-          markerDataPoints.map((point) => (
-            <ReferenceDot
-              key={`marker-${point.date}`}
-              x={point.date}
-              y={point.value}
-              shape={(props: RechartsMarkerShapeProps) => (
-                <HistoryChartMarkerShape {...props} variant="snapshot" value={point.value} />
-              )}
+          {scaleConfig.showNetContribution && (
+            <Area
+              animationDuration={300}
+              animationEasing="ease-out"
+              connectNulls={false}
+              type="monotone"
+              dataKey="netContribution"
+              stroke="var(--muted-foreground)"
+              activeDot={false}
+              fill="transparent"
+              strokeDasharray="5 5"
+              strokeOpacity={isChartHovered ? 0.8 : 0}
+              style={{ pointerEvents: "none" }}
             />
-          ))}
-        {singleDataPoint && (
-          <ReferenceDot
-            x={singleDataPoint.date}
-            y={singleDataPoint.totalValue}
-            r={4}
-            fill={singleDataPoint.totalValue >= 0 ? "var(--success)" : "var(--destructive)"}
-            stroke="var(--background)"
-            strokeWidth={2}
-          />
-        )}
-        {dragRange &&
-          data.length > 0 &&
-          (() => {
-            // Order the two drag labels by their position in the full series so x1 <= x2.
-            const a = dateToIndexMap.get(dragRange.start);
-            const b = dateToIndexMap.get(dragRange.end);
-            if (a == null || b == null) return null;
-            return (
-              <ReferenceArea
-                x1={data[Math.min(a, b)].date}
-                x2={data[Math.max(a, b)].date}
-                fill="var(--primary)"
-                fillOpacity={0.1}
-                stroke="var(--primary)"
-                strokeOpacity={0.4}
+          )}
+          {showMarkers &&
+            markerDataPoints.map((point) => (
+              <ReferenceDot
+                key={`marker-${point.date}`}
+                x={point.date}
+                y={point.value}
+                shape={(props: RechartsMarkerShapeProps) => {
+                  const marker = markerLabels?.get(point.date);
+                  return marker ? (
+                    <HistoryChartMarkerShape {...props} variant="activity" {...marker} />
+                  ) : (
+                    <HistoryChartMarkerShape
+                      {...props}
+                      variant="snapshot"
+                      value={point.value}
+                      color={color}
+                    />
+                  );
+                }}
               />
-            );
-          })()}
-        {data.length > 1 && (
-          <Brush
-            dataKey="date"
-            height={BRUSH_HEIGHT}
-            travellerWidth={BRUSH_TRAVELLER_WIDTH}
-            gap={1}
-            stroke="#667F0A"
-            tickFormatter={(value) => formatDate(value as string, dateFormatting)}
-            fill="transparent"
-            traveller={(props) => {
-              // Rounded "pill" handles in place of the default square ones, to match the
-              // app's soft fully-rounded UI. Inset vertically for a lighter look. A larger
-              // transparent hit rect makes the handle easy to grab on touch, and carries our
-              // own touch-drag handling (Recharts moves travellers via mouse events only).
-              const { x, y, width, height } = props;
-              const HIT_WIDTH = 32;
-              // Custom brush edge date label, rendered as SVG text using this exact traveller's
-              // own layout (x/y/width/height come straight from Recharts' own layout pass for
-              // this handle) — vertically centered on the real brush band with no separate
-              // measurement step. An earlier HTML-overlay version measured the band's position
-              // asynchronously via useLayoutEffect, which could run before Recharts finished
-              // laying out a newly-switched period's brush and render the labels off-chart.
-              const isStart =
-                Math.abs(x - approxTravellerX(startIndex)) <= Math.abs(x - approxTravellerX(endIndex));
-              const labelDate = isStart ? data[startIndex]?.date : data[endIndex]?.date;
-              const GAP = 5;
-              const EST_LABEL_WIDTH = 78; // approx width of a formatted date at this size
-              // Default to the outer side of the traveller; flip to the inner side when the
-              // outer position would clip past the chart edge (at the range extremes).
-              const outerFits = isStart
-                ? x - GAP - EST_LABEL_WIDTH >= 0
-                : x + width + GAP + EST_LABEL_WIDTH <= containerWidth;
-              const textX = isStart
-                ? outerFits
-                  ? x - GAP
-                  : x + width + GAP
-                : outerFits
-                  ? x + width + GAP
-                  : x - GAP;
-              const textAnchor = isStart === outerFits ? "end" : "start";
+            ))}
+          {singleDataPoint && (
+            <ReferenceDot
+              x={singleDataPoint.date}
+              y={singleDataPoint.totalValue}
+              r={4}
+              fill={lineColorAt(singleDataPoint.totalValue, color)}
+              stroke="var(--background)"
+              strokeWidth={2}
+            />
+          )}
+          {dragRange &&
+            data.length > 0 &&
+            (() => {
+              // Order the two drag labels by their position in the full series so x1 <= x2.
+              const a = plotIndexMap.get(dragRange.start);
+              const b = plotIndexMap.get(dragRange.end);
+              if (a == null || b == null) return null;
               return (
-                <g>
-                  <rect
-                    x={x + width / 2 - HIT_WIDTH / 2}
-                    y={y - 6}
-                    width={HIT_WIDTH}
-                    height={height + 12}
-                    fill="transparent"
-                    style={{ touchAction: "none", cursor: "col-resize" }}
-                    onTouchStart={handleTravellerTouchStart}
-                  />
-                  <rect
-                    x={x}
-                    y={y + 1}
-                    width={width}
-                    height={Math.max(0, height - 2)}
-                    rx={width / 2}
-                    ry={width / 2}
-                    fill="#667F0A"
-                    pointerEvents="none"
-                  />
-                  {labelDate && containerWidth > 0 && (
-                    <text
-                      x={textX}
-                      y={y + height / 2}
-                      textAnchor={textAnchor}
-                      dominantBaseline="central"
-                      fontSize={10}
-                      fontWeight={500}
+                <ReferenceArea
+                  x1={sourceData[Math.min(a, b)].date}
+                  x2={sourceData[Math.max(a, b)].date}
+                  fill="var(--primary)"
+                  fillOpacity={0.1}
+                  stroke="var(--primary)"
+                  strokeOpacity={0.4}
+                />
+              );
+            })()}
+          {data.length > 1 && (
+            <Brush
+              dataKey="date"
+              height={BRUSH_HEIGHT}
+              travellerWidth={BRUSH_TRAVELLER_WIDTH}
+              gap={1}
+              stroke="#667F0A"
+              tickFormatter={(value) => formatDate(value as string, dateFormatting)}
+              fill="transparent"
+              traveller={(props) => {
+                // Rounded "pill" handles in place of the default square ones, to match the
+                // app's soft fully-rounded UI. Inset vertically for a lighter look. A larger
+                // transparent hit rect makes the handle easy to grab on touch, and carries our
+                // own touch-drag handling (Recharts moves travellers via mouse events only).
+                const { x, y, width, height } = props;
+                const HIT_WIDTH = 32;
+                // Custom brush edge date label, rendered as SVG text using this exact traveller's
+                // own layout (x/y/width/height come straight from Recharts' own layout pass for
+                // this handle) — vertically centered on the real brush band with no separate
+                // measurement step. An earlier HTML-overlay version measured the band's position
+                // asynchronously via useLayoutEffect, which could run before Recharts finished
+                // laying out a newly-switched period's brush and render the labels off-chart.
+                const isStart =
+                  Math.abs(x - approxTravellerX(startIndex)) <=
+                  Math.abs(x - approxTravellerX(endIndex));
+                const labelDate = isStart
+                  ? sourceData[startIndex]?.date
+                  : sourceData[endIndex]?.date;
+                const GAP = 5;
+                const EST_LABEL_WIDTH = 78; // approx width of a formatted date at this size
+                // Default to the outer side of the traveller; flip to the inner side when the
+                // outer position would clip past the chart edge (at the range extremes).
+                const outerFits = isStart
+                  ? x - GAP - EST_LABEL_WIDTH >= 0
+                  : x + width + GAP + EST_LABEL_WIDTH <= containerWidth;
+                const textX = isStart
+                  ? outerFits
+                    ? x - GAP
+                    : x + width + GAP
+                  : outerFits
+                    ? x + width + GAP
+                    : x - GAP;
+                const textAnchor = isStart === outerFits ? "end" : "start";
+                return (
+                  <g>
+                    <rect
+                      x={x + width / 2 - HIT_WIDTH / 2}
+                      y={y - 6}
+                      width={HIT_WIDTH}
+                      height={height + 12}
+                      fill="transparent"
+                      style={{ touchAction: "none", cursor: "col-resize" }}
+                      onTouchStart={handleTravellerTouchStart}
+                    />
+                    <rect
+                      x={x}
+                      y={y + 1}
+                      width={width}
+                      height={Math.max(0, height - 2)}
+                      rx={width / 2}
+                      ry={width / 2}
                       fill="#667F0A"
                       pointerEvents="none"
-                    >
-                      {formatDate(labelDate, dateFormatting)}
-                    </text>
-                  )}
-                </g>
-              );
-            }}
-            startIndex={startIndex}
-            endIndex={endIndex}
-            onChange={(range) => {
-              if (range?.startIndex == null || range?.endIndex == null) return;
-              const si = range.startIndex;
-              const ei = range.endIndex;
-              const cur = brushIndicesRef.current;
-              // Idempotent: skip redundant updates that would otherwise re-render in a loop.
-              if (cur && cur.startIndex === si && cur.endIndex === ei) return;
-              const fromDate = data[si]?.date;
-              const toDate = data[ei]?.date;
-              if (fromDate == null || toDate == null) return;
-              setBrushIndices({ startIndex: si, endIndex: ei });
-              onVisibleRangeChange?.({ from: fromDate, to: toDate });
-            }}
-          />
-        )}
-      </AreaChart>
+                    />
+                    {labelDate && containerWidth > 0 && (
+                      <text
+                        x={textX}
+                        y={y + height / 2}
+                        textAnchor={textAnchor}
+                        dominantBaseline="central"
+                        fontSize={10}
+                        fontWeight={500}
+                        fill="#667F0A"
+                        pointerEvents="none"
+                      >
+                        {formatDate(labelDate, dateFormatting)}
+                      </text>
+                    )}
+                  </g>
+                );
+              }}
+              startIndex={startIndex}
+              endIndex={endIndex}
+              onChange={(range) => {
+                if (range?.startIndex == null || range?.endIndex == null) return;
+                const si = range.startIndex;
+                const ei = range.endIndex;
+                const cur = brushIndicesRef.current;
+                // Idempotent: skip redundant updates that would otherwise re-render in a loop.
+                if (cur && cur.startIndex === si && cur.endIndex === ei) return;
+                const fromDate = sourceData[si]?.date;
+                const toDate = sourceData[ei]?.date;
+                if (fromDate == null || toDate == null) return;
+                setBrushIndices({ startIndex: si, endIndex: ei });
+                onVisibleRangeChange?.({ from: fromDate, to: toDate });
+              }}
+            />
+          )}
+        </AreaChart>
       </ChartContainer>
     </div>
   );

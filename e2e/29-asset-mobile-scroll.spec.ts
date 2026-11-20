@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { BASE_URL, completeOnboardingIfNeeded, gotoAppPath } from "./helpers";
 
 test("mobile asset sections preserve the page scroll position", async ({ page }) => {
@@ -47,7 +47,9 @@ test("mobile asset sections preserve the page scroll position", async ({ page })
         const response = await page.request.post(`${BASE_URL}/api/v1/holdings/list/query`, {
           data: { filter: { type: "account", accountId }, includeClosed: true },
         });
-        const holdings = (await response.json()) as { instrument?: { id: string } }[];
+        const { holdings } = (await response.json()) as {
+          holdings: { instrument?: { id: string } }[];
+        };
         return holdings.some((h) => h.instrument?.id === assetId);
       },
       { timeout: 60_000 },
@@ -58,7 +60,8 @@ test("mobile asset sections preserve the page scroll position", async ({ page })
     timeout: 15_000,
   });
 
-  const scrollContainer = page.locator("[data-page-scroll-container]");
+  // The phone keeps the Holdings list mounted, hidden, under the asset screen.
+  const scrollContainer = page.locator("[data-page-scroll-container]:visible");
   await expect(page.getByText("Book value", { exact: true })).toBeVisible();
   await scrollContainer.evaluate((element) => {
     element.scrollTo({ top: element.scrollHeight, behavior: "instant" });

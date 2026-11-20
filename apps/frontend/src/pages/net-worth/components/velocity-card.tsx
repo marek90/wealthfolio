@@ -1,8 +1,9 @@
 import { DashboardCard } from "@/components/dashboard-card";
+import { CompactAmount } from "@/components/financial/compact-amount";
+import { CARD_LABEL } from "@/components/financial/styles";
 import { useDateFormatting, useNumberFormatting } from "@wealthfolio/ui";
 import { useTranslation } from "react-i18next";
-import { CompactAmount } from "./compact-amount";
-import { CARD_LABEL, toneClass, toneFill, type Velocity } from "./utils";
+import { toneClass, toneFill, type Velocity } from "./utils";
 
 function signOf(value: number): string {
   return Math.abs(value) < 0.005 ? "" : value > 0 ? "+" : "-";
@@ -137,7 +138,7 @@ export function VelocityCard({
 
       {drivers.length > 0 && (
         <>
-          <p className={`${CARD_LABEL} mb-3 mt-5`}>
+          <p className={`${CARD_LABEL} mt-5 mb-3`}>
             {t("insights:networth.velocity.drivers_of_change")}
           </p>
           {drivers.length === 1 ? (

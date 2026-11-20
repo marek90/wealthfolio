@@ -1,4 +1,5 @@
 import { Dialog, DialogContent } from "@wealthfolio/ui/components/ui/dialog";
+import { useAccounts } from "@/hooks/use-accounts";
 import { ContributionLimitForm } from "./contribution-limit-form";
 import type { ContributionLimit } from "@/lib/types";
 
@@ -13,19 +14,22 @@ export function ContributionLimitEditModal({
   open,
   onClose,
 }: ContributionLimitEditModalProps) {
+  const { accounts } = useAccounts({ filterActive: false });
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[650px]">
+      <DialogContent className="overflow-y-auto [--overlay-max-height:90vh] sm:max-w-162.5">
         <ContributionLimitForm
           defaultValues={
             limit ?? {
               groupName: "",
               contributionYear: new Date().getFullYear(),
               accountIds: "",
-              startDate: new Date(Date.UTC(new Date().getFullYear(), 0, 1, 12, 0, 0)),
-              endDate: new Date(Date.UTC(new Date().getFullYear(), 11, 31, 12, 0, 0)),
+              startDate: new Date(new Date().getFullYear(), 0, 1),
+              endDate: new Date(new Date().getFullYear(), 11, 31),
+              isRecurring: false,
             }
           }
+          accounts={accounts}
           onSuccess={() => {
             onClose();
           }}

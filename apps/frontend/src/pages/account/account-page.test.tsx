@@ -1,3 +1,4 @@
+import { cloneElement } from "react";
 import { getHoldingsList } from "@/adapters";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useRecalculatePortfolioMutation } from "@/hooks/use-calculate-portfolio";
@@ -15,10 +16,11 @@ import type {
 } from "@/lib/types";
 import { AccountType } from "@/lib/types";
 import { ActivityForm } from "@/pages/activity/components/activity-form";
+import ActivityTable from "@/pages/activity/components/activity-table/activity-table";
 import { useActivitySearch } from "@/pages/activity/hooks/use-activity-search";
 import { useCalculatePerformanceHistory } from "@/pages/performance/hooks/use-performance-data";
 import { useQuery } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AccountPage from "./account-page";
 
@@ -82,7 +84,7 @@ vi.mock("@/pages/activity/components/activity-pagination", () => ({
 }));
 
 vi.mock("@/pages/activity/components/activity-table/activity-table", () => ({
-  default: () => <div>activity-table</div>,
+  default: vi.fn(() => <div>activity-table</div>),
 }));
 
 vi.mock("@/pages/activity/components/activity-table/activity-table-mobile", () => ({
@@ -202,7 +204,9 @@ vi.mock("@wealthfolio/ui", async () => {
       Pencil: Icon,
       Plus: Icon,
     },
-    IntervalSelector: () => <div>interval-selector</div>,
+    IntervalSelector: ({ onIntervalSelect }: { onIntervalSelect: (code: "ALL") => void }) => (
+      <button onClick={() => onIntervalSelect("ALL")}>All time</button>
+    ),
     Page: Passthrough,
     useDateFormatting: () => ({
       formatDate: (d: unknown) => String(d),
@@ -218,19 +222,26 @@ vi.mock("@wealthfolio/ui", async () => {
     Tooltip: Passthrough,
     TooltipContent: Passthrough,
     TooltipProvider: Passthrough,
-    TooltipTrigger: Passthrough,
+    TooltipTrigger: ({
+      children,
+      render,
+    }: {
+      children?: React.ReactNode;
+      render?: React.ReactElement;
+    }) => (render ? cloneElement(render, undefined, children) : <>{children}</>),
+    buttonVariants: () => "",
   };
 });
 
 vi.mock("@wealthfolio/ui/components/ui/button", () => ({
   Button: ({
     children,
-    asChild,
+    render,
     ...props
   }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-    asChild?: boolean;
+    render?: React.ReactElement;
     children?: React.ReactNode;
-  }) => (asChild ? <>{children}</> : <button {...props}>{children}</button>),
+  }) => (render ? cloneElement(render, props, children) : <button {...props}>{children}</button>),
 }));
 
 vi.mock("@wealthfolio/ui/components/ui/command", () => ({
@@ -316,6 +327,7 @@ const mockUseSettingsContext = vi.mocked(useSettingsContext);
 const mockUseCalculatePerformanceHistory = vi.mocked(useCalculatePerformanceHistory);
 const mockUseActivitySearch = vi.mocked(useActivitySearch);
 const mockActivityForm = vi.mocked(ActivityForm);
+const mockActivityTable = vi.mocked(ActivityTable);
 const mockUseQuery = vi.mocked(useQuery);
 const mockUseRecalculatePortfolioMutation = vi.mocked(useRecalculatePortfolioMutation);
 
@@ -349,7 +361,7 @@ describe("AccountPage", () => {
       const queryKey = (options as { queryKey?: unknown[] })?.queryKey;
       if (Array.isArray(queryKey) && queryKey[0] === "holdings") {
         return {
-          data: [createCashHolding()],
+          data: { holdings: [createCashHolding()], incompleteAccounts: [] },
           isLoading: false,
           error: null,
         } as ReturnType<typeof useQuery>;
@@ -362,7 +374,10 @@ describe("AccountPage", () => {
       } as ReturnType<typeof useQuery>;
     });
 
-    vi.mocked(getHoldingsList).mockResolvedValue([createCashHolding()]);
+    vi.mocked(getHoldingsList).mockResolvedValue({
+      holdings: [createCashHolding()],
+      incompleteAccounts: [],
+    });
   });
 
   it("displays live current account valuation instead of stale historical valuation", () => {
@@ -386,6 +401,39 @@ describe("AccountPage", () => {
     expect(screen.getByText("value:USD:125")).toBeInTheDocument();
     expect(screen.queryByText("value:USD:100")).not.toBeInTheDocument();
   });
+
+  it.each(["complete", "unavailable", "partialUnpriced"] as const)(
+    "uses account-currency completeness for ALL returns (%s)",
+    (accountValueStatus) => {
+      mockUseValuationHistory.mockReturnValue({
+        valuationHistory: [createHistoricalValuation({ totalValue: 100, netContribution: 100 })],
+        isLoading: false,
+        error: null,
+      } as unknown as ReturnType<typeof useValuationHistory>);
+      mockUseCurrentValuation.mockReturnValue({
+        currentValuation: {
+          summary: createCurrentSummary({ totalValueBase: 0 }),
+          accounts: [
+            createCurrentAccountValuation({
+              totalValue: 125,
+              totalValueBase: 0,
+              accountValueStatus,
+              valueStatus: "unavailable",
+            }),
+          ],
+        },
+        isLoading: false,
+        isFetching: false,
+        error: null,
+      } as unknown as ReturnType<typeof useCurrentValuation>);
+      render(<AccountPage />);
+      fireEvent.click(screen.getByRole("button", { name: "All time" }));
+      expect(Boolean(screen.queryByText("gain-amount:25"))).toBe(accountValueStatus === "complete");
+      expect(Boolean(screen.queryByText("gain-percent:0.25"))).toBe(
+        accountValueStatus === "complete",
+      );
+    },
+  );
 
   it("does not use stale historical timestamp when live current valuation has no source data", () => {
     mockUseValuationHistory.mockReturnValue({
@@ -496,6 +544,55 @@ describe("AccountPage", () => {
     });
   });
 
+  it.each([AccountType.CASH, AccountType.CREDIT_CARD])(
+    "asks for running balances on a %s account's activities",
+    (accountType) => {
+      mockAccountPage([{ ...createAccount(), accountType, name: "Checking" }]);
+
+      render(<AccountPage />);
+
+      expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+        filters: { accountIds: ["account-1"] },
+        includeCashBalances: true,
+      });
+    },
+  );
+
+  it("asks for end-of-day cash on an investment account while its list runs in date order", () => {
+    mockAccountPage([createAccount()]);
+    render(<AccountPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Activities" }));
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      filters: { accountIds: ["account-1"] },
+      includeCashBalances: true,
+    });
+    expect(mockActivityTable.mock.calls.at(-1)?.[0]).toMatchObject({ groupByDay: true });
+
+    // Sorted by another column, the list is flat and has no cash to show.
+    act(() => {
+      mockActivityTable.mock.calls
+        .at(-1)?.[0]
+        .onSortingChange([{ id: "activityType", desc: false }]);
+    });
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      includeCashBalances: false,
+    });
+    expect(mockActivityTable.mock.calls.at(-1)?.[0]).toMatchObject({ groupByDay: false });
+  });
+
+  it("does not ask for balances on a holdings-mode account", () => {
+    mockAccountPage([
+      { ...createAccount(), accountType: AccountType.CASH, trackingMode: "HOLDINGS" },
+    ]);
+    render(<AccountPage />);
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      includeCashBalances: false,
+    });
+  });
+
   it("offers a hidden account in its own activity form and switcher", () => {
     mockAccountPage([
       { ...createAccount(), isActive: false },
@@ -525,7 +622,7 @@ describe("AccountPage", () => {
 
     const markerQuery = mockUseQuery.mock.calls
       .map(([options]) => options as { queryKey: unknown[]; enabled?: boolean })
-      .filter((options) => options.queryKey[1] === "markerDates")
+      .filter((options) => options.queryKey[1] === "markerTypes")
       .at(-1);
     expect(markerQuery?.enabled).toBe(true);
   });
@@ -621,7 +718,6 @@ function createAccount(): Account {
     name: "Brokerage",
     accountType: AccountType.SECURITIES,
     group: "Investments",
-    balance: 0,
     currency: "USD",
     isDefault: false,
     isActive: true,

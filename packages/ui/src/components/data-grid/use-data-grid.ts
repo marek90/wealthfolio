@@ -1,6 +1,8 @@
 "use client";
 
-import { useDirection } from "@radix-ui/react-direction";
+import { useTranslation } from "react-i18next";
+
+import { useDirection } from "@base-ui/react/direction-provider";
 import {
   type ColumnDef,
   type ColumnFiltersState,
@@ -47,9 +49,12 @@ import {
 } from "../formatting-provider";
 import {
   calendarDateFromLocalDate,
+  localizeDecimalString,
   parseDateTimeInTimezone,
   parseLocalizedDecimalString,
+  type NumberFormatting,
 } from "../../lib/formatting";
+import { copyText } from "../../lib/clipboard";
 import { isKeyboardEventComposing } from "../../lib/utils";
 
 const DEFAULT_ROW_HEIGHT = "short";
@@ -66,6 +71,10 @@ const DOMAIN_REGEX = /^[\w.-]+\.[a-z]{2,}(\/\S*)?$/i;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}.*)?$/;
 const TRUTHY_BOOLEANS = new Set(["true", "1", "yes", "checked"]);
 const VALID_BOOLEANS = new Set(["true", "false", "1", "0", "yes", "no", "checked", "unchecked"]);
+
+// Shared across grid mounts so navigating to region settings does not lose the
+// meaning of the last grid copy. Clipboard text remains localized for other apps.
+let copiedNumberFormatting: { text: string; locale: string; numbers: NumberFormatting } | undefined;
 
 function toCalendarDateString(date: Date): string {
   const { year, month, day } = calendarDateFromLocalDate(date);
@@ -129,7 +138,11 @@ interface UseDataGridProps<TData> extends Omit<
   TableOptions<TData>,
   "pageCount" | "getCoreRowModel"
 > {
-  onDataChange?: (data: TData[]) => void;
+  /** Also receives the cells the edit wrote, keyed by the row's index in `data`. */
+  onDataChange?: (
+    data: TData[],
+    writtenCells?: ReadonlyMap<number, readonly Omit<UpdateCell, "rowIndex">[]>,
+  ) => void;
   onRowAdd?: (
     event?: React.MouseEvent<HTMLDivElement>,
   ) => Partial<CellPosition> | Promise<Partial<CellPosition> | null> | null;
@@ -169,10 +182,12 @@ function useDataGrid<TData>({
   initialState,
   ...props
 }: UseDataGridProps<TData>) {
+  const { t } = useTranslation();
   const numberFormatting = useNumberFormatting();
   const dateFormatting = useDateFormatting();
   const { locale, timezone } = useLocalizationSettings();
-  const dir = useDirection(dirProp);
+  const contextDir = useDirection();
+  const dir = dirProp ?? contextDir;
   const dataGridRef = React.useRef<HTMLDivElement>(null);
   const tableRef = React.useRef<ReturnType<typeof useReactTable<TData>>>(null);
   const rowVirtualizerRef = React.useRef<Virtualizer<HTMLDivElement, Element>>(null);
@@ -419,7 +434,7 @@ function useDataGrid<TData>({
         }
       }
 
-      propsRef.current.onDataChange?.(newData);
+      propsRef.current.onDataChange?.(newData, rowUpdatesMap);
     },
     [propsRef, columnIdToAccessorKey],
   );
@@ -605,10 +620,15 @@ function useDataGrid<TData>({
           let serializedValue = "";
           if (cellVariant === "file" || cellVariant === "multi-select") {
             serializedValue = value ? JSON.stringify(value) : "";
+          } else if (
+            cellVariant === "number" &&
+            (typeof value === "number" || typeof value === "string")
+          ) {
+            serializedValue = localizeDecimalString(String(value ?? ""), numberFormatting);
           } else if (value instanceof Date) {
             serializedValue = value.toISOString();
           } else {
-            // eslint-disable-next-line @typescript-eslint/no-base-to-string
+            // oxlint-disable-next-line typescript/no-base-to-string
             serializedValue = String(value ?? "");
           }
 
@@ -645,16 +665,21 @@ function useDataGrid<TData>({
       .join("\n");
 
     try {
-      await navigator.clipboard.writeText(tsvData);
+      await copyText(tsvData);
+      copiedNumberFormatting = { text: tsvData, locale, numbers: numberFormatting };
 
       const currentState = store.getState();
       if (currentState.cutCells.size > 0) {
         store.setState("cutCells", new Set());
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to copy to clipboard");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("ui:dataGrid.copyFailed", "Failed to copy to clipboard"),
+      );
     }
-  }, [store]);
+  }, [store, t, numberFormatting, locale]);
 
   const onCellsCut = React.useCallback(async () => {
     if (propsRef.current.readOnly) return;
@@ -699,10 +724,15 @@ function useDataGrid<TData>({
           let serializedValue = "";
           if (cellVariant === "file" || cellVariant === "multi-select") {
             serializedValue = value ? JSON.stringify(value) : "";
+          } else if (
+            cellVariant === "number" &&
+            (typeof value === "number" || typeof value === "string")
+          ) {
+            serializedValue = localizeDecimalString(String(value ?? ""), numberFormatting);
           } else if (value instanceof Date) {
             serializedValue = value.toISOString();
           } else {
-            // eslint-disable-next-line @typescript-eslint/no-base-to-string
+            // oxlint-disable-next-line typescript/no-base-to-string
             serializedValue = String(value ?? "");
           }
 
@@ -739,13 +769,18 @@ function useDataGrid<TData>({
       .join("\n");
 
     try {
-      await navigator.clipboard.writeText(tsvData);
+      await copyText(tsvData);
+      copiedNumberFormatting = { text: tsvData, locale, numbers: numberFormatting };
 
       store.setState("cutCells", new Set(selectedCellsArray));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to cut to clipboard");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("ui:dataGrid.cutFailed", "Failed to cut to clipboard"),
+      );
     }
-  }, [store, propsRef]);
+  }, [store, propsRef, t, numberFormatting, locale]);
 
   const restoreFocus = React.useCallback((element: HTMLDivElement | null) => {
     if (element && document.activeElement !== element) {
@@ -773,6 +808,17 @@ function useDataGrid<TData>({
           clipboardText = await navigator.clipboard.readText();
           if (!clipboardText) return;
         }
+
+        // Windows clipboard writes may convert LF to CRLF. Ignore that change
+        // when matching; other payloads use the current region's parser.
+        if (
+          copiedNumberFormatting?.text.replaceAll("\r\n", "\n") !==
+          clipboardText.replaceAll("\r\n", "\n")
+        ) {
+          copiedNumberFormatting = undefined;
+        }
+        const numberLocale = copiedNumberFormatting?.locale ?? locale;
+        const pasteNumbers = copiedNumberFormatting?.numbers ?? numberFormatting;
 
         const selectedCells = currentState.selectionState.selectedCells;
         const trimmedClipboard = clipboardText.trim();
@@ -802,8 +848,8 @@ function useDataGrid<TData>({
                 } else {
                   const num =
                     cellOpts?.variant === "number" && cellOpts.valueType === "string"
-                      ? parseLocalizedDecimalString(trimmedClipboard, locale)
-                      : numberFormatting.parseNumber(trimmedClipboard);
+                      ? parseLocalizedDecimalString(trimmedClipboard, numberLocale)
+                      : pasteNumbers.parseNumber(trimmedClipboard);
                   if (num === undefined) shouldSkip = true;
                   else processedValue = num;
                 }
@@ -988,8 +1034,8 @@ function useDataGrid<TData>({
                 } else {
                   const num =
                     cellOpts?.variant === "number" && cellOpts.valueType === "string"
-                      ? parseLocalizedDecimalString(pastedValue, locale)
-                      : numberFormatting.parseNumber(pastedValue);
+                      ? parseLocalizedDecimalString(pastedValue, numberLocale)
+                      : pasteNumbers.parseNumber(pastedValue);
                   if (num === undefined) shouldSkip = true;
                   else processedValue = num;
                 }
@@ -1231,9 +1277,7 @@ function useDataGrid<TData>({
 
           restoreFocus(dataGridRef.current);
         } else if (cellsSkipped > 0) {
-          toast.error(
-            `${cellsSkipped} cell${cellsSkipped !== 1 ? "s" : ""} skipped pasting for invalid data`,
-          );
+          toast.error(t("ui:dataGrid.cellsSkipped", { count: cellsSkipped }));
         }
 
         if (currentState.pasteDialog.open) {
@@ -1244,7 +1288,11 @@ function useDataGrid<TData>({
           });
         }
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to paste. Please try again.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : t("ui:dataGrid.pasteFailed", "Failed to paste. Please try again."),
+        );
       }
     },
     [
@@ -1258,6 +1306,7 @@ function useDataGrid<TData>({
       dateFormatting,
       locale,
       timezone,
+      t,
     ],
   );
 
@@ -1379,8 +1428,18 @@ function useDataGrid<TData>({
       let newColumnId = columnId;
 
       const isRtl = dir === "rtl";
+      const resolved =
+        direction === "next"
+          ? isRtl
+            ? "left"
+            : "right"
+          : direction === "previous"
+            ? isRtl
+              ? "right"
+              : "left"
+            : direction;
 
-      switch (direction) {
+      switch (resolved) {
         case "up":
           newRowIndex = Math.max(0, rowIndex - 1);
           break;
@@ -1514,7 +1573,7 @@ function useDataGrid<TData>({
                 const targetCellRetry = cellMapRef.current.get(cellKeyRetry);
 
                 if (targetCellRetry) {
-                  const scrollDirection = getScrollDirection(direction);
+                  const scrollDirection = getScrollDirection(resolved);
 
                   scrollCellIntoView({
                     container,
@@ -1580,7 +1639,7 @@ function useDataGrid<TData>({
         // Horizontal scrolling for rendered cells
         if (newColumnId !== columnId && targetCell) {
           requestAnimationFrame(() => {
-            const scrollDirection = getScrollDirection(direction);
+            const scrollDirection = getScrollDirection(resolved);
 
             scrollCellIntoView({
               container,
@@ -1632,7 +1691,7 @@ function useDataGrid<TData>({
         const { rowIndex, columnId } = currentEditing;
         focusCell(rowIndex, columnId);
         requestAnimationFrame(() => {
-          navigateCell(opts.direction ?? "right");
+          navigateCell(opts.direction ?? "next");
         });
       } else if (currentEditing) {
         const { rowIndex, columnId } = currentEditing;
@@ -1699,7 +1758,7 @@ function useDataGrid<TData>({
           if (!cell) continue;
 
           const value = cell.getValue();
-          // eslint-disable-next-line @typescript-eslint/no-base-to-string
+          // oxlint-disable-next-line typescript/no-base-to-string
           const stringValue = String(value ?? "").toLowerCase();
 
           if (stringValue.includes(lowerQuery)) {
@@ -2522,8 +2581,7 @@ function useDataGrid<TData>({
         }
         if (key === "Tab") {
           event.preventDefault();
-          const direction = shiftKey ? "left" : "right";
-          onCellEditingStop({ direction });
+          onCellEditingStop({ direction: shiftKey ? "previous" : "next" });
           return;
         }
         return;
@@ -2803,11 +2861,7 @@ function useDataGrid<TData>({
           return;
         case "Tab":
           event.preventDefault();
-          if (dir === "rtl") {
-            direction = event.shiftKey ? "right" : "left";
-          } else {
-            direction = event.shiftKey ? "left" : "right";
-          }
+          direction = event.shiftKey ? "previous" : "next";
           break;
       }
 

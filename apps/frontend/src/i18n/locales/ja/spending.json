@@ -1,4 +1,21 @@
 {
+  "budgetGroupNames": {
+    "032ecb02-5912-42e8-9724-2cd566fc08d5": "必要な支出",
+    "a409e0d6-9152-49c8-a5b4-a147a8ac636e": "欲しいもの",
+    "1fb6f2a3-3245-4702-83e8-ab116458d13e": "貯蓄",
+    "8cbd26c8-e3b2-4176-8c61-e5c11e10b808": "寄付",
+    "3ff71753-5dd5-4372-9ca2-63d8d9a04851": "個人",
+    "6e25d097-0c73-4521-9407-d47e8dfb73e2": "その他"
+  },
+  "eventTypeNames": {
+    "255600dc-c2a3-47e0-979d-a602c21fc337": "旅行",
+    "51e3eedb-5484-45ba-a525-6b88209c46ed": "休暇",
+    "d9871ccb-5396-4c70-ac08-5b07ed90e64a": "ビジネス",
+    "22442173-c794-45bf-97ee-9b3f9a7c8ba3": "教育",
+    "94fc13ed-ac40-466b-8071-64f1e3c72204": "医療",
+    "1aaab8fb-8fd9-4543-bd46-d9ee4a5a8564": "特別な行事",
+    "fa4812ee-e06e-4117-a819-e4d88b7acbaf": "その他"
+  },
   "common": {
     "amount": "金額",
     "min": "最小",
@@ -21,6 +38,9 @@
     "nameRequired": "名前は必須です",
     "namePlaceholder": "カテゴリ名",
     "icon": "アイコン",
+    "parent": "親カテゴリー",
+    "topLevel": "なし（最上位）",
+    "parentLockedByBudget": "移動する前にこのカテゴリーの予算目標を削除してください。予算は最上位カテゴリーにのみ適用されます。",
     "color": "色",
     "hex": "16進数",
     "create": "カテゴリを作成",
@@ -61,6 +81,11 @@
     "editTitle": "ルールを編集",
     "addTitle": "ルールを追加",
     "editDescription": "名前のパターンで取引に自動でタグ付けします。複数一致した場合は優先度の高いルールが適用されます。",
+    "categoryCompatibilityHint": "カテゴリは取引のキャッシュフローに従います。貯蓄カテゴリは、支出管理対象の口座から外部への紐付け済み振替にのみ適用されます。",
+    "runIncompatible": "分類できないカテゴリ：{{count}}。カテゴリは取引のキャッシュフローに従います。貯蓄カテゴリは、支出管理対象の口座から外部への紐付け済み振替にのみ適用されます。",
+    "runProtected": "既存のカテゴリまたは分割を維持：{{count}}。",
+    "runUnchanged": "指定どおりに分類済み：{{count}}。",
+    "runWithoutTarget": "分類先カテゴリのない一致：{{count}}。",
     "matchContains": "を含む",
     "matchStartsWith": "で始まる",
     "matchExact": "完全一致",
@@ -105,6 +130,7 @@
     "selectCategory": "カテゴリを選択",
     "priorityLabel": "優先度",
     "priorityHint": "優先度の高いルールから順に判定されます(0〜100)。",
+    "priorityInvalid": "優先度は0以上の整数で入力してください",
     "updateRule": "ルールを更新",
     "createRule": "ルールを作成",
     "scopeLabel": "適用対象",
@@ -161,12 +187,14 @@
     "duplicate": "複製",
     "unlinkTransfer": "振替のリンクを解除",
     "linkTransfer": "振替をリンク...",
-    "deleteConfirmMany_other": "{{count}}件の取引を削除してもよろしいですか?"
+    "deleteConfirmMany_other": "{{count}}件の取引を削除してもよろしいですか?",
+    "convertToTransfer": "振替に変換..."
   },
   "cashFlow": {
     "income": "収入",
     "spending": "支出",
     "saving": "貯蓄",
+    "netSaved": "純貯蓄",
     "net": "収支"
   },
   "insights": {
@@ -222,6 +250,12 @@
     "filteredNet": "絞り込みの収支"
   },
   "period": {
+    "month": "月",
+    "year": "年",
+    "previousPeriod": "前の期間",
+    "nextPeriod": "次の期間",
+    "previousYears": "過去の年",
+    "nextYears": "以降の年",
     "thisMonth": "今月",
     "mtdShort": "月初来",
     "lastMonth": "先月",
@@ -410,6 +444,7 @@
     "customSubtitle": "選択した期間の取引"
   },
   "split": {
+    "staleTaxonomy": "これらの分割には以前のカテゴリ種別が使われています。この取引には適用されなくなりました。",
     "title": "取引を分割",
     "transactionFallback": "取引",
     "remainingOf": "{{amount}}のうち残り",
@@ -418,7 +453,11 @@
     "removeLine": "分割明細{{number}}を削除",
     "addLine": "明細を追加",
     "distributeEvenly": "均等に配分",
-    "clearSplit": "分割をクリア"
+    "clearSplit": "分割をクリア",
+    "replaceWithCategory": "分割を1つのカテゴリに置換",
+    "replaceDescription_one": "{{count}}件の分割を{{category}}に置き換えますか？既存の分割は削除されます。",
+    "replaceDescription_other": "{{count}}件の分割を{{category}}に置き換えますか？既存の分割は削除されます。",
+    "categoryProtected": "分割は保護されています。分割エディタで編集するか、明示的に置き換えてください。"
   },
   "hierarchy": {
     "noCategorizedSpending": "この期間に分類済みの支出はありません。",
@@ -710,8 +749,6 @@
     "overspentBy": "{{pct}}の使いすぎ",
     "noIncome": "この期間、選択中の口座に収入はありません。",
     "spent": "支出",
-    "saved": "貯蓄",
-    "setAside": "積立",
     "sortSpent": "支出額",
     "sortChange": "変化",
     "sortName": "名前",
@@ -755,6 +792,8 @@
       "total": "合計",
       "shortfall": "不足",
       "refunds": "純返金",
+      "fromSavings": "貯蓄から",
+      "toSavings": "貯蓄へ",
       "surplus": "残り",
       "uncategorizedIncome": "未分類の収入",
       "netSpending": "純支出"
@@ -765,6 +804,7 @@
       "shortfall": "入金を超えた支出と貯蓄。",
       "refunds": "返金が支出を上回ったカテゴリ。",
       "saved": "貯蓄口座や投資口座へ移したお金。",
+      "fromSavings": "貯蓄口座や投資口座から戻したお金。",
       "surplus": "入金のうち、支出も積立もしていない分。",
       "uncategorized": "まだカテゴリがない支出。",
       "net": "返金後にこのカテゴリにかかった金額。",
@@ -810,6 +850,9 @@
     "manage": "管理 →"
   },
   "cashForm": {
+    "none": "なし",
+    "addExpense": "支出を追加",
+    "addIncome": "収入を追加",
     "accountRequired": "口座を選択してください。",
     "pickDate": "日付を選択",
     "amountNonNegative": "金額は0以上である必要があります。",
@@ -827,6 +870,8 @@
     "spendingCategory": "支出カテゴリ",
     "activityUpdated": "取引を更新しました。",
     "activityCreated": "取引を作成しました。",
+    "expenseAdded": "支出を追加しました。",
+    "incomeAdded": "収入を追加しました。",
     "saveFailed": "取引の保存に失敗しました: {{message}}",
     "editTitle": "取引を編集",
     "addTitle": "取引を追加",
@@ -886,6 +931,11 @@
     "deselectDay": "{{date}}の取引の選択をすべて解除"
   },
   "tabContent": {
+    "comparePriorPeriod": "前の期間と比較",
+    "comparisonDays": "期間内の日",
+    "comparisonWeeks": "期間内の週",
+    "comparisonMonths": "期間内の月",
+    "comparisonDifference": "差額",
     "stageWhereLabel": "現状",
     "stageWhereSub": "ペース・予算・カテゴリ内訳",
     "stageChangedLabel": "変化した点",
@@ -893,7 +943,7 @@
     "stageWhenLabel": "いつ・どこで",
     "stageWhenSub": "支出のタイミングと支出イベント",
     "spendingAbovePrefix": "支出は",
-    "pctAbove": "{{pct}}%増",
+    "pctAbove": "{{pct}}増",
     "thePriorPeriod": "(前期間比)",
     "moreThan": "{{prior}}より{{more}}多い",
     "uncategorizedCount_one": "未分類の取引{{count}}件",
@@ -929,12 +979,11 @@
     "uncategorizedReview": "未分類 — 要確認",
     "uncategorizedImprove": "未分類 — 確認すると内訳の精度が上がります",
     "plusMore": "+ 他{{count}}件",
-    "down": "減少",
-    "up": "増加",
     "aboutSame": "前期間とほぼ同水準",
     "fromPriorPeriod": "前期間から",
     "intervalMtd": "今月",
     "intervalLastMonth": "先月",
+    "interval1W": "過去7日間",
     "interval3M": "直近3ヶ月",
     "interval6M": "直近6ヶ月",
     "intervalYtd": "年初来",
@@ -958,9 +1007,15 @@
     "categoryCount_one": "{{count}}カテゴリ",
     "categoryCount_other": "{{count}}カテゴリ",
     "groupRollover": "グループの繰越",
+    "removeGroupRollover": "繰越設定を削除",
+    "removeGroupRolloverTitle": "{{name}}の繰越設定を削除しますか？",
+    "removeGroupRolloverDescription": "保存された開始残高が削除され、すべての月の繰越残高が再計算されます。カテゴリと予算目標は保持されます。",
     "on": "オン",
     "off": "オフ",
     "deleteGroup": "グループを削除",
+    "deleteGroupDescription": "カテゴリと月ごとの予備費が選択したグループに移動します。この操作は取り消せません。",
+    "deleteGroupRollover": "削除する前に、このグループの繰越設定を削除してください。",
+    "deleteGroupDestinationRollover": "予算を移動する前に、移動先グループの繰越を無効にしてください。",
     "deleteGroupTitle": "{{name}}を削除しますか?",
     "deleteGroupWithCategories_one": "含まれる{{count}}カテゴリは別のグループに移動されます。この操作は取り消せません。",
     "deleteGroupWithCategories_other": "含まれる{{count}}カテゴリは別のグループに移動されます。この操作は取り消せません。",
@@ -984,6 +1039,7 @@
     "revertOverride": "個別設定を戻す",
     "monthOverrideRevert": "当月の個別設定 · クリックで元に戻す",
     "spentOf": "支出",
+    "savedOf": "貯蓄",
     "ofGroup": "(グループの{{pct}})",
     "rowOptions": "行のオプション",
     "moveToGroup": "グループに移動",
@@ -1014,12 +1070,38 @@
     "totals": "合計",
     "planned": "計画",
     "actual": "実績",
+    "saved": "貯蓄済み",
+    "savingsGoal": "貯蓄目標",
     "remaining": "残り",
     "unassigned": "未割当",
     "rolloverIn": "繰越受入",
+    "carriedIn": "繰越",
+    "left": "残り",
+    "over": "超過",
+    "toGo": "未達",
+    "ahead": "超過達成",
     "dataUnavailable": "予算データを利用できません",
     "migrationNeeded": "現在のローカルデータベースは、支出機能の更新マイグレーション適用前に作成されています。",
     "addSource_other": "収入源を追加({{count}}件利用可能)",
-    "overridesTitle_other": "個別設定 · {{count}}"
+    "overridesTitle_other": "個別設定 · {{count}}",
+    "sourceMonth": "コピー元の月"
+  },
+  "splitEditReview": {
+    "title": "分割の削除を確認",
+    "hiddenCategory": "既存のカテゴリ割り当ては保持され、分割の削除後に適用される場合があります。",
+    "confirm": "保存して分割を削除",
+    "removed_other": "この変更により {{count}} 件の分割が削除されます。"
+  },
+  "budgetErrors": {
+    "deleteGroup": "予算グループを削除できませんでした。",
+    "copyPlan": "計画をコピーできませんでした。"
+  },
+  "grid": {
+    "transferInForm": "振替のタイプは「編集」から振替フォームで変更してください。",
+    "noCategory": "この取引は支出・収入・貯蓄のいずれでもないため、カテゴリはありません。",
+    "saveTypeFirst": "先に新しいタイプまたは口座を保存してから、カテゴリを選択してください。",
+    "saveCategoryFirst": "先にカテゴリを保存してから、タイプまたは口座を変更してください。",
+    "typeNotForAccount": "このタイプはこの口座では使用できません。",
+    "amountRequired": "金額は必須です。"
   }
 }

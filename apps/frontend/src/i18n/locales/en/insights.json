@@ -30,19 +30,20 @@
       "unit_types": "types",
       "unit_currencies": "currencies",
       "unit_groups": "groups",
-      "other_units": "Other {{unit}}",
+      "other_units_one": "Other {{count}} item",
+      "other_units_other": "Other {{count}} items",
       "breakdown": "Breakdown",
-      "top_units": "Top {{unit}}",
+      "top_units": "Top {{count}} items",
       "show_less": "Show less",
       "show_all": "Show all"
     },
     "rails": {
       "target_allocation": "Target allocation",
       "details": "Details",
-      "suggested_moves": "Suggested moves",
-      "all_in_range": "All categories inside target range — no rebalancing needed",
-      "add": "Add",
-      "trim": "Trim",
+      "target_differences": "Differences from target",
+      "all_in_range": "All categories are inside their target range.",
+      "below_target_by": "{{amount}} below target",
+      "above_target_by": "{{amount}} above target",
       "inside_target_range": "Inside target range",
       "outside_range": "{{count}} outside range · largest gap {{gap}}",
       "tolerance": "tolerance {{tolerance}}",
@@ -71,6 +72,8 @@
   },
   "networth": {
     "attention": {
+      "missing_fx": "Missing exchange rate:",
+      "review_valuation": "Review valuation issues",
       "title": "Needs attention",
       "update_value": "Update value",
       "update_balance": "Update balance",
@@ -79,7 +82,6 @@
       "link_explanation": "Linking an existing property does not change your net worth."
     },
     "failed_to_load": "Failed to load net worth",
-    "stale_valuations_tooltip": "Stale valuations (90+ days):",
     "days_ago": "{{count}}d ago",
     "no_history_data": "No history data available",
     "breakdown": "Breakdown",
@@ -105,7 +107,8 @@
     "category_sheet": {
       "over_period": "over {{period}}",
       "trend_period": "Trend · {{period}}",
-      "items": "Items"
+      "items": "Items",
+      "view_details": "View details"
     },
     "trend": {
       "not_enough_history": "Not enough history"
@@ -146,7 +149,13 @@
     "portfolio_share": "Share of portfolio value, including cash",
     "largest": "Largest holding",
     "top_five": "Top five holdings",
-    "concentration_unavailable": "Concentration needs positive holdings values and a portfolio without short positions."
+    "concentration_unavailable": "Concentration needs positive holdings values and a portfolio without short positions.",
+    "holdings": "Holdings",
+    "holdings_count_one": "{{count}} holding",
+    "holdings_count_other": "{{count}} holdings",
+    "other_holdings_one": "{{count}} other holding",
+    "other_holdings_other": "{{count}} other holdings",
+    "holdings_unavailable": "The holdings chart needs positive holding values and a portfolio without short positions."
   },
   "customize": {
     "edit": "Customize",

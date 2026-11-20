@@ -55,6 +55,7 @@
     "holdings": "Modo de posiciones"
   },
   "exclusion": {
+    "holdings_not_mwr": "La rentabilidad ponderada por dinero (MWR) no está disponible en el modo de solo posiciones porque no se registran los flujos de efectivo de las transacciones.",
     "no_data": "Los datos de rendimiento no están disponibles para esta selección.",
     "no_series": "No hay ninguna serie del gráfico disponible para este periodo.",
     "holdings_not_twr": "Las cuentas en modo de posiciones usan Rentabilidad por valor y no se representan con TWR.",
@@ -72,9 +73,6 @@
     "return": "Rentabilidad",
     "time_weighted_return": "Rentabilidad ponderada por tiempo",
     "time_weighted_short": "Ponderada por tiempo",
-    "twr_short": "TWR",
-    "annualized_twr": "TWR anualizada",
-    "ann_twr_short": "TWR an.",
     "money_weighted_return": "Rentabilidad ponderada por dinero",
     "money_weighted_short": "Ponderada por dinero",
     "mwr_short": "MWR",
@@ -82,12 +80,9 @@
     "ann_mwr_short": "MWR an.",
     "value_return": "Rentabilidad por valor",
     "value_return_short": "Rent. por valor",
-    "value_short": "Valor",
     "price_return": "Rentabilidad por precio",
     "price_return_short": "Rent. por precio",
-    "price_short": "Precio",
     "volatility": "Volatilidad",
-    "vol_short": "Vol",
     "max_drawdown": "Caída máxima",
     "max_drawdown_short": "Caída máx.",
     "drawdown_short": "Caída",
@@ -95,11 +90,6 @@
     "annualized_short": "Anualizada",
     "gain_loss": "Ganancia / pérdida",
     "gain_loss_info": "Ganancia o pérdida total durante el periodo seleccionado. Abre la métrica para ver los detalles de atribución."
-  },
-  "section": {
-    "returns": "Rentabilidades",
-    "risk": "Riesgo",
-    "total": "Total"
   },
   "help": {
     "aria_label": "Explicaciones de las métricas de rendimiento",
@@ -111,6 +101,7 @@
     "description": "Selecciona cuentas para comparar su rendimiento a lo largo del tiempo."
   },
   "attribution": {
+    "partial_data": "Datos parciales",
     "title": "Atribución",
     "close": "Cerrar atribución",
     "period_gain_loss": "Ganancia/pérdida del periodo",
@@ -134,5 +125,27 @@
     "contributions_desc": "Efectivo que añadiste a la cuenta",
     "distributions": "Distribuciones",
     "distributions_desc": "Efectivo retirado de la cuenta"
+  },
+  "metric_info": {
+    "time_weighted_return": "La rentabilidad ponderada por tiempo (TWR) mide el rendimiento de la inversión eliminando el efecto de los depósitos y las retiradas. Los periodos inferiores a un año muestran la rentabilidad del periodo seleccionado; los de un año o más se muestran anualizados cuando está disponible.",
+    "money_weighted_return": "La rentabilidad ponderada por dinero (MWR) mide el rendimiento teniendo en cuenta el importe y el momento de los flujos de efectivo externos. Se calcula con IRR/XIRR; para periodos de un año o más, la visualización estándar es el XIRR anualizado.",
+    "irr": "La tasa interna de rentabilidad (IRR) mide el rendimiento ponderado por dinero teniendo en cuenta el importe y el momento de los flujos de efectivo externos. Para periodos de un año o más, la visualización estándar es el XIRR anualizado.",
+    "simple_return": "La rentabilidad simple compara la ganancia o pérdida total con las aportaciones netas. Es acumulada y no está ponderada por tiempo.",
+    "value_return": "La rentabilidad por valor mide el cambio en el valor de la cuenta durante el periodo seleccionado cuando no se dispone de flujos de efectivo por transacción.",
+    "price_return": "La rentabilidad del precio mide el cambio en el precio del valor seleccionado durante el periodo seleccionado.",
+    "volatility": "La volatilidad mide la dispersión de las rentabilidades de una inversión. Una mayor volatilidad significa que su valor puede cambiar considerablemente en poco tiempo. Se anualiza a partir de las rentabilidades de cada día natural.",
+    "max_drawdown": "La caída máxima representa el mayor descenso porcentual desde un máximo hasta un mínimo posterior del valor de la cartera durante el periodo indicado. Refleja el riesgo de caída.",
+    "annualized_return": "La rentabilidad anualizada es la tasa compuesta anual media del periodo seleccionado. No es la ganancia o pérdida total acumulada.",
+    "holdings_volatility": "Volatilidad de los cambios en el valor de la cuenta. Se basa en valoraciones diarias sin ajustar depósitos ni retiradas. Refleja cuánto fluctúa el valor de mercado.",
+    "holdings_max_drawdown": "Mayor caída del valor de la cuenta desde un máximo hasta un mínimo. Se basa en valoraciones diarias sin ajustar depósitos ni retiradas."
+  },
+  "compare_over_time": "Comparar el rendimiento de las cuentas a lo largo del tiempo",
+  "series_table": {
+    "label": "Series comparadas",
+    "name": "Nombre",
+    "show_all": "Mostrar todo ({{count}})",
+    "show_less": "Mostrar menos",
+    "hide_on_chart": "Ocultar {{name}} en el gráfico",
+    "show_on_chart": "Mostrar {{name}} en el gráfico"
   }
 }

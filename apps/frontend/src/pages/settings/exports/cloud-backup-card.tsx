@@ -1,9 +1,15 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { cn } from "@/lib/utils";
+import {
+  backendError,
+  BACKUP_REAUTHENTICATION_REQUIRED,
+  BACKUP_MANUAL_LIMIT,
+} from "@/lib/backend-error";
+import { Fragment, useState } from "react";
 import { ShieldCheckIcon } from "@phosphor-icons/react/dist/csr/ShieldCheck";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { useDateFormatting, useLocalizationSettings } from "@wealthfolio/ui";
+import { useDateFormatting, useLocalizationSettings, buttonVariants } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@wealthfolio/ui/components/ui/card";
@@ -50,6 +56,8 @@ import {
 } from "./backup-ui";
 import { formatBackupSize } from "./backup-size";
 import { backupDate, backupState, useCloudBackups } from "./use-cloud-backups";
+import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
+import { copyText } from "@wealthfolio/ui/lib/clipboard";
 
 type Flow = "setup" | "resume" | "unlock" | "replace" | "pause" | "help";
 /** The one operation in progress: `restore:<id>` and `download:<id>` name their row. */
@@ -81,8 +89,8 @@ function ProtectionStatus({ data }: { data: CloudBackupStatus }) {
   const state = backupState(data);
   return (
     <Badge
-      variant="outline"
-      className={`shrink-0 gap-1.5 border-0 px-2 py-0.5 text-[11px] font-medium ${state === "on" ? "bg-success/10 text-success" : "bg-muted/60 text-muted-foreground"}`}
+      variant={state === "on" ? "success-subtle" : "outline"}
+      className={`text-2xs shrink-0 gap-1.5 border-0 px-2 py-0.5 font-medium ${state === "on" ? "" : "bg-muted/60 text-muted-foreground"}`}
     >
       <span
         aria-hidden
@@ -145,30 +153,27 @@ function RecoveryDeadline({ data }: { data: CloudBackupStatus }) {
   const deadline = backupDate(data.policy.readGraceExpiresAt ?? null);
   if (data.policy.uploadEntitled || !data.history.length || !deadline) return null;
   return (
-    <p
-      role="status"
-      className="border-warning/30 bg-warning/10 flex gap-3 rounded-lg border p-3 text-sm leading-relaxed"
-    >
-      <Icons.AlertTriangle className="text-warning mt-0.5 size-4 shrink-0" aria-hidden />
-      <span>
+    <Alert variant="warning" role="status" className="p-3">
+      <Icons.AlertTriangle aria-hidden />
+      <AlertDescription className="leading-relaxed">
         {t("settings:cloud_backup_recovery_deadline", {
           date: formatting.formatDateTime(deadline, { dateStyle: "medium", timeStyle: "short" }),
         })}
-      </span>
-    </p>
+      </AlertDescription>
+    </Alert>
   );
 }
 
 function CloudBackupPromotion() {
   const { t } = useTranslation();
   return (
-    <Card className="@container border-connect-brand/15 from-connect-brand/5 via-card to-card overflow-hidden rounded-xl bg-gradient-to-br shadow-none">
-      <CardContent className="@min-[640px]:grid-cols-[auto_minmax(0,1fr)_auto] @min-[640px]:gap-x-4 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1 px-4 py-3">
+    <Card className="border-connect-brand/15 from-connect-brand/5 via-card to-card @container overflow-hidden rounded-xl bg-gradient-to-br shadow-none">
+      <CardContent className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1 px-4 py-3 @min-[40rem]:grid-cols-[auto_minmax(0,1fr)_auto] @min-[40rem]:gap-x-4">
         <div className="bg-connect-brand/10 text-connect-brand row-start-1 flex size-8 shrink-0 items-center justify-center rounded-lg">
           <Icons.ShieldCheck className="size-4" aria-hidden />
         </div>
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold leading-5">
+          <h2 className="text-sm leading-5 font-semibold">
             {t("settings:cloud_backup_promotion_title")}
           </h2>
           <p className="text-muted-foreground mt-1 text-xs leading-5">
@@ -177,10 +182,10 @@ function CloudBackupPromotion() {
         </div>
         <Link
           to="/settings/connect"
-          className="text-connect-brand hover:text-foreground focus-visible:ring-ring @min-[640px]:col-start-3 @min-[640px]:row-start-1 col-start-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md text-xs font-medium underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+          className="text-connect-brand hover:text-foreground focus-visible:ring-ring col-start-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-md text-xs font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none @min-[40rem]:col-start-3 @min-[40rem]:row-start-1"
         >
           {t("settings:cloud_backup_promotion_action")}
-          <Icons.ArrowRight className="size-3.5 shrink-0" aria-hidden />
+          <Icons.ArrowRight className="size-3.5 shrink-0 rtl:rotate-180" aria-hidden />
         </Link>
       </CardContent>
     </Card>
@@ -212,7 +217,7 @@ function describeBackupStatus(
 function BackupStatusLine({ dot, parts }: { dot: string; parts: (string | null)[] }) {
   return (
     <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
-      <span className={`mt-[5px] size-1.5 shrink-0 rounded-full ${dot}`} aria-hidden />
+      <span className={`mt-[0.3125rem] size-1.5 shrink-0 rounded-full ${dot}`} aria-hidden />
       <span>
         {parts.filter(Boolean).map((part, index) => (
           <Fragment key={index}>
@@ -277,17 +282,17 @@ export function CloudBackupSummary() {
               />
             )}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground hover:text-foreground pointer-coarse:h-11 shrink-0"
-            asChild
+          <Link
+            to="/settings/exports"
+            aria-label={t("settings:cloud_backup_manage")}
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "sm" }),
+              "text-muted-foreground hover:text-foreground pointer-coarse:h-11 shrink-0",
+            )}
           >
-            <Link to="/settings/exports" aria-label={t("settings:cloud_backup_manage")}>
-              <span className="hidden sm:inline">{t("settings:cloud_backup_manage")}</span>
-              <Icons.ChevronRight className="size-4" aria-hidden />
-            </Link>
-          </Button>
+            <span className="hidden sm:inline">{t("settings:cloud_backup_manage")}</span>
+            <Icons.ChevronRight className="size-4 rtl:rotate-180" aria-hidden />
+          </Link>
         </div>
         {data && <RecoveryDeadline data={data} />}
       </CardContent>
@@ -299,7 +304,7 @@ const COMPACT_HISTORY_LIMIT = 3;
 
 /** List variant of the summary for the Connect page's side column: status line, latest copies. */
 export function CloudBackupCompactSummary() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const formatting = useDateFormatting();
   const localization = useLocalizationSettings();
   const { available, status } = useCloudBackups();
@@ -322,7 +327,7 @@ export function CloudBackupCompactSummary() {
           )}
         </h2>
         {summary && (
-          <div className="mt-0.5 pl-7">
+          <div className="mt-0.5 ps-7">
             {/* "On" is implied by a scheduled next backup; other states name themselves. */}
             <BackupStatusLine
               dot={summary.dot}
@@ -354,7 +359,7 @@ export function CloudBackupCompactSummary() {
                 const date = backupDate(point.publishedAt);
                 const details = [
                   date && formatting.formatTime(date, { timeStyle: "short" }),
-                  formatBackupSize(point.sizeBytes, i18n.language),
+                  formatBackupSize(point.sizeBytes, localization.locale),
                   point.metadata?.device_name,
                 ].filter(Boolean);
                 return (
@@ -382,7 +387,7 @@ export function CloudBackupCompactSummary() {
         className="text-muted-foreground hover:bg-muted/40 hover:text-foreground flex min-h-11 items-center justify-between border-t px-4 text-sm"
       >
         {t("settings:cloud_backup_manage")}
-        <Icons.ChevronRight className="size-4" aria-hidden />
+        <Icons.ChevronRight className="size-4 rtl:rotate-180" aria-hidden />
       </Link>
     </Card>
   );
@@ -412,11 +417,11 @@ export function CloudBackupCard() {
 }
 
 function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackups> }) {
-  const { t, i18n } = useTranslation();
+  const localization = useLocalizationSettings();
+  const { t } = useTranslation();
   const formatting = useDateFormatting();
   const { status, profile, isMobile } = backup;
   const canRestore = isTauri && !isMobile;
-  const active = useRef(true);
   const [flow, setFlow] = useState<Flow>();
   const [resumeAfterReplace, setResumeAfterReplace] = useState(false);
   const [code, setCode] = useState("");
@@ -433,12 +438,6 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
   // One operation at a time; only the control that started it shows progress.
   const busy = pending !== null;
   const data = status.data;
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
   function showFlow(value: Flow) {
     setResumeAfterReplace(value === "replace" && flow === "resume");
     setError(null);
@@ -468,15 +467,15 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
     setReauth(false);
   }
   function failed(cause: unknown) {
-    if (!active.current) return;
-    const recentLogin = String(cause).includes("BACKUP_REAUTHENTICATION_REQUIRED");
+    const error = backendError(cause);
+    const recentLogin = error?.errorCode === BACKUP_REAUTHENTICATION_REQUIRED;
     setReauth(recentLogin);
     setError({
-      cause,
+      cause: error,
       message: t(
         recentLogin
           ? "settings:cloud_backup_reauth"
-          : String(cause).includes("BACKUP_MANUAL_LIMIT")
+          : error?.errorCode === BACKUP_MANUAL_LIMIT
             ? "settings:cloud_backup_manual_limit"
             : "settings:cloud_backup_failed",
       ),
@@ -488,7 +487,6 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
     setReauth(false);
     try {
       const result = await cloudBackupAction<{ recoveryCode?: string }>(operation);
-      if (!active.current) return;
       if (result.recoveryCode) {
         setRecoveryCode(result.recoveryCode);
         setConfirmed(false);
@@ -508,10 +506,8 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
     } catch (cause) {
       failed(cause);
     } finally {
-      if (active.current) {
-        await status.refetch();
-        if (active.current) setPending(null);
-      }
+      await status.refetch();
+      setPending(null);
     }
   }
   async function connectAccess() {
@@ -521,20 +517,18 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
       const result = await cloudBackupAction<"ready" | "unavailable" | "notLinked">({
         action: "access",
       });
-      if (!active.current) return;
       if (result !== "ready") setAccessResult(result);
       await status.refetch();
     } catch (cause) {
-      if (active.current)
-        setAccessResult(
-          /DEVICE_NOT_TRUSTED|DEVICE_REVOKED|DEVICE_NOT_FOUND|DEVICE_MISMATCH|PAIRING_REQUIRED|KEY_VERSION|MEMBERSHIP_CHANGED/.test(
-            String(cause),
-          )
-            ? "notLinked"
-            : "error",
-        );
+      setAccessResult(
+        /DEVICE_NOT_TRUSTED|DEVICE_REVOKED|DEVICE_NOT_FOUND|DEVICE_MISMATCH|PAIRING_REQUIRED|KEY_VERSION|MEMBERSHIP_CHANGED/.test(
+          String(cause),
+        )
+          ? "notLinked"
+          : "error",
+      );
     } finally {
-      if (active.current) setAccessRunning(false);
+      setAccessRunning(false);
     }
   }
   async function perform(key: Pending, action: () => Promise<unknown>) {
@@ -545,15 +539,13 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
     } catch (cause) {
       failed(cause);
     } finally {
-      if (active.current) {
-        await status.refetch();
-        if (active.current) setPending(null);
-      }
+      await status.refetch();
+      setPending(null);
     }
   }
   async function openPreview(backupId: string) {
     const value = await previewCloudBackupRestore(backupId);
-    if (active.current) setPreview({ backupId, value });
+    setPreview({ backupId, value });
   }
   const history = [...(data?.history ?? [])].sort(
     (a, b) =>
@@ -608,7 +600,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
       return (
         <Button
           size="sm"
-          className="pointer-coarse:h-11 aria-busy:opacity-100"
+          className="aria-busy:opacity-100 pointer-coarse:h-11"
           disabled={busy || state === "running"}
           aria-busy={pending === "capture"}
           onClick={() => void perform("capture", () => captureCloudBackup())}
@@ -623,10 +615,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
   };
   const locked = !!data?.hasKey && !data.keyReady;
   return (
-    <Card
-      className="overflow-hidden rounded-2xl shadow-none"
-      aria-label={t("settings:cloud_backup_title")}
-    >
+    <Card className="overflow-hidden" aria-label={t("settings:cloud_backup_title")}>
       <CardHeader className="space-y-4 p-5 sm:p-6">
         <BackupCardHeader
           brand
@@ -692,7 +681,6 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                             onSelect: () =>
                               void perform("manual", async () => {
                                 const point = await captureCloudBackup(true);
-                                if (!active.current) return;
                                 // No point: the slot was busy, eligibility changed, or the
                                 // attempt was cancelled. The status refresh shows which.
                                 toast(
@@ -790,7 +778,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                   <Button
                     variant="outline"
                     size="sm"
-                    className="pointer-coarse:h-11 aria-busy:opacity-100"
+                    className="aria-busy:opacity-100 pointer-coarse:h-11"
                     disabled={busy || accessRunning}
                     aria-busy={accessRunning}
                     onClick={() => void connectAccess()}
@@ -828,7 +816,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                   : t("settings:backup_unknown_date");
                 const download = {
                   icon: Icons.Download,
-                  label: t("settings:cloud_backup_download"),
+                  label: t("common:download"),
                   onSelect: () =>
                     void perform(`download:${point.backupId}`, () =>
                       downloadCloudBackup(point.backupId),
@@ -836,7 +824,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                 };
                 const remove = {
                   icon: Icons.Trash2,
-                  label: t("settings:cloud_backup_delete"),
+                  label: t("common:delete"),
                   onSelect: () => showDelete(point.backupId),
                   destructive: true,
                 };
@@ -850,7 +838,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                     }
                     meta={[
                       date && formatting.formatTime(date, { timeStyle: "short" }),
-                      formatBackupSize(point.sizeBytes, i18n.language),
+                      formatBackupSize(point.sizeBytes, localization.locale),
                     ]}
                     details={[point.metadata?.device_name, point.metadata?.profile_name]}
                     actions={
@@ -885,11 +873,11 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
             <Button
               variant="link"
               size="sm"
-              className="text-muted-foreground h-auto whitespace-normal p-0 text-left text-xs font-normal"
+              className="text-muted-foreground h-auto p-0 text-start text-xs font-normal whitespace-normal"
               onClick={() => showFlow("help")}
             >
               {t("settings:cloud_backup_restore_help")}
-              <Icons.ArrowRight className="size-3.5" aria-hidden />
+              <Icons.ArrowRight className="size-3.5 rtl:rotate-180" aria-hidden />
             </Button>
           )}
           {isMobile && history.length > 0 && (
@@ -907,10 +895,10 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
       >
         <DialogContent
           className="sm:max-w-md"
-          mobileClassName="h-auto max-h-[85dvh] overflow-y-auto"
+          mobileClassName="h-auto [--overlay-max-height:85dvh] overflow-y-auto"
           showCloseButton={!busy && !recoveryCode}
         >
-          <DialogHeader className="pr-6 text-left">
+          <DialogHeader className="pe-6 text-start">
             <DialogTitle>
               {t(
                 flow === "help"
@@ -956,7 +944,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
           {flow === "help" ? (
             <div className="bg-muted/40 space-y-3 rounded-lg p-4">
               <p className="text-sm">{t("settings:cloud_backup_restore_help_steps")}</p>
-              <code className="bg-background block break-all rounded-md border p-3 font-mono text-xs">
+              <code className="bg-background block rounded-md border p-3 font-mono text-xs break-all">
                 wealthfolio-server db restore backup.wfrec --profile {profile?.id ?? "PROFILE_ID"}{" "}
                 --recovery-code-stdin
               </code>
@@ -967,22 +955,20 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
                 <Label className="text-muted-foreground text-xs">
                   {t("settings:cloud_backup_code")}
                 </Label>
-                <pre className="mt-2 select-all whitespace-pre-wrap break-all font-mono text-sm leading-6">
+                <pre className="mt-2 font-mono text-sm leading-6 break-all whitespace-pre-wrap select-all">
                   {recoveryCode}
                 </pre>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="pointer-coarse:h-11 mt-3"
+                  className="mt-3 pointer-coarse:h-11"
                   onClick={() => {
-                    void navigator.clipboard
-                      .writeText(recoveryCode)
+                    void copyText(recoveryCode)
                       .then(() => {
-                        if (active.current) setCopied(true);
+                        setCopied(true);
                       })
                       .catch((cause) => {
-                        if (active.current)
-                          setError({ cause, message: t("settings:cloud_backup_copy_failed") });
+                        setError({ cause, message: t("settings:cloud_backup_copy_failed") });
                       });
                   }}
                 >
@@ -1037,7 +1023,7 @@ function CloudBackupPanel({ backup }: { backup: ReturnType<typeof useCloudBackup
               <div className="bg-muted/40 flex items-center gap-3 rounded-lg p-3">
                 <Icons.Laptop className="text-muted-foreground size-5 shrink-0" aria-hidden />
                 <div>
-                  <p className="text-sm font-medium leading-5">
+                  <p className="text-sm leading-5 font-medium">
                     {profile?.name ?? t("settings:cloud_backup_this_profile")}
                   </p>
                   <p className="text-muted-foreground text-xs">

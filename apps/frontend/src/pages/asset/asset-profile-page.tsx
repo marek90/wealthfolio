@@ -1,3 +1,4 @@
+import { getCategoryLabel } from "@/lib/taxonomy-labels";
 import { isExpiredOptionAsset } from "./asset-utils";
 import { createActivity, getAssetHoldings, getAssetLots, searchActivities } from "@/adapters";
 import { ActionPalette, type ActionPaletteGroup } from "@/components/action-palette";
@@ -7,11 +8,15 @@ import { useHapticFeedback } from "@/hooks";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useAlternativeAssetHolding, useAlternativeHoldings } from "@/hooks/use-alternative-assets";
 import { useHoldings } from "@/hooks/use-holdings";
+import { HoldingsScopeNotice } from "@/components/holdings-scope-notice";
 import { useIsMobileViewport } from "@/hooks/use-platform";
 import { useQuoteHistory } from "@/hooks/use-quote-history";
 import { useSyncMarketDataMutation } from "@/hooks/use-sync-market-data";
 import { useAssetTaxonomyAssignments, useTaxonomy } from "@/hooks/use-taxonomies";
-import { getActivityRestrictionLevel } from "@/lib/activity-restrictions";
+import {
+  accountSupportsActivityType,
+  getActivityRestrictionLevel,
+} from "@/lib/activity-restrictions";
 import { generateId } from "@/lib/id";
 import { QueryKeys } from "@/lib/query-keys";
 import { useSettingsContext } from "@/lib/settings-provider";
@@ -23,6 +28,7 @@ import ActivityTable from "@/pages/activity/components/activity-table/activity-t
 import ActivityTableMobile from "@/pages/activity/components/activity-table/activity-table-mobile";
 import { MobileActivityForm } from "@/pages/activity/components/mobile-forms/mobile-activity-form";
 import { useActivityActionDialogs } from "@/pages/activity/hooks/use-activity-action-dialogs";
+import { isConversionActivity } from "@/pages/activity/utils/conversion-counterpart";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AnimatedToggleGroup,
@@ -32,6 +38,7 @@ import {
   SwipableView,
   useDateFormatting,
   type FormattingApi,
+  Spinner,
 } from "@wealthfolio/ui";
 import {
   AlertDialog,
@@ -53,6 +60,7 @@ import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useBackNavigation } from "@/pages/layouts/mobile-stack/use-mobile-stack";
 import { toast } from "sonner";
 import { AlternativeAssetContent, useAlternativeAssetActions } from "./alternative-asset-content";
 import { AssetSnapshotHistory, useHasManualSnapshots } from "./asset-account-holdings";
@@ -68,6 +76,8 @@ import { useQuoteMutations } from "./hooks/use-quote-mutations";
 import { QuoteHistoryDataGrid } from "./quote-history-data-grid";
 import { ResetProviderHistoryDialog } from "./reset-provider-history-dialog";
 import { RefreshQuotesConfirmDialog } from "./refresh-quotes-confirm-dialog";
+import { statusSurfaceVariants } from "@wealthfolio/ui/components/ui/status-surface";
+import { copyText } from "@wealthfolio/ui/lib/clipboard";
 
 // Alternative asset kinds that should use ValueHistoryDataGrid
 const ALTERNATIVE_ASSET_KINDS: AssetKind[] = [
@@ -99,10 +109,10 @@ const parseJsonField = (value: unknown): unknown => {
 
 interface AssetDetailData {
   numShares: number;
-  marketValue: number;
-  costBasis: number;
-  averagePrice: number;
-  portfolioPercent: number;
+  marketValue: number | null;
+  costBasis: number | null;
+  averagePrice: number | null;
+  portfolioPercent: number | null;
   todaysReturn: number | null;
   todaysReturnPercent: number | null;
   unrealizedPnl: number | null;
@@ -236,10 +246,10 @@ function AssetHealthBanner({
           };
 
   return (
-    <div className="border-warning/30 bg-warning/10 mb-4 rounded-md border px-3 py-3">
+    <div className={cn(statusSurfaceVariants({ status: "warning" }), "mb-4 rounded-md px-3 py-3")}>
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex min-w-0 items-start gap-2">
-          <Icons.AlertTriangle className="text-warning mt-0.5 h-4 w-4 shrink-0" />
+          <Icons.AlertTriangle className="text-warning-subtle-foreground mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0 space-y-1">
             <p className="text-sm font-medium">{copy.title}</p>
             <p className="text-muted-foreground text-sm leading-relaxed">{copy.description}</p>
@@ -255,9 +265,9 @@ function AssetHealthBanner({
               onClick={onRefreshPrices}
             >
               {isRefreshingPrices ? (
-                <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="me-2 h-4 w-4" />
               ) : (
-                <Icons.Refresh className="mr-2 h-4 w-4" />
+                <Icons.Refresh className="me-2 h-4 w-4" />
               )}
               {t("asset:profile.health.refetch_prices")}
             </Button>
@@ -327,16 +337,18 @@ export const AssetProfilePage = () => {
     isError: isAssetProfileError,
   } = useAssetProfile(assetId);
 
+  const holdingsQuery = useHoldings({ type: "all" }, { includeClosed: true });
   const {
     holdings: allHoldings,
     isLoading: isHoldingLoading,
     isError: isHoldingError,
-  } = useHoldings({ type: "all" }, { includeClosed: true });
+    isComplete: holdingsComplete,
+  } = holdingsQuery;
 
   const holding = useMemo<Holding | null>(() => {
     if (!assetId) return null;
-    return getAssetProfileHolding(allHoldings, assetId);
-  }, [allHoldings, assetId]);
+    return holdingsComplete ? getAssetProfileHolding(allHoldings, assetId) : null;
+  }, [allHoldings, assetId, holdingsComplete]);
 
   const {
     data: quoteHistory,
@@ -391,7 +403,7 @@ export const AssetProfilePage = () => {
       if (category) {
         badges.push({
           id: category.id,
-          categoryName: category.name,
+          categoryName: getCategoryLabel(t, category.taxonomyId, category.id, category.name),
           categoryColor: category.color,
           taxonomyName: t("asset:profile.class"),
         });
@@ -407,7 +419,7 @@ export const AssetProfilePage = () => {
       if (category) {
         badges.push({
           id: category.id,
-          categoryName: category.name === "Exchange Traded Fund (ETF)" ? "ETF" : category.name,
+          categoryName: getCategoryLabel(t, category.taxonomyId, category.id, category.name),
           categoryColor: category.color,
           taxonomyName: t("asset:profile.type"),
         });
@@ -423,9 +435,11 @@ export const AssetProfilePage = () => {
       if (category) {
         badges.push({
           id: category.id,
-          categoryName: t("asset:profile.risk", { name: category.name }),
+          categoryName: t("asset:profile.risk", {
+            name: getCategoryLabel(t, category.taxonomyId, category.id, category.name),
+          }),
           categoryColor: category.color,
-          taxonomyName: "Risk",
+          taxonomyName: t("allocation:editor.riskCategory"),
         });
       }
     }
@@ -441,9 +455,9 @@ export const AssetProfilePage = () => {
         if (category) {
           badges.push({
             id: `industry-${category.id}`,
-            categoryName: category.name,
+            categoryName: getCategoryLabel(t, category.taxonomyId, category.id, category.name),
             categoryColor: category.color,
-            taxonomyName: "Industry",
+            taxonomyName: t("allocation:editor.industry"),
           });
         }
       }
@@ -460,9 +474,9 @@ export const AssetProfilePage = () => {
         if (category) {
           badges.push({
             id: `region-${category.id}`,
-            categoryName: category.name,
+            categoryName: getCategoryLabel(t, category.taxonomyId, category.id, category.name),
             categoryColor: category.color,
-            taxonomyName: "Region",
+            taxonomyName: t("allocation:editor.region"),
           });
         }
       }
@@ -598,6 +612,16 @@ export const AssetProfilePage = () => {
   });
 
   const { accounts } = useAccounts({ filterActive: false });
+  const sourceHolding = (location.state as { holding?: Holding } | null)?.holding;
+  const sellAccountId =
+    sourceHolding?.instrument?.id === assetId
+      ? accounts.find(
+          (account) =>
+            account.id === sourceHolding.accountId &&
+            !account.isArchived &&
+            accountSupportsActivityType(account, "SELL"),
+        )?.id
+      : undefined;
 
   const activityFormAccounts = useMemo<AccountSelectOption[]>(
     () =>
@@ -608,6 +632,7 @@ export const AssetProfilePage = () => {
           label: account.name,
           currency: account.currency,
           accountType: account.accountType,
+          group: account.group,
           restrictionLevel: getActivityRestrictionLevel(account),
         })),
     [accounts],
@@ -627,6 +652,11 @@ export const AssetProfilePage = () => {
     items.push({ value: "quotes", label: t("asset:profile.quotes") });
     return items;
   }, [hasManualSnapshots, assetLots.length, t]);
+
+  const overviewSubTabIndex = Math.max(
+    0,
+    overviewSubTabs.findIndex((item) => item.value === overviewSubTab),
+  );
 
   const handleSubTabChange = useCallback(
     (next: OverviewSubTab) => {
@@ -697,6 +727,7 @@ export const AssetProfilePage = () => {
   }, [holding, assetProfile, assetId, baseCurrency]);
 
   const symbolHolding = useMemo((): AssetDetailData | null => {
+    if (!holdingsComplete) return null;
     const instrument = holding?.instrument;
     const asset = assetProfile;
     const hasAssetHistory = assetLots.length > 0 || assetActivities.length > 0 || quote != null;
@@ -723,9 +754,9 @@ export const AssetProfilePage = () => {
     const costUnits =
       optionSpec && contractMultiplier > 0 ? quantity * contractMultiplier : quantity;
     const averageCostPrice =
-      holding?.costBasis?.local && costUnits !== 0
+      holding?.costBasis?.local != null && costUnits !== 0
         ? Number(holding.costBasis.local) / costUnits
-        : 0;
+        : null;
 
     const quoteData = quote
       ? {
@@ -757,29 +788,10 @@ export const AssetProfilePage = () => {
     // Closed positions use the engine's income too, including reclassifications
     // and rejected-activity filtering. Raw dividend rows cannot reproduce it.
     const income = holding?.income?.local != null ? Number(holding.income.local) : null;
-    const realizedLots = assetLots.filter(
-      (lot) => lot.source === "TRANSACTION_LOT" && lot.valuationRealizedPnl != null,
-    );
-    const realizedPnlFromLots = realizedLots.reduce(
-      (sum, lot) => sum + Number(lot.valuationRealizedPnl ?? 0),
-      0,
-    );
-    const realizedCostBasisFromLots = realizedLots.reduce(
-      (sum, lot) => sum + Number(lot.valuationDisposalCostBasis ?? 0),
-      0,
-    );
     const realizedPnl =
-      holding?.realizedGain?.local != null
-        ? Number(holding.realizedGain.local)
-        : realizedLots.length > 0
-          ? realizedPnlFromLots
-          : null;
+      holding?.realizedGain?.local != null ? Number(holding.realizedGain.local) : null;
     const realizedPnlPercent =
-      holding?.realizedGainPct != null
-        ? Number(holding.realizedGainPct)
-        : realizedLots.length > 0 && realizedCostBasisFromLots > 0
-          ? realizedPnlFromLots / realizedCostBasisFromLots
-          : null;
+      holding?.realizedGainPct != null ? Number(holding.realizedGainPct) : null;
     const hasOpenTransactionLotWithBase = assetLots.some(
       (lot) => lot.source === "TRANSACTION_LOT" && !lot.isClosed && lot.costBasisBase != null,
     );
@@ -795,35 +807,19 @@ export const AssetProfilePage = () => {
         ? Number(holding.unrealizedGain.base) -
           Number(holding.unrealizedGain.local) * Number(holding.fxRate)
         : null;
-    const totalPnl =
-      holding?.totalGain?.local != null ? Number(holding.totalGain.local) : realizedPnl;
-    const totalPnlPercent =
-      holding?.totalGainPct != null ? Number(holding.totalGainPct) : realizedPnlPercent;
+    const totalPnl = holding?.totalGain?.local != null ? Number(holding.totalGain.local) : null;
+    const totalPnlPercent = holding?.totalGainPct != null ? Number(holding.totalGainPct) : null;
     const totalReturn =
-      holding?.totalReturn?.local != null
-        ? Number(holding.totalReturn.local)
-        : totalPnl != null && income != null
-          ? totalPnl + income
-          : null;
-    const fallbackReturnBasis =
-      holding?.returnBasis?.base != null
-        ? Number(holding.returnBasis.base)
-        : realizedCostBasisFromLots;
-    const canUseFallbackTotalReturnPercent =
-      holding == null && displayCurrency.toUpperCase() === baseCurrency.toUpperCase();
+      holding?.totalReturn?.local != null ? Number(holding.totalReturn.local) : null;
     const totalReturnPercent =
-      holding?.totalReturnPct != null
-        ? Number(holding.totalReturnPct)
-        : totalReturn != null && fallbackReturnBasis > 0 && canUseFallbackTotalReturnPercent
-          ? totalReturn / fallbackReturnBasis
-          : null;
+      holding?.totalReturnPct != null ? Number(holding.totalReturnPct) : null;
 
     return {
       numShares: quantity,
-      marketValue: Number(holding?.marketValue.local ?? 0),
-      costBasis: Number(holding?.costBasis?.local ?? 0),
-      averagePrice: Number(averageCostPrice),
-      portfolioPercent: Number(holding?.weight ?? 0),
+      marketValue: holding?.marketValue.local ?? null,
+      costBasis: holding?.costBasis?.local ?? null,
+      averagePrice: averageCostPrice,
+      portfolioPercent: holding?.weight ?? null,
       todaysReturn: todaysReturn != null ? Number(todaysReturn) : null,
       todaysReturnPercent: todaysReturnPercent != null ? Number(todaysReturnPercent) : null,
       unrealizedPnl:
@@ -849,6 +845,7 @@ export const AssetProfilePage = () => {
     };
   }, [
     holding,
+    holdingsComplete,
     quote,
     quoteHistory,
     assetActivities,
@@ -893,7 +890,9 @@ export const AssetProfilePage = () => {
                 <Badge
                   key={badge.id}
                   variant="secondary"
-                  className="gap-1.5"
+                  // A long category name ends in an ellipsis rather than past the screen.
+                  className="max-w-full gap-1.5"
+                  title={badge.categoryName}
                   style={{
                     backgroundColor: `${badge.categoryColor}20`,
                     color: badge.categoryColor,
@@ -901,10 +900,10 @@ export const AssetProfilePage = () => {
                   }}
                 >
                   <span
-                    className="h-2 w-2 rounded-full"
+                    className="h-2 w-2 shrink-0 rounded-full"
                     style={{ backgroundColor: badge.categoryColor }}
                   />
-                  {badge.categoryName}
+                  <span className="truncate">{badge.categoryName}</span>
                 </Badge>
               ))}
               <Button
@@ -1066,13 +1065,11 @@ export const AssetProfilePage = () => {
     setRefreshConfirmOpen(true);
   }, []);
 
-  const handleBack = useCallback(() => {
-    navigate(-1);
-  }, [navigate]);
+  const handleBack = useBackNavigation();
 
   const handleCopySymbol = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(displayedSymbol);
+      await copyText(displayedSymbol);
       setSymbolCopied(true);
       window.setTimeout(() => setSymbolCopied(false), 1500);
     } catch (error) {
@@ -1120,7 +1117,7 @@ export const AssetProfilePage = () => {
     return (
       <Page>
         <PageContent>
-          <Icons.Spinner className="h-6 w-6 animate-spin" />
+          <Spinner className="h-6 w-6" />
         </PageContent>
       </Page>
     ); // Show loading spinner
@@ -1147,7 +1144,7 @@ export const AssetProfilePage = () => {
                   const url = `${location.pathname}?tab=${next}`;
                   navigate(url, { replace: true });
                 }}
-                className="mr-2"
+                className="me-2"
               />
               <ActionPalette
                 open={actionPaletteOpen}
@@ -1227,7 +1224,7 @@ export const AssetProfilePage = () => {
               {/* Type badge */}
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary" className="gap-1.5">
-                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  <span className="bg-info h-2 w-2 rounded-full" />
                   {t("asset:profile.fx_rate")}
                 </Badge>
               </div>
@@ -1290,13 +1287,15 @@ export const AssetProfilePage = () => {
         <PageContent>
           <p>{t("asset:profile.could_not_load")}</p>
           {isHoldingError && (
-            <p className="text-sm text-red-500">{t("asset:profile.holding_fetch_error")}</p>
+            <p className="text-destructive text-sm">{t("asset:profile.holding_fetch_error")}</p>
           )}
           {isQuotesError && (
-            <p className="text-sm text-red-500">{t("asset:profile.quote_fetch_error")}</p>
+            <p className="text-destructive text-sm">{t("asset:profile.quote_fetch_error")}</p>
           )}
           {isAssetProfileError && (
-            <p className="text-sm text-red-500">{t("asset:profile.asset_profile_fetch_error")}</p>
+            <p className="text-destructive text-sm">
+              {t("asset:profile.asset_profile_fetch_error")}
+            </p>
           )}
         </PageContent>
       </Page>
@@ -1372,10 +1371,19 @@ export const AssetProfilePage = () => {
                                 },
                               ]
                             : []),
-                          ...(altAssetActions.loanAvailability.recalculate
+                          ...(altAssetActions.loanAvailability.changeRate
                             ? [
                                 {
                                   icon: Icons.Percent,
+                                  label: t("asset:loanActions.change_rate"),
+                                  onClick: altAssetActions.loanActions.changeRate,
+                                },
+                              ]
+                            : []),
+                          ...(altAssetActions.loanAvailability.recalculate
+                            ? [
+                                {
+                                  icon: Icons.DollarSign,
                                   label: t("asset:loanActions.recalculate_schedule"),
                                   onClick: altAssetActions.loanActions.recalculate,
                                 },
@@ -1386,6 +1394,15 @@ export const AssetProfilePage = () => {
                             label: t("asset:loanActions.edit_details"),
                             onClick: () => altAssetActions.openEditDetails(),
                           },
+                          ...(altAssetActions.exportLoanSchedule
+                            ? [
+                                {
+                                  icon: Icons.Download,
+                                  label: t("asset:loanExport.action"),
+                                  onClick: () => void altAssetActions.exportLoanSchedule?.(),
+                                },
+                              ]
+                            : []),
                         ],
                       },
                       {
@@ -1458,7 +1475,7 @@ export const AssetProfilePage = () => {
                               label: t("asset:profile.sell"),
                               onClick: () =>
                                 navigate(
-                                  `/activities/manage?assetId=${encodeURIComponent(assetId)}&type=SELL`,
+                                  `/activities/manage?assetId=${encodeURIComponent(assetId)}&type=SELL${sellAccountId ? `&account=${encodeURIComponent(sellAccountId)}` : ""}`,
                                 ),
                             },
                             {
@@ -1541,7 +1558,7 @@ export const AssetProfilePage = () => {
       >
         <div className="group/asset-header flex items-center gap-2" data-tauri-drag-region="true">
           {isAltAsset && altHolding ? (
-            <div className="bg-muted flex h-9 w-9 items-center justify-center rounded-full">
+            <div className="bg-muted flex size-10 shrink-0 items-center justify-center rounded-full md:size-9">
               <AlternativeAssetIcon kind={altHolding.kind} size={20} />
             </div>
           ) : (
@@ -1558,16 +1575,21 @@ export const AssetProfilePage = () => {
                 }
                 instrumentType={holding?.instrument?.instrumentType ?? assetProfile?.instrumentType}
                 assetId={assetProfile?.id ?? assetId}
-                className="size-9"
+                // A step larger on phones, next to the two-line name.
+                className="size-10 md:size-9"
                 onEdit={() => setLogoDialogOpen(true)}
               />
             )
           )}
           <div className="flex min-w-0 flex-col justify-center">
-            <h1 className="truncate text-base font-semibold leading-tight md:text-lg">
+            {/* Provider names read in their own direction, so a clipped one keeps its start. */}
+            <h1
+              dir="auto"
+              className="text-base leading-tight font-semibold break-words max-md:line-clamp-2 md:truncate md:text-lg rtl:text-right"
+            >
               {assetProfile?.name ?? holding?.instrument?.name ?? assetId ?? "-"}
             </h1>
-            <p className="text-muted-foreground flex items-center gap-1.5 text-xs leading-tight md:text-sm">
+            <p className="text-muted-foreground flex items-center gap-1 text-xs leading-tight md:gap-1.5 md:text-sm">
               {isAltAsset && altHolding ? (
                 (altHolding.metadata?.sub_type ?? altHolding.metadata?.liability_type) ===
                 "mortgage" ? (
@@ -1580,32 +1602,41 @@ export const AssetProfilePage = () => {
                   <span className="flex items-center">
                     <span>{displayedSymbol}</span>
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className={cn(
-                            "ml-1 h-5 w-5 shrink-0 overflow-hidden rounded-sm p-0 transition-[width,margin,opacity]",
-                            "md:ml-0 md:w-0 md:opacity-0 md:focus-visible:ml-1 md:focus-visible:w-5 md:focus-visible:opacity-100 md:group-hover/asset-header:ml-1 md:group-hover/asset-header:w-5 md:group-hover/asset-header:opacity-100",
-                            symbolCopied && "opacity-100 md:ml-1 md:w-5 md:opacity-100",
-                          )}
-                          aria-label={`${t("ui:dataGrid.copy")} ${displayedSymbol}`}
-                          onClick={() => void handleCopySymbol()}
-                        >
-                          {symbolCopied ? (
-                            <Icons.Check className="text-success size-3.5" />
-                          ) : (
-                            <Icons.Copy className="size-3.5" />
-                          )}
-                        </Button>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className={cn(
+                              // The touch minimum would make this 44px and push the line apart; a
+                              // 20×24px target is enough for a secondary action.
+                              "ms-1 h-6 w-5 shrink-0 overflow-hidden rounded-sm p-0 transition-[width,margin,opacity] pointer-coarse:min-h-0 pointer-coarse:min-w-0 max-lg:min-h-0 max-lg:min-w-0 pointer-fine:md:h-5",
+                              // Hidden until hover only for a mouse; touch screens always show it.
+                              "pointer-fine:md:ms-0 pointer-fine:md:w-0 pointer-fine:md:opacity-0 md:focus-visible:ms-1 md:focus-visible:w-5 md:focus-visible:opacity-100 md:group-hover/asset-header:ms-1 md:group-hover/asset-header:w-5 md:group-hover/asset-header:opacity-100",
+                              symbolCopied &&
+                                "opacity-100 pointer-fine:md:ms-1 pointer-fine:md:w-5 pointer-fine:md:opacity-100",
+                            )}
+                            aria-label={`${t("ui:dataGrid.copy")} ${displayedSymbol}`}
+                            onClick={() => void handleCopySymbol()}
+                          />
+                        }
+                      >
+                        {symbolCopied ? (
+                          <Icons.Check className="text-success size-3.5" />
+                        ) : (
+                          <Icons.Copy className="size-3.5" />
+                        )}
                       </TooltipTrigger>
                       <TooltipContent side="bottom">{t("ui:dataGrid.copy")}</TooltipContent>
                     </Tooltip>
                   </span>
                   {(assetProfile?.quoteCcy ?? profile?.currency) && (
                     <>
-                      <span className="bg-muted-foreground/40 h-3 w-px rounded-full" />
+                      <span aria-hidden="true" className="pe-0.5 md:hidden">
+                        ·
+                      </span>
+                      <span className="bg-muted-foreground/40 hidden h-3 w-px rounded-full md:block" />
                       {assetProfile?.quoteCcy ?? profile?.currency}
                     </>
                   )}
@@ -1616,6 +1647,7 @@ export const AssetProfilePage = () => {
         </div>
       </PageHeader>
       <PageContent>
+        <HoldingsScopeNotice {...holdingsQuery} />
         <AssetHealthBanner
           context={healthContext}
           isManualPricingMode={isManualPricingMode}
@@ -1631,6 +1663,9 @@ export const AssetProfilePage = () => {
           isMobile ? (
             <SwipableView
               withMobileNavOffset
+              // Open on the tab the URL names, as the desktop toggle does.
+              initialIndex={activeTab === "history" ? 1 : 0}
+              selectedIndex={activeTab === "history" ? 1 : 0}
               items={[
                 {
                   name: t("asset:profile.overview"),
@@ -1717,7 +1752,7 @@ export const AssetProfilePage = () => {
                   quoteHistory={quoteHistory ?? []}
                   averageCost={
                     symbolHolding && symbolHolding.numShares > 0
-                      ? symbolHolding.averagePrice
+                      ? (symbolHolding.averagePrice ?? undefined)
                       : undefined
                   }
                   className={`col-span-1 ${symbolHolding ? "md:col-span-2" : "md:col-span-3"}`}
@@ -1729,6 +1764,9 @@ export const AssetProfilePage = () => {
             )}
             <SwipableView
               withMobileNavOffset
+              // Open on the sub-tab the URL names; Lots and Snapshots join once their data loads.
+              initialIndex={overviewSubTabIndex}
+              selectedIndex={overviewSubTabIndex}
               items={swipableTabs}
               displayToggle={true}
               onViewChange={(_index: number, name: string) => {
@@ -1750,7 +1788,7 @@ export const AssetProfilePage = () => {
                   quoteHistory={quoteHistory ?? []}
                   averageCost={
                     symbolHolding && symbolHolding.numShares > 0
-                      ? symbolHolding.averagePrice
+                      ? (symbolHolding.averagePrice ?? undefined)
                       : undefined
                   }
                   className={`col-span-1 ${symbolHolding ? "md:col-span-2" : "md:col-span-3"}`}
@@ -1831,6 +1869,7 @@ export const AssetProfilePage = () => {
         isOpen={showActivityDeleteAlert}
         isDeleting={isActivityDeleting}
         linkedTransfer={!!selectedActivity?.sourceGroupId}
+        conversion={isConversionActivity(selectedActivity)}
         onConfirm={handleActivityDeleteConfirm}
         onCancel={handleActivityDeleteCancel}
       />

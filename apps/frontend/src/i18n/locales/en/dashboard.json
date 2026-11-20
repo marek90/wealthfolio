@@ -45,7 +45,6 @@
   "actions": {
     "add_asset": "Add Asset",
     "add_liability": "Add Liability",
-    "record_transaction": "Record Transaction",
     "sync_broker_accounts": "Sync Broker Accounts",
     "sync_devices": "Sync Devices",
     "update_prices": "Update prices",
@@ -64,8 +63,8 @@
     "create_first_goal": "Create your first goal",
     "more_goals_one": "+{{count}} more goal",
     "more_goals_other": "+{{count}} more goals",
-    "time_no_deadline": "NO DEADLINE",
-    "time_due": "DUE"
+    "time_no_deadline": "No deadline",
+    "time_due": "Due"
   },
   "tabs": {
     "investments": "Investments",

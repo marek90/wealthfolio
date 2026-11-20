@@ -147,8 +147,10 @@ pub struct AppState {
         Arc<wealthfolio_spending::categorization_rules::CategorizationRulesService>,
     pub events_service: Arc<wealthfolio_spending::events::EventsService>,
     pub budget_service: Arc<wealthfolio_spending::budget::BudgetService>,
+    pub category_merge_service: Arc<wealthfolio_spending::category_merge::CategoryMergeService>,
     pub spending_analytics_service: Arc<wealthfolio_spending::analytics::AnalyticsService>,
     pub spending_insight_service: Arc<wealthfolio_spending::insight::InsightService>,
+    pub data_export_service: Arc<wealthfolio_core::exports::DataExportService>,
     pub allocation_target_service: Arc<
         dyn wealthfolio_core::portfolio::allocation_targets::AllocationTargetServiceTrait
             + Send
@@ -156,8 +158,10 @@ pub struct AppState {
     >,
     pub drift_service:
         Arc<dyn wealthfolio_core::portfolio::allocation_targets::DriftServiceTrait + Send + Sync>,
-    pub rebalance_service: Arc<
-        dyn wealthfolio_core::portfolio::allocation_targets::RebalanceServiceTrait + Send + Sync,
+    pub allocation_worksheet_service: Arc<
+        dyn wealthfolio_core::portfolio::allocation_targets::AllocationWorksheetServiceTrait
+            + Send
+            + Sync,
     >,
     pub pat_repository: Arc<PatRepository>,
     pub mcp_audit_repository: Arc<McpAuditRepository>,
@@ -694,12 +698,8 @@ async fn initialize_profile_state(
             classification_service.clone(),
             timezone.clone(),
         )
-        .with_income_dependencies(
-            activity_repository.clone(),
-            fx_service.clone(),
-            projection_store.clone(),
-        )
-        .with_lot_repository(lots_repository.clone()),
+        .with_lot_repository(lots_repository.clone())
+        .with_projection_store(projection_store.clone()),
     );
 
     let allocation_service: Arc<dyn AllocationServiceTrait + Send + Sync> = Arc::new(
@@ -733,14 +733,21 @@ async fn initialize_profile_state(
         .with_holdings_service(holdings_service.clone())
         .with_taxonomy_service(taxonomy_service.clone()),
     );
-    let rebalance_service: Arc<
-        dyn wealthfolio_core::portfolio::allocation_targets::RebalanceServiceTrait + Send + Sync,
+    let allocation_worksheet_service: Arc<
+        dyn wealthfolio_core::portfolio::allocation_targets::AllocationWorksheetServiceTrait
+            + Send
+            + Sync,
     > = Arc::new(
-        wealthfolio_core::portfolio::allocation_targets::RebalanceService::new(
+        wealthfolio_core::portfolio::allocation_targets::AllocationWorksheetService::new(
             allocation_target_service.clone(),
             drift_service.clone(),
             allocation_service.clone(),
             holdings_service.clone(),
+            account_service.clone(),
+            asset_service.clone(),
+            taxonomy_service.clone(),
+            quote_service.clone(),
+            fx_service.clone(),
         ),
     );
 
@@ -763,7 +770,15 @@ async fn initialize_profile_state(
 
     let goal_repository = Arc::new(GoalRepository::new(pool.clone(), writer.clone()));
     let goal_service = Arc::new(
-        GoalService::new(goal_repository, account_service.clone()).with_timezone(timezone.clone()),
+        GoalService::new(goal_repository, account_service.clone())
+            .with_timezone(timezone.clone())
+            .with_valuation_services(wealthfolio_core::goals::GoalValuationServices {
+                snapshots: snapshot_service.clone(),
+                assets: asset_service.clone(),
+                quotes: quote_service.clone(),
+                fx: fx_service.clone(),
+                base_currency: base_currency.clone(),
+            }),
     );
 
     let limits_repository = Arc::new(ContributionLimitRepository::new(
@@ -797,6 +812,7 @@ async fn initialize_profile_state(
             core_import_run_repository,
         )
         .with_timezone(timezone.clone())
+        .with_valuation_repository(valuation_repository.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
     let final_cash_migration = run_final_cash_migration(
@@ -867,10 +883,14 @@ async fn initialize_profile_state(
     let categorization_rules_service = Arc::new(
         wealthfolio_spending::categorization_rules::CategorizationRulesService::new(
             categorization_rules_repo,
-            activity_repository.clone(),
+            cash_activity_service.clone(),
             activity_taxonomy_assignment_service.clone(),
         ),
     );
+
+    let category_merge_service = Arc::new(wealthfolio_spending::category_merge::CategoryMergeService::new(
+        Arc::new(wealthfolio_storage_sqlite::spending::category_merge::CategoryMergeRepository::new(pool.clone(), writer.clone())),
+    ));
 
     // Spending: budget
     let budget_repo: Arc<dyn wealthfolio_spending::budget::BudgetRepositoryTrait> = Arc::new(
@@ -880,7 +900,7 @@ async fn initialize_profile_state(
         ),
     );
     let budget_service = Arc::new(wealthfolio_spending::budget::BudgetService::new(
-        budget_repo,
+        budget_repo.clone(),
         activity_repository.clone(),
         account_repo.clone(),
         activity_assignments_repo.clone(),
@@ -925,7 +945,7 @@ async fn initialize_profile_state(
         activity_repository.clone(),
         account_repo.clone(),
         analytics_assignment_repo,
-        activity_splits_repo,
+        activity_splits_repo.clone(),
         spending_settings_service.clone(),
         taxonomy_service.clone(),
         fx_service.clone(),
@@ -940,7 +960,8 @@ async fn initialize_profile_state(
             quote_service.clone(),
         )
         .with_timezone(timezone.clone())
-        .with_event_sink(domain_event_sink.clone()),
+        .with_event_sink(domain_event_sink.clone())
+        .with_fx_registration(fx_service.clone(), base_currency.clone()),
     );
 
     // Custom asset logo overrides
@@ -986,15 +1007,20 @@ async fn initialize_profile_state(
         Arc::new(HealthDismissalRepository::new(pool.clone(), writer.clone()));
     let health_service: Arc<dyn HealthServiceTrait + Send + Sync> = Arc::new(
         HealthService::new(health_dismissal_repository)
-            .with_projection_freshness(portfolio_coordinator.clone()),
+            .with_projection_freshness(portfolio_coordinator.clone())
+            .with_net_worth(net_worth_service.clone())
+            .with_fx(fx_service.clone()),
     );
 
     // AI chat repository for thread/message persistence
     let ai_chat_repository = Arc::new(AiChatRepository::new(pool.clone(), writer.clone()));
 
+    let event_bus = EventBus::new(256);
+
     // Create the AI environment and chat service using the new wealthfolio-ai crate
     let ai_environment = Arc::new(ServerAiEnvironment::new(
         base_currency.clone(),
+        timezone.clone(),
         account_service.clone(),
         activity_service.clone(),
         holdings_service.clone(),
@@ -1016,6 +1042,17 @@ async fn initialize_profile_state(
         cash_activity_service.clone(),
         activity_taxonomy_assignment_service.clone(),
         categorization_rules_service.clone(),
+        budget_service.clone(),
+        events_service.clone(),
+        spending_analytics_service.clone(),
+        spending_insight_service.clone(),
+        snapshot_service.clone(),
+        lots_repository.clone(),
+        custom_provider_service.clone(),
+        portfolio_coordinator.clone(),
+        event_bus.clone(),
+        fx_service.clone(),
+        alternative_asset_service.clone(),
     ));
     let agent_environment: Arc<dyn wealthfolio_agent_tools::AgentEnvironment> =
         ai_environment.clone();
@@ -1036,7 +1073,6 @@ async fn initialize_profile_state(
         app_version,
     ));
 
-    let event_bus = EventBus::new(256);
     let device_sync_runtime = Arc::new(DeviceSyncRuntimeState::new());
     let broker_sync_running = Arc::new(AtomicBool::new(false));
     let token_lifecycle = Arc::new(TokenLifecycleState::new());
@@ -1093,20 +1129,52 @@ async fn initialize_profile_state(
         event_bus.clone(),
         broker_sync_running.clone(),
         health_service.clone(),
-        snapshot_service.clone(),
-        quote_service.clone(),
         portfolio_coordinator.clone(),
-        account_service.clone(),
         goal_service.clone(),
         fx_service.clone(),
-        base_currency.clone(),
-        timezone.clone(),
         secret_store.clone(),
         token_lifecycle.clone(),
         profile_binding.clone(),
         spending_settings_service.clone(),
         categorization_rules_service.clone(),
     )?);
+
+    let data_export_service = Arc::new(wealthfolio_core::exports::DataExportService::new(
+        wealthfolio_core::exports::DataExportSources {
+            accounts: account_service.clone(),
+            activities: activity_service.clone(),
+            holdings: holdings_service.clone(),
+            valuations: valuation_service.clone(),
+            snapshots: snapshot_service.clone(),
+            lots: lots_repository.clone(),
+            assets: asset_service.clone(),
+            alternative_assets: alternative_asset_service.clone(),
+            quotes: quote_service.clone(),
+            net_worth: net_worth_service.clone(),
+            portfolios: portfolio_service.clone(),
+            goals: goal_service.clone(),
+            limits: limits_service.clone(),
+            taxonomies: taxonomy_service.clone(),
+            income: income_service.clone(),
+            spending: Arc::new(
+                wealthfolio_spending::exports::SpendingDataExportSource::new(
+                    taxonomy_service.clone(),
+                    account_service.clone(),
+                    activity_assignments_repo.clone(),
+                    activity_splits_repo.clone(),
+                    activity_events_repo.clone(),
+                    events_service.clone(),
+                    budget_repo,
+                    budget_service.clone(),
+                    spending_analytics_service.clone(),
+                    categorization_rules_service.clone(),
+                ),
+            ),
+            base_currency: base_currency.clone(),
+            timezone: timezone.clone(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    ));
 
     let state = Arc::new(AppState {
         mcp_sessions: Arc::new(Default::default()),
@@ -1170,11 +1238,13 @@ async fn initialize_profile_state(
         categorization_rules_service,
         events_service,
         budget_service,
+        category_merge_service,
         spending_analytics_service,
         spending_insight_service,
+        data_export_service,
         allocation_target_service,
         drift_service,
-        rebalance_service,
+        allocation_worksheet_service,
         pat_repository,
         mcp_audit_repository,
         agent_environment,

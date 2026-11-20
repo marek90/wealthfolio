@@ -11,13 +11,14 @@ use super::addon_traits::AddonServiceTrait;
 use super::models::*;
 use super::network::{perform_addon_network_request, AddonNetworkRequest, AddonNetworkResponse};
 use super::storage_repository::AddonStorageRepositoryTrait;
+use crate::errors::{ADDON_MAIN_FILE_MISSING, ADDON_MANIFEST_MISSING, ADDON_NEEDS_NEWER_VERSION};
 
 // Constants
 pub const ADDON_STORE_API_BASE_URL: &str = "https://wealthfolio.app/api/addons";
 const MAX_ADDON_ARCHIVE_ENTRIES: usize = 256;
 const MAX_ADDON_ARCHIVE_FILE_SIZE: u64 = 5 * 1024 * 1024;
 const MAX_ADDON_ARCHIVE_TOTAL_SIZE: u64 = 25 * 1024 * 1024;
-const MAX_ADDON_ARCHIVE_COMPRESSED_SIZE: usize = 50 * 1024 * 1024;
+pub const MAX_ADDON_ARCHIVE_COMPRESSED_SIZE: usize = 50 * 1024 * 1024;
 const MAX_ADDON_STORAGE_KEY_LEN: usize = 128;
 /// Upper bound on the serialized `{addon_id, key, value}` sync payload — NOT the
 /// raw value length. A storage write emits a device-sync outbox event whose
@@ -254,7 +255,12 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
         (
             "activities",
             "spending",
-            vec!["searchCashActivities"],
+            vec![
+                "searchCashActivities",
+                "assignCategory",
+                "unassignCategory",
+                "setEvent",
+            ],
             "Access to categorized spending transactions",
         ),
         (
@@ -262,6 +268,12 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
             "accounts",
             vec!["getAll", "create"],
             "Access to account information and management",
+        ),
+        (
+            "alternative-assets",
+            "alternativeAssets",
+            vec!["getAll"],
+            "Read-only access to alternative assets and liabilities",
         ),
         (
             "market-data",
@@ -280,6 +292,12 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
             "assets",
             vec!["getProfile", "updateProfile", "updateQuoteMode"],
             "Access to asset profiles and data sources",
+        ),
+        (
+            "allocation-targets",
+            "allocationTargets",
+            vec!["getAll", "getDrift"],
+            "Read-only access to allocation targets and how holdings compare to them",
         ),
         (
             "quotes",
@@ -329,6 +347,10 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
             vec![
                 "isEnabled",
                 "getCategories",
+                "getContext",
+                "getBudget",
+                "getEvents",
+                "getEventTypes",
                 "getReport",
                 "getRules",
                 "saveRule",
@@ -336,6 +358,12 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
                 "rerunRules",
             ],
             "Access to spending reports, categories, and categorization rules",
+        ),
+        (
+            "budgets",
+            "spending",
+            vec!["upsertBudgetTarget"],
+            "Change default and monthly budget targets",
         ),
         (
             "settings",
@@ -850,7 +878,11 @@ fn extract_addon_zip_archive(zip_data: Vec<u8>) -> Result<ExtractedAddonArchive,
             continue;
         }
 
-        let file_name = file.name().to_string();
+        // Archives zipped on Windows (e.g. Compress-Archive) use '\\' as separator.
+        let file_name = file
+            .name()
+            .map_err(|e| format!("Invalid file name for entry {}: {}", i, e))?
+            .replace('\\', "/");
         validated_addon_archive_path(&file_name)?;
 
         if file_name.ends_with(".map") {
@@ -918,7 +950,9 @@ fn extract_addon_zip_archive(zip_data: Vec<u8>) -> Result<ExtractedAddonArchive,
     let metadata = if let Some(manifest_content) = manifest_json {
         parse_manifest_json_metadata(&manifest_content)?
     } else {
-        return Err("ZIP addon must contain a manifest.json file with addon metadata".to_string());
+        return Err(format!(
+            "{ADDON_MANIFEST_MISSING}: ZIP addon must contain a manifest.json file with addon metadata"
+        ));
     };
 
     // Now set the is_main flag correctly based on the metadata.main path
@@ -931,7 +965,7 @@ fn extract_addon_zip_archive(zip_data: Vec<u8>) -> Result<ExtractedAddonArchive,
     let main_file_found = files.iter().any(|f| f.is_main);
     if !main_file_found {
         return Err(format!(
-            "Main addon file '{}' not found. Available files: {}",
+            "{ADDON_MAIN_FILE_MISSING}: Main addon file '{}' not found. Available files: {}",
             main_file,
             files
                 .iter()
@@ -1087,7 +1121,7 @@ fn enforce_min_wealthfolio_version(manifest: &AddonManifest) -> Result<(), Strin
         }
         if !version_meets_minimum(HOST_WEALTHFOLIO_VERSION, required) {
             return Err(format!(
-                "Addon requires Wealthfolio {} or newer, but this version is {}. Update Wealthfolio to use this addon.",
+                "{ADDON_NEEDS_NEWER_VERSION}: Addon requires Wealthfolio {} or newer, but this version is {}. Update Wealthfolio to use this addon.",
                 required, HOST_WEALTHFOLIO_VERSION
             ));
         }
@@ -2049,7 +2083,9 @@ pub fn save_addon_to_staging(
             let mut manifest_found = false;
             for i in 0..archive.len() {
                 if let Ok(file) = archive.by_index(i) {
-                    if file.name() == "manifest.json" || file.name().ends_with("/manifest.json") {
+                    if file.name().is_ok_and(|name| {
+                        name == "manifest.json" || name.ends_with("/manifest.json")
+                    }) {
                         manifest_found = true;
                         break;
                     }

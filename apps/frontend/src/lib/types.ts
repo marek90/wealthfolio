@@ -1,4 +1,9 @@
-import { importActivitySchema, importMappingSchema, parseConfigSchema } from "@/lib/schemas";
+import {
+  activityChargeSchema,
+  importActivitySchema,
+  importMappingSchema,
+  parseConfigSchema,
+} from "@/lib/schemas";
 import * as z from "zod";
 import type { LoanSetup } from "@/adapters/shared/alternative-assets";
 import {
@@ -7,6 +12,7 @@ import {
   ActivityStatus,
   ActivityType,
   AssetKind,
+  type ExportDataType,
   HoldingType,
   QuoteMode,
   SUBTYPE_DISPLAY_NAMES,
@@ -51,6 +57,33 @@ export type { HoldingCategoryFilterId } from "./constants";
 
 export type { ActivitySubtype } from "./constants";
 
+export type { ExportTarget } from "./constants";
+
+/** Export screen choices; each dataset uses only the options that apply to it. */
+export interface ExportOptions {
+  includeArchived: boolean;
+  /** ISO date (YYYY-MM-DD) of the first dated row to include. */
+  startDate?: string;
+  /** ISO date of the last dated row to include. */
+  endDate?: string;
+}
+
+export type ExportDatasetGroup =
+  | "accounts"
+  | "investments"
+  | "net-worth"
+  | "spending"
+  | "planning"
+  | "organization";
+
+export interface ExportDatasetSummary {
+  dataset: ExportDataType;
+  group: ExportDatasetGroup;
+  /** Rows the file would hold; null for daily histories and holdings. */
+  count: number | null;
+  available: boolean;
+}
+
 export interface PortfolioWithAccounts {
   id: string;
   name: string;
@@ -79,7 +112,6 @@ export interface Account {
   name: string;
   accountType: AccountType;
   group?: string; // Optional
-  balance: number;
   currency: string;
   isDefault: boolean;
   isActive: boolean;
@@ -228,6 +260,8 @@ export interface ActivityDetails {
   subtype?: string | null;
   status?: ActivityStatus;
   date: Date;
+  /** Original timestamp when a cash row is adapted for editing. */
+  activityDate?: string;
   quantity: string | null;
   unitPrice: string | null;
   amount: string | null;
@@ -246,6 +280,8 @@ export interface ActivityDetails {
   assetSymbol: string;
   assetName?: string;
   assetQuoteMode?: QuoteMode;
+  /** Currency the asset is quoted in, which can differ from the activity currency. */
+  assetQuoteCcy?: string | null;
   /** Canonical exchange MIC code for asset identification */
   exchangeMic?: string;
   instrumentType?: string;
@@ -266,8 +302,28 @@ export interface ActivityDetails {
   counterpartAmount?: string | null;
   counterpartCurrency?: string | null;
   counterpartFxRate?: string | null;
+  /** A conversion's other row: its asset and units (see conversion-counterpart). */
+  counterpartAssetId?: string | null;
+  counterpartAssetSymbol?: string | null;
+  counterpartQuantity?: string | null;
+  counterpartDate?: string | null;
   subRows?: ActivityDetails[];
+  /**
+   * The account's cash in `cashBalanceCurrency`, as `cashBalanceScope` says:
+   * only when the search asked for balances and the account's holdings come
+   * from its activities.
+   */
+  cashBalance?: string | null;
+  cashBalanceCurrency?: string | null;
+  cashBalanceScope?: CashBalanceScope | null;
 }
+
+/**
+ * What a row's `cashBalance` measures: the cash after the row (`ROW`, cash and
+ * credit-card accounts), or at the end of the row's day in the account
+ * currency (`DAY`, every posted row of that day carries it).
+ */
+export type CashBalanceScope = "ROW" | "DAY";
 
 export interface ActivitySearchResponse {
   data: ActivityDetails[];
@@ -323,7 +379,16 @@ export interface ActivityCreate {
 /**
  * Payload for updating an EXISTING activity.
  */
+export interface ActivitySplitEffect {
+  activityId: string;
+  removedSplits: number;
+  hasRetainedCategoryAssignment: boolean;
+  fingerprint: string;
+}
+
 export interface ActivityUpdate {
+  unlinkTransferPairId?: string;
+  splitReview?: ActivitySplitEffect[];
   id: string;
   accountId: string;
   activityType: string;
@@ -371,6 +436,8 @@ export interface ActivityBulkMutationResult {
 }
 
 export interface InternalTransferPairRequest {
+  splitReview?: ActivitySplitEffect[];
+  editedActivityId?: string;
   transferOutId?: string;
   transferInId?: string;
   sourceGroupId?: string;
@@ -390,6 +457,16 @@ export interface InternalTransferPairRequest {
   transferMode?: "cash";
 }
 
+/** Exactly one of `counterpartActivityId` or `counterpartAccountId` names the other side. */
+export interface ConvertToTransferRequest {
+  activityId: string;
+  counterpartActivityId?: string;
+  counterpartAccountId?: string;
+  /** Required when the other account's currency differs from the activity's. */
+  counterpartAmount?: string | number;
+  splitReview?: ActivitySplitEffect[];
+}
+
 export interface InternalTransferPairResponse {
   transferOut: Activity;
   transferIn: Activity;
@@ -401,15 +478,69 @@ export interface TransferMatchCandidateRequest {
   limit?: number;
 }
 
+export type TransferMatchReason =
+  | "same_asset"
+  | "same_quantity"
+  | "same_amount"
+  | "same_currency"
+  | "same_date"
+  | "same_time"
+  | "same_account"
+  | "cash_fx_conversion";
+
+export type TransferMatchWarning =
+  | { code: "dates_differ"; days: number }
+  | { code: "currencies_differ"; source: string; candidate: string }
+  | { code: "prices_differ" }
+  | { code: "another_match" };
+
 export interface TransferMatchCandidate {
   activity: Activity;
   matchKind: "cash" | "security" | "cash_fx_conversion";
+  /** "high" only for a certain match, which the core decides. */
   confidence: "high" | "medium" | "low";
   score: number;
   reasons: string[];
   warnings: string[];
+  /** `reasons` as codes to translate, in the same order. */
+  reasonCodes?: TransferMatchReason[];
+  /** `warnings` as codes to translate, in the same order. */
+  warningCodes?: TransferMatchWarning[];
+}
+
+export type TransferLinkState =
+  | "linked"
+  | "linked_but_marked_external"
+  | "external"
+  | "needs_counterpart"
+  | "broken_link";
+
+/** A posted transfer with no linked other side, and its best candidates. */
+export interface UnlinkedTransfer {
+  activity: Activity;
+  linkState: TransferLinkState;
+  candidates: TransferMatchCandidate[];
+}
+
+/** The Match transfers review, newest first. */
+export interface TransferMatchReview {
+  /** Pairs certain enough to link together; the only candidate is the other side. */
+  certain: UnlinkedTransfer[];
+  /** The rest, each with its best candidates (possibly none). */
+  needsReview: UnlinkedTransfer[];
+}
+
+export interface TransferPairLinkRequest {
+  activityAId: string;
+  activityBId: string;
+}
+
+export interface LinkTransferPairsResult {
+  linked: { transferInId: string; transferOutId: string }[];
+  errors: { index: number; message: string }[];
 }
 export type ActivityImport = z.infer<typeof importActivitySchema>;
+export type ActivityCharge = z.infer<typeof activityChargeSchema>;
 export type ImportMappingData = z.infer<typeof importMappingSchema>;
 export type ParseConfig = z.infer<typeof parseConfigSchema>;
 export type ImportTemplateScope = "SYSTEM" | "USER";
@@ -668,8 +799,19 @@ export interface Instrument {
 }
 
 export interface MonetaryValue {
-  local: number;
-  base: number;
+  local: number | null;
+  base: number | null;
+}
+
+export interface IncompleteHoldingsAccount {
+  accountId: string;
+  status: "pending" | "unavailable";
+  reasonCode: string;
+}
+
+export interface HoldingsListResponse {
+  holdings: Holding[];
+  incompleteAccounts: IncompleteHoldingsAccount[];
 }
 
 export interface Lot {
@@ -771,7 +913,7 @@ export interface Holding {
   dayChange?: MonetaryValue | null;
   dayChangePct?: number | null;
   prevCloseValue?: MonetaryValue | null;
-  weight: number;
+  weight: number | null;
   asOfDate: string;
   /** Source account IDs for aggregated holdings (portfolio/multi-account scope). Empty for single-account. */
   sourceAccountIds?: string[];
@@ -919,10 +1061,20 @@ export interface Settings {
   insightsOverviewLayout?: Record<string, unknown> | null;
   /** Read-only restore state, absent on older backends. */
   restoreReconnectRequired?: boolean;
+  /** Theme ID (palette and shape); absent on older backends, which show Classic. */
+  themeId?: string;
+  /** Gain and loss colours (green-up, red-up, red-up-blue-down), synced across devices;
+   * absent on older backends, which show green up. */
+  gainColors?: string;
+  /** Appearance mode: light, dark or system. */
   theme: string;
   font: string;
+  /** Text size name; absent on older backends, which show the default size. */
+  textSize?: string;
   language: string;
   formattingRegion: string;
+  /** Formatting regions for amounts in specific currencies, keyed by currency code. */
+  currencyFormattingRegions?: Record<string, string>;
   baseCurrency: string;
   defaultReturnMetric: "twr" | "irr" | "valueReturn";
   timezone: string;
@@ -967,6 +1119,11 @@ export interface Goal {
   createdAt: string;
   updatedAt: string;
   summaryTargetAmount?: number;
+}
+
+/** Omission keeps the existing deadline; explicit null removes it. */
+export interface GoalUpdate extends Omit<Goal, "targetDate"> {
+  targetDate?: string | null;
 }
 
 export interface NewGoal {
@@ -1024,7 +1181,10 @@ export interface IncomeByAsset {
   kind: AssetKind;
   symbol: string;
   name: string;
+  /** Income of every type. */
   income: number;
+  /** The part of `income` that is dividends. */
+  dividendIncome: number;
 }
 
 export interface IncomeByAccount {
@@ -1039,12 +1199,15 @@ export interface IncomeSummary {
   byMonth: Record<string, number>;
   byType: Record<string, number>;
   byAsset: Record<string, IncomeByAsset>;
-  byCurrency: Record<string, number>;
+  byCurrency: Record<string, number>; // In each currency
+  byCurrencyBase: Record<string, number>; // Converted to the base currency
   byAccount: Record<string, IncomeByAccount>;
   totalIncome: number;
   currency: string;
   monthlyAverage: number;
   yoyGrowth: number | null; // Changed from optional to nullable
+  /** Currencies with no exchange rate to `currency`, left out of the converted totals. */
+  unconvertedCurrencies: string[];
 }
 
 // Define custom DateRange type matching react-day-picker's
@@ -1054,6 +1217,12 @@ export interface DateRange {
 }
 
 export type TimePeriod = "1D" | "1W" | "1M" | "3M" | "6M" | "YTD" | "1Y" | "5Y" | "ALL";
+
+export interface FxConversionIssue {
+  itemId: string;
+  fromCurrency: string;
+  toCurrency: string;
+}
 
 export type ValuationStatus = "complete" | "partialUnpriced" | "unavailable";
 
@@ -1100,6 +1269,10 @@ export interface AccountValuation {
 }
 
 export interface CurrentAccountValuation {
+  /** Amounts are known subtotals unless complete. */
+  valueStatus?: ValuationStatus;
+  accountValueStatus?: ValuationStatus;
+  missingFx?: FxConversionIssue[];
   accountId: string;
   accountCurrency: string;
   baseCurrency: string;
@@ -1123,6 +1296,9 @@ export interface CurrentValuationSplit {
 }
 
 export interface CurrentValuationSummary {
+  /** Amounts are known subtotals unless complete. */
+  valueStatus?: ValuationStatus;
+  missingFx?: FxConversionIssue[];
   scopeId: string;
   baseCurrency: string;
   cashBalanceBase: number;
@@ -1216,6 +1392,7 @@ export interface ContributionLimit {
   accountIds?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  isRecurring?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1232,6 +1409,30 @@ export interface DepositsCalculation {
   total: number;
   baseCurrency: string;
   byAccount: Record<string, AccountDeposit>;
+}
+
+export type ContributionTreatment =
+  | "counted"
+  | "excludedByUser"
+  | "internalTransfer"
+  | "notExternal";
+
+export interface ContributionActivityDetail {
+  id: string;
+  accountId: string;
+  activityType: string;
+  activityInstant: string;
+  amount: number | null;
+  currency: string;
+  countedAmount: number;
+  treatment: ContributionTreatment;
+  canExclude: boolean;
+}
+
+export interface ContributionLimitDetails {
+  limit: ContributionLimit;
+  calculation: DepositsCalculation;
+  activities: ContributionActivityDetail[];
 }
 
 // Renamed from CumulativeReturn to match Rust struct ReturnData
@@ -1340,6 +1541,8 @@ export interface NewAsset {
   quoteMode: string;
   quoteCcy: string;
   instrumentType?: string;
+  /** Provider quote type (e.g. "MUTUALFUND") that `instrumentType` collapses; classifies the new asset. */
+  instrumentTypeLabel?: string;
   instrumentSymbol?: string;
   instrumentExchangeMic?: string;
   providerId?: string;
@@ -1360,6 +1563,8 @@ export interface ImportAssetCandidate {
   isin?: string;
   providerId?: string;
   providerSymbol?: string;
+  /** Instrument name from the import file, used when no provider names a new asset. */
+  name?: string;
 }
 
 export type ImportAssetPreviewStatus =
@@ -1429,7 +1634,15 @@ export interface UpdateInfo {
   storeUrl?: string;
   changelogUrl?: string;
   screenshots?: string[];
+  /** Set when something other than the app installs updates. */
+  externalUpdateSource?: ExternalUpdateSource | null;
 }
+
+/** How updates arrive when the in-app updater must leave them to something else. */
+export type ExternalUpdateSource =
+  | { kind: "packager"; explanation: string }
+  | { kind: "flatpak" }
+  | { kind: "packageManager" };
 
 // Platform/Broker type
 export interface Platform {
@@ -1606,10 +1819,12 @@ export interface BreakdownItem {
   category: string;
   /** Display name */
   name: string;
-  /** Value in base currency (positive magnitude) as decimal string */
-  value: string;
+  /** Value in base currency (positive magnitude) */
+  value: number;
   /** Optional: asset ID for individual items */
   assetId?: string;
+  /** First day the item carried a balance (YYYY-MM-DD), when known. */
+  firstValueDate?: string;
   /** Individual items rolled up into this category, for drill-down. */
   children?: BreakdownItem[];
 }
@@ -1618,8 +1833,8 @@ export interface BreakdownItem {
  * Assets section of the balance sheet
  */
 export interface AssetsSection {
-  /** Total assets value in base currency as decimal string */
-  total: string;
+  /** Total assets value in base currency */
+  total: number;
   /** Breakdown by category */
   breakdown: BreakdownItem[];
 }
@@ -1628,8 +1843,8 @@ export interface AssetsSection {
  * Liabilities section of the balance sheet
  */
 export interface LiabilitiesSection {
-  /** Total liabilities value in base currency as decimal string */
-  total: string;
+  /** Total liabilities value in base currency */
+  total: number;
   /** Breakdown by individual liability */
   breakdown: BreakdownItem[];
 }
@@ -1638,14 +1853,17 @@ export interface LiabilitiesSection {
  * Response containing net worth calculation - structured as a balance sheet
  */
 export interface NetWorthResponse {
+  /** Totals and breakdowns are known subtotals unless complete. */
+  valueStatus?: ValuationStatus;
+  missingFx?: FxConversionIssue[];
   /** As-of date for the calculation (ISO format) */
   date: string;
   /** Assets section with total and breakdown */
   assets: AssetsSection;
   /** Liabilities section with total and breakdown */
   liabilities: LiabilitiesSection;
-  /** Net worth (assets - liabilities) as decimal string */
-  netWorth: string;
+  /** Net worth (assets - liabilities) */
+  netWorth: number;
   /** Base currency used for the calculation */
   currency: string;
   /** Oldest valuation date used in the calculation */
@@ -1659,34 +1877,36 @@ export interface NetWorthResponse {
  * Provides component-level breakdown for accurate gain calculation.
  */
 export interface NetWorthHistoryPoint {
+  valueStatus?: ValuationStatus;
+  missingFx?: FxConversionIssue[];
   /** Date of this data point (ISO format) */
   date: string;
 
   // Component values
-  /** Portfolio value from aggregated real-account valuations as decimal string */
-  portfolioValue: string;
-  /** Alternative assets value (properties, vehicles, collectibles, etc.) as decimal string */
-  alternativeAssetsValue: string;
-  /** Total liabilities as decimal string (positive magnitude, subtracted for net worth) */
-  totalLiabilities: string;
+  /** Portfolio value from aggregated real-account valuations */
+  portfolioValue: number;
+  /** Alternative assets value (properties, vehicles, collectibles, etc.) */
+  alternativeAssetsValue: number;
+  /** Total liabilities (positive magnitude, subtracted for net worth) */
+  totalLiabilities: number;
 
   // Totals
-  /** Total assets = portfolio_value + alternative_assets_value as decimal string */
-  totalAssets: string;
-  /** Net worth (assets - liabilities) as decimal string */
-  netWorth: string;
+  /** Total assets = portfolio_value + alternative_assets_value */
+  totalAssets: number;
+  /** Net worth (assets - liabilities) */
+  netWorth: number;
 
   // For gain calculation
-  /** Cumulative net contributions (deposits - withdrawals) from portfolio as decimal string */
-  netContribution: string;
+  /** Cumulative net contributions (deposits - withdrawals) from portfolio */
+  netContribution: number;
 
   /**
-   * Per-category / per-liability values at this date as decimal strings.
+   * Per-category / per-liability values at this date.
    * Keys mirror the point-in-time breakdown: asset category keys (`cash`,
    * `investments`, `properties`, ...) for aggregated asset categories, and the
    * individual liability id (matching `BreakdownItem.assetId`) for each liability.
    */
-  breakdown: Record<string, string>;
+  breakdown: Record<string, number>;
 
   /** Currency */
   currency: string;
@@ -2222,6 +2442,8 @@ export interface SetDefaultProviderRequest {
 export interface FetchedModel {
   id: string;
   name?: string;
+  /** From the provider's model metadata, or the provider's defaults. */
+  capabilities?: ModelCapabilities;
 }
 
 /**
@@ -2281,13 +2503,25 @@ export interface AffectedItem {
   route?: string;
 }
 
-/**
- * A single supporting-evidence row for a diagnostic.
- */
+/** Stable engine reason code and raw interpolation values. */
+export interface ActivityReason {
+  code: string;
+  params?: Record<string, string>;
+}
+
+export interface EngineActivityIssue {
+  activityId: string;
+  kind: "REJECTED" | "OVERSOLD" | "MISSING_AMOUNT";
+  message: string;
+  reason?: ActivityReason;
+}
+
+/** A single supporting-evidence row for a diagnostic. */
 export interface Evidence {
   label: string;
   value: string;
   route?: string;
+  activityIssue?: EngineActivityIssue;
 }
 
 /**
@@ -2535,6 +2769,8 @@ export interface RetirementOverview {
   requiredCapitalAtGoalAge: number;
   leanRequiredCapitalAtGoalAge?: number | null;
   fatRequiredCapitalAtGoalAge?: number | null;
+  /** What active savings goals plan to add each month, from their own plans. */
+  savingsGoalsMonthlyContribution?: number;
   shortfallAtGoalAge: number;
   surplusAtGoalAge: number;
   fundedThroughAge: number | null;
@@ -2636,11 +2872,17 @@ export interface SaveUpPreviewInputDTO {
 }
 
 export interface SaveUpTrajectoryPointDTO {
+  /** YYYY-MM-DD: today, then each month-end, then the target date. */
   date: string;
   nominal: number;
   optimistic: number;
   pessimistic: number;
   target: number;
+  /**
+   * Balance needed on this date to still reach the target on time with the planned
+   * contribution. Not below zero, or below `nominal` when that is negative.
+   */
+  needed: number;
 }
 
 export interface SaveUpProjectionPointDTO extends SaveUpTrajectoryPointDTO {
@@ -2654,7 +2896,6 @@ export interface SaveUpProjectionPointDTO extends SaveUpTrajectoryPointDTO {
 export type TargetScopeType = "all" | "portfolio" | "account";
 export type TriggerType = "manual" | "threshold";
 export type RebalanceGoal = "nearest_band" | "exact_target";
-export type ScenarioMode = "cash_flow_only" | "sell_to_rebalance" | "hybrid";
 export type DriftStatus = "in_band" | "underweight" | "overweight" | "not_targeted";
 export type RebalanceTo = "nearest_band" | "exact_target";
 
@@ -2795,44 +3036,214 @@ export interface DriftHoldingsReport {
   rows: DriftHoldingRow[];
 }
 
-export type RebalanceWarningKind =
-  | "missing_quote"
-  | "no_buy_candidate"
-  | "tagged_cash"
-  | "unclassified_asset"
-  | "partial_classification"
-  | "constraint_skipped_sell"
-  | "turnover_cap_reached";
+// ── Calculated rebalancing worksheet ─────────────────────────────────────────
 
-export interface RebalanceWarning {
-  kind: RebalanceWarningKind;
-  categoryId: string;
-  message: string;
-}
+export type WorksheetMode = "invest_cash" | "rebalance";
+export type AllocationRule = "current_holding_proportions";
+export type WorksheetDirection = "increase" | "reduce";
+export type WorksheetInputMode = "amount" | "quantity";
+export type UnresolvedReason = "no_recorded_security" | "no_eligible_security" | "no_usable_price";
 
-export interface SuggestedManualTrade {
-  action: string;
+export interface UnresolvedCategoryAmount {
   categoryId: string;
   categoryName: string;
-  assetId?: string | null;
-  accountId?: string | null;
-  holdingId?: string | null;
-  symbol?: string | null;
-  name?: string | null;
-  quantity?: number | null;
-  estimatedPrice?: number | null;
-  estimatedAmount: number;
-  reason: string;
+  amount: number;
+  reason: UnresolvedReason;
 }
 
-export interface RebalancePlan {
-  targetId: string;
+export interface AdjustmentScaling {
+  /** The share of the category gaps the selected cash covers, when it covers less than all. */
+  cashFactor?: number | null;
+  reductionFactor?: number | null;
+  increaseFactor?: number | null;
+}
+
+export interface BelowOneUnitSecurity {
+  assetId: string;
+  symbol: string;
+  /** Signed amount it came to before the quantity was floored. */
+  amount: number;
+}
+
+export interface CalculatedAdjustment {
+  lineId: string;
+  direction: WorksheetDirection;
+  assetId: string;
+  symbol: string;
+  /** Null when several accounts could receive the increase and the user places it. */
+  accountId?: string | null;
+  /** Signed, in base currency. Negative for a reduction. */
+  amount: number;
+  quantity: number;
+  unitPrice: number;
+  isBelowMinimum: boolean;
+}
+
+export interface AccountFundingShortfall {
+  accountId: string;
+  required: number;
+  available: number;
+}
+
+export interface CalculatedAdjustments {
+  mode: WorksheetMode;
+  rule: AllocationRule;
+  adjustments: CalculatedAdjustment[];
+  unresolved: UnresolvedCategoryAmount[];
+  scaling: AdjustmentScaling;
+  remainingCash: number;
+  fundingShortfalls: AccountFundingShortfall[];
+  /** Securities sized below one whole unit. Absent from drafts saved before it existed. */
+  belowOneUnit?: BelowOneUnitSecurity[];
+}
+
+export interface WorksheetCashInput {
+  trackedCashToUse: number;
+  /** Hypothetical cash not recorded anywhere, keyed by the account it would arrive in. */
+  externalContribution: Record<string, number>;
+  /**
+   * Tracked cash each selected account may spend. When present it replaces
+   * `trackedCashToUse`: an account left out spends none, and each account's
+   * funding is checked against its own amount.
+   */
+  trackedCashByAccount?: Record<string, number>;
+}
+
+export interface AllocationWorksheetLineInput {
+  lineId: string;
+  direction: WorksheetDirection;
+  assetId: string;
+  /** Omitted for an indicative portfolio preview before account placement. */
+  accountId?: string;
+  inputMode: WorksheetInputMode;
+  value: number;
+}
+
+export type WorksheetWarningKind =
+  | "stale_quote"
+  | "stale_fx"
+  | "partial_classification"
+  | "unclassified_asset"
+  | "external_contribution"
+  | "below_minimum_line"
+  | "turnover_exceeded"
+  | "avoid_constraint"
+  | "insufficient_funding"
+  | "account_funding"
+  | "cash_unavailable"
+  | "below_one_unit";
+
+/** The figures a warning states. Amounts are in the planning currency. */
+export interface WorksheetWarningFacts {
+  amount?: number;
+  limit?: number;
+  unitPrice?: number;
+  shareBps?: number;
+  limitBps?: number;
+  accountId?: string;
+  /** The date a dated price or rate is from. */
+  asOf?: string;
+  reason?: string;
+}
+
+export interface WorksheetWarning {
+  id: string;
+  kind: WorksheetWarningKind;
+  lineId?: string | null;
+  /** The core's English wording; the worksheet words the facts itself. */
+  message: string;
+  facts?: WorksheetWarningFacts;
+  acknowledgementRequired: boolean;
+}
+
+export interface WorksheetPricingSource {
+  id: string;
+  sourceType: string;
+  value: number;
+  fromCurrency: string;
+  toCurrency: string;
+  timestamp: string;
+  isStale: boolean;
+}
+
+export interface WorksheetCategoryExposure {
+  categoryId: string;
+  categoryName: string;
+  weightBps: number;
+  valueDelta: number;
+  isUnclassified: boolean;
+}
+
+export interface AllocationWorksheetLineResult {
+  lineId: string;
+  direction: WorksheetDirection;
+  assetId: string;
+  accountId: string | null;
+  symbol: string;
+  name: string;
+  inputMode: WorksheetInputMode;
+  inputValue: number;
+  quantity: number;
+  unitPrice: number;
+  estimatedAmount: number;
+  contractMultiplier: number;
+  quoteSource: WorksheetPricingSource;
+  fxSource?: WorksheetPricingSource | null;
+  categoryExposures: WorksheetCategoryExposure[];
+}
+
+export interface WorksheetCategoryResult {
+  categoryId: string;
+  categoryName: string;
+  color: string;
+  targetBps: number;
+  currentValue: number;
+  projectedValue: number;
+  currentBps: number;
+  projectedBps: number;
+  currentDifferenceBps: number;
+  projectedDifferenceBps: number;
+  isCash: boolean;
+  isUnclassified: boolean;
+}
+
+export interface WorksheetSourceRecord {
+  sourceType: string;
+  id: string;
+  version: string;
+  details: string;
+}
+
+/** Where one account stands once the worksheet is applied. A negative `remaining` is funding the account needs. */
+export interface WorksheetAccountFunding {
+  accountId: string;
   availableCash: number;
-  cashUsed: number;
+  externalCash: number;
+  reductionProceeds: number;
+  increases: number;
+  remaining: number;
+}
+
+export interface AllocationWorksheetResult {
+  targetId: string;
+  targetName: string;
+  baseCurrency: string;
+  calculatedAt: string;
+  sourceFingerprint: string;
+  resolvedAccountIds: string[];
+  observedTrackedCash: number;
+  /** What each selected account records, before any amount set for it. */
+  recordedCashByAccount: Record<string, number>;
+  trackedCashToUse: number;
+  externalContribution: number;
+  increaseTotal: number;
+  reductionTotal: number;
   cashRemaining: number;
-  maxDriftBpsBefore: number;
-  maxDriftBpsAfter: number;
-  trades: SuggestedManualTrade[];
-  warnings: RebalanceWarning[];
-  afterBpsByCategory: Record<string, number>;
+  maxDifferenceBpsBefore: number;
+  maxDifferenceBpsAfter: number;
+  lines: AllocationWorksheetLineResult[];
+  categories: WorksheetCategoryResult[];
+  accountFunding: WorksheetAccountFunding[];
+  warnings: WorksheetWarning[];
+  sourceRecords: WorksheetSourceRecord[];
 }

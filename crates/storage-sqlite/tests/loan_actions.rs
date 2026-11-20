@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
+mod common;
+
 use std::sync::Arc;
 
 use chrono::NaiveDate;
@@ -49,7 +51,7 @@ struct Fixture {
     repository: Arc<AlternativeAssetRepository>,
     assets: Arc<AssetRepository>,
     quotes: Arc<dyn QuoteServiceTrait>,
-    _dir: tempfile::TempDir,
+    _dir: common::TestDir,
 }
 
 impl Fixture {
@@ -111,7 +113,7 @@ impl Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::TestDir::new();
     let access = db::DbAccess::plaintext(dir.path().join("app.db").to_str().unwrap());
     access.prepare().unwrap();
     access.run_migrations().unwrap();
@@ -724,6 +726,7 @@ async fn deleting_the_loan_untags_its_payments_and_keeps_the_withdrawals() {
     let loan = fixture().await;
     loan.add_account("chequing", "CASH");
     loan.add_withdrawal("pay", "chequing", "2026-03-01", "600", Some("mortgage"));
+    loan.events.clear();
     loan.service
         .delete_alternative_asset("mortgage")
         .await
@@ -731,6 +734,30 @@ async fn deleting_the_loan_untags_its_payments_and_keeps_the_withdrawals() {
     let metadata = loan.activity_metadata("pay");
     assert!(metadata.get("loan_payment").is_none());
     assert_eq!(metadata["flow"]["is_external"], true);
+    // The untagged withdrawal's account is recalculated, as unlinking it is.
+    let changed: Vec<_> = loan
+        .events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            DomainEvent::ActivitiesChanged {
+                account_ids,
+                earliest_activity_at_utc,
+                ..
+            } => Some((
+                account_ids,
+                earliest_activity_at_utc.map(|at| at.date_naive()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        changed,
+        vec![(
+            vec!["chequing".to_string()],
+            NaiveDate::from_ymd_opt(2026, 3, 1)
+        )]
+    );
 }
 
 #[tokio::test]

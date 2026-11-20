@@ -66,6 +66,7 @@ pub mod error;
 pub mod eval;
 #[cfg(feature = "test-utils")]
 pub mod live_evals;
+mod model_families;
 pub mod provider_model;
 pub mod provider_service;
 mod provider_urls;
@@ -96,8 +97,8 @@ pub use title_generator::{
     TitleGeneratorTrait,
 };
 pub use tools::{
-    ToolSet, DEFAULT_PAGE_SIZE, DEFAULT_VALUATIONS_DAYS, MAX_ACCOUNTS, MAX_ACTIVITIES_ROWS,
-    MAX_GOALS, MAX_HOLDINGS, MAX_INCOME_RECORDS, MAX_VALUATIONS_POINTS,
+    ToolSet, DEFAULT_PAGE_SIZE, DEFAULT_VALUATIONS_DAYS, MAX_ACTIVITIES_ROWS, MAX_GOALS,
+    MAX_HOLDINGS, MAX_INCOME_RECORDS, MAX_VALUATIONS_POINTS,
 };
 pub use types::{
     // Streaming and request types

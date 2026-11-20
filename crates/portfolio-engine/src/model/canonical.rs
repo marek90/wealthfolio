@@ -6,7 +6,6 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::facts::RawFxConversion;
 use super::policy::{CostBasisMethod, Policy};
 use super::scalar::{AccountId, ActivityId, AssetId, Currency};
 
@@ -21,6 +20,8 @@ pub struct CanonicalFacts {
     /// Posted activities in the total order (local date, timestamp, id).
     pub(crate) activities: Vec<Activity>,
     pub(crate) transfer_pairs: TransferPairs,
+    /// Conversion pairs by `source_group_id`, and the rows refused (rules R7.5).
+    pub(crate) conversions: Conversions,
     pub(crate) quotes: Vec<QuoteObservation>,
     pub(crate) fx_rates: Vec<FxObservation>,
     pub(crate) observed_snapshots: Vec<ObservedSnapshot>,
@@ -46,6 +47,10 @@ impl CanonicalFacts {
 
     pub fn transfer_pairs(&self) -> &TransferPairs {
         &self.transfer_pairs
+    }
+
+    pub fn conversions(&self) -> &Conversions {
+        &self.conversions
     }
 
     pub fn quotes(&self) -> &[QuoteObservation] {
@@ -105,6 +110,9 @@ pub struct AssetFacts {
     pub allows_negative_lots: bool,
     /// Equity-like assets need explicit POSITION_OPEN/CLOSE intent to go short.
     pub requires_explicit_short_intent: bool,
+    /// Whether the asset is an option contract, as its instrument type says.
+    #[serde(default)]
+    pub instrument: InstrumentClass,
 }
 
 impl AssetFacts {
@@ -118,8 +126,23 @@ impl AssetFacts {
             contract_multiplier: Decimal::ONE,
             allows_negative_lots: false,
             requires_explicit_short_intent: false,
+            instrument: InstrumentClass::Untyped,
         }
     }
+}
+
+/// What an asset's instrument type says about it, for the rules that apply
+/// only to option contracts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InstrumentClass {
+    /// An option contract.
+    Option,
+    /// A typed instrument that is not an option (equity, bond, crypto, ...).
+    NotOption,
+    /// No instrument type: a legacy or custom asset that may be either.
+    #[default]
+    Untyped,
 }
 
 /// The closed vocabulary of 14 activity types.
@@ -168,7 +191,7 @@ impl ActivityKind {
     }
 }
 
-/// The 12 canonical subtypes (broker aliases collapse onto these).
+/// The 14 canonical subtypes (broker aliases collapse onto these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Subtype {
@@ -188,6 +211,11 @@ pub enum Subtype {
     /// On an ADJUSTMENT: a taxable distribution reinvested without new
     /// units, which raises the asset's cost basis (rules R7.4).
     NotionalDistribution,
+    /// On an ADJUSTMENT: the asset and units that leave in a conversion
+    /// (rules R7.5).
+    ConversionOut,
+    /// On an ADJUSTMENT: the asset and units that arrive in a conversion.
+    ConversionIn,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -222,9 +250,6 @@ pub struct Activity {
     pub source_group_id: Option<String>,
     /// `metadata.flow.is_external` when present.
     pub external_transfer: Option<bool>,
-    /// The import linker's record of a same-account cash FX conversion.
-    #[serde(default)]
-    pub fx_conversion: Option<RawFxConversion>,
     /// Transfer of a non-cash asset (cash placeholders count as cash).
     pub is_security_transfer: bool,
     /// Provenance used to rank competing split rows (`resolve_surfaces`).
@@ -241,7 +266,7 @@ pub struct TransferPair {
     pub out_account: AccountId,
     pub in_account: AccountId,
     pub security: bool,
-    /// A same-account cash FX conversion the import linker recorded as
+    /// A same-account cash FX conversion whose legs are both explicitly
     /// internal: the money only changes currency, so neither leg moves net
     /// contribution.
     #[serde(default)]
@@ -285,6 +310,58 @@ impl TransferPairs {
         self.group_by_activity
             .get(activity)
             .and_then(|group| self.by_group.get(group))
+    }
+}
+
+/// A conversion (rules R7.5): two posted rows of one account and day,
+/// folded as one event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversionPair {
+    pub group_id: String,
+    /// The `CONVERSION_OUT` row.
+    pub out_activity: ActivityId,
+    /// The `CONVERSION_IN` row.
+    pub in_activity: ActivityId,
+    pub account: AccountId,
+}
+
+/// Resolved conversions, keyed by either row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Conversions {
+    pairs: Vec<ConversionPair>,
+    pair_by_activity: BTreeMap<ActivityId, usize>,
+    /// Conversion rows rejected before the fold, with why.
+    rejected: BTreeMap<ActivityId, String>,
+}
+
+impl Conversions {
+    pub(crate) fn insert(&mut self, pair: ConversionPair) {
+        let index = self.pairs.len();
+        self.pair_by_activity
+            .insert(pair.out_activity.clone(), index);
+        self.pair_by_activity
+            .insert(pair.in_activity.clone(), index);
+        self.pairs.push(pair);
+    }
+
+    pub(crate) fn reject(&mut self, activity: ActivityId, reason: String) {
+        self.rejected.entry(activity).or_insert(reason);
+    }
+
+    /// Pairs in group order.
+    pub fn iter(&self) -> impl Iterator<Item = &ConversionPair> {
+        self.pairs.iter()
+    }
+
+    pub fn pair_for(&self, activity: &ActivityId) -> Option<&ConversionPair> {
+        self.pair_by_activity
+            .get(activity)
+            .and_then(|index| self.pairs.get(*index))
+    }
+
+    /// Why a conversion row is rejected before the fold, if it is.
+    pub fn rejection(&self, activity: &ActivityId) -> Option<&str> {
+        self.rejected.get(activity).map(String::as_str)
     }
 }
 

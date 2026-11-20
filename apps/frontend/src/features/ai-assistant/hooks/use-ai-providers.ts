@@ -1,3 +1,4 @@
+import i18n from "i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getAiProviders,
@@ -12,6 +13,7 @@ import {
 import type { UpdateProviderSettingsRequest, SetDefaultProviderRequest } from "@/lib/types";
 import { QueryKeys } from "@/lib/query-keys";
 import { toast } from "@wealthfolio/ui/components/ui/use-toast";
+import { backendErrorText } from "@/lib/backend-error";
 
 const AI_PROVIDERS_KEY = [QueryKeys.AI_PROVIDERS] as const;
 
@@ -68,16 +70,16 @@ export function useAiProviderApiKey(providerId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: AI_PROVIDERS_KEY });
       toast({
-        title: "API key saved",
+        title: i18n.t("common:notifications.api_key_saved"),
         variant: "success",
         duration: 1500,
       });
     },
     onError: (error) => {
-      logger.error(`Failed to save API key for ${providerId}: ${error}`);
+      logger.error("Failed to save AI provider API key");
       toast({
-        title: "Failed to save API key",
-        description: error instanceof Error ? error.message : String(error),
+        title: i18n.t("common:notifications.failed_to_save_api_key"),
+        description: backendErrorText(error, i18n.t),
         variant: "destructive",
       });
     },
@@ -90,16 +92,16 @@ export function useAiProviderApiKey(providerId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: AI_PROVIDERS_KEY });
       toast({
-        title: "API key deleted",
+        title: i18n.t("common:notifications.api_key_deleted"),
         variant: "success",
         duration: 1500,
       });
     },
     onError: (error) => {
-      logger.error(`Failed to delete API key for ${providerId}: ${error}`);
+      logger.error("Failed to delete AI provider API key");
       toast({
-        title: "Failed to delete API key",
-        description: error instanceof Error ? error.message : String(error),
+        title: i18n.t("common:notifications.failed_to_delete_api_key"),
+        description: backendErrorText(error, i18n.t),
         variant: "destructive",
       });
     },

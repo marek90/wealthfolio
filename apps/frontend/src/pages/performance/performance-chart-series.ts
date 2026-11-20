@@ -11,7 +11,6 @@ export interface ComparableChartDataItem {
   id: string;
   name: string;
   returns: ReturnData[];
-  isReference?: boolean;
 }
 
 type ChartSeriesGroup = "marketComparison" | "valueReturn";
@@ -162,7 +161,27 @@ export function comparablePerformanceChartData(
       id: item.id,
       name: item.name,
       returns,
-      isReference: item.mode === "symbolPriceBased",
     };
   });
+}
+
+/**
+ * Earliest start represented by the given results. Call with loaded all-time
+ * results to anchor the custom-range calendar without changing the ALL sentinel
+ * kept in selection state.
+ */
+export function earliestPerformanceStartDate(
+  results: (PerformanceResult | null | undefined)[] | null | undefined,
+): Date | undefined {
+  let earliestMs: number | undefined;
+  for (const result of results ?? []) {
+    const iso = result?.period?.startDate ?? result?.series?.[0]?.date;
+    if (!iso) continue;
+    const ms = new Date(`${iso.slice(0, 10)}T00:00:00`).getTime();
+    if (Number.isNaN(ms)) continue;
+    if (earliestMs === undefined || ms < earliestMs) {
+      earliestMs = ms;
+    }
+  }
+  return earliestMs === undefined ? undefined : new Date(earliestMs);
 }

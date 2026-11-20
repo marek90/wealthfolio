@@ -9,10 +9,11 @@ use axum::{
 };
 use wealthfolio_core::activities::{
     import_type, Activity, ActivityBulkMutationRequest, ActivityBulkMutationResult, ActivityImport,
-    ActivitySearchResponse, ActivityUpdate, ImportActivitiesResult, ImportAssetCandidate,
-    ImportAssetPreviewItem, ImportMappingData, ImportTemplateData, InternalTransferPairRequest,
-    InternalTransferPairResponse, NewActivity, ParseConfig, ParsedCsvResult,
-    TransferMatchCandidate, TransferMatchCandidateRequest,
+    ActivitySearchResponse, ActivitySplitEffect, ActivityUpdate, ConvertToTransferRequest,
+    ImportActivitiesResult, ImportAssetCandidate, ImportAssetPreviewItem, ImportMappingData,
+    ImportTemplateData, InternalTransferPairRequest, InternalTransferPairResponse,
+    LinkTransferPairsResult, NewActivity, ParseConfig, ParsedCsvResult, TransferMatchCandidate,
+    TransferMatchCandidateRequest, TransferMatchReview, TransferPairLinkRequest,
 };
 use wealthfolio_core::utils::time_utils::{
     local_date_range_utc_bounds, parse_user_timezone_or_default,
@@ -57,6 +58,9 @@ struct ActivitySearchBody {
     instrument_type_filter: Option<StringOrVec>,
     #[serde(rename = "activityIdFilter")]
     activity_id_filter: Option<StringOrVec>,
+    /// Cash balance after each row, for one cash or credit-card account.
+    #[serde(rename = "includeCashBalances")]
+    include_cash_balances: Option<bool>,
 }
 
 async fn search_activities(
@@ -101,7 +105,7 @@ async fn search_activities(
     let (date_from_utc, date_to_utc_exclusive) =
         local_date_range_utc_bounds(date_from_parsed, date_to_parsed, tz)?;
 
-    let resp = state.activity_service.search_activities_in_utc_range(
+    let mut resp = state.activity_service.search_activities_in_utc_range(
         body.page,
         body.page_size,
         account_ids,
@@ -114,6 +118,12 @@ async fn search_activities(
         instrument_types,
         activity_ids,
     )?;
+    if body.include_cash_balances.unwrap_or(false) {
+        state
+            .activity_service
+            .attach_cash_balances(&mut resp)
+            .await?;
+    }
     Ok(Json(resp))
 }
 
@@ -126,6 +136,29 @@ async fn create_activity(
 
     // Domain events handle asset enrichment and portfolio recalculation
     Ok(Json(created))
+}
+
+async fn review_activity_split_effects(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(activities): Json<Vec<ActivityUpdate>>,
+) -> ApiResult<Json<Vec<Vec<ActivitySplitEffect>>>> {
+    Ok(Json(
+        state
+            .activity_service
+            .review_activity_split_effects_batch(activities)?,
+    ))
+}
+
+async fn review_internal_transfer_pair_split_effects(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(request): Json<InternalTransferPairRequest>,
+) -> ApiResult<Json<Vec<ActivitySplitEffect>>> {
+    Ok(Json(
+        state
+            .activity_service
+            .review_internal_transfer_pair_split_effects(request)
+            .await?,
+    ))
 }
 
 async fn update_activity(
@@ -179,6 +212,14 @@ async fn find_transfer_match_candidates(
     Ok(Json(candidates))
 }
 
+async fn review_transfer_matches(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> ApiResult<Json<TransferMatchReview>> {
+    Ok(Json(
+        state.activity_service.review_transfer_matches().await?,
+    ))
+}
+
 async fn save_internal_transfer_pair(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(request): Json<InternalTransferPairRequest>,
@@ -186,6 +227,30 @@ async fn save_internal_transfer_pair(
     let pair = state
         .activity_service
         .save_internal_transfer_pair(request)
+        .await?;
+    state.health_service.clear_cache().await;
+    Ok(Json(pair))
+}
+
+async fn review_convert_to_transfer_split_effects(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(request): Json<ConvertToTransferRequest>,
+) -> ApiResult<Json<Vec<ActivitySplitEffect>>> {
+    Ok(Json(
+        state
+            .activity_service
+            .review_convert_to_transfer_split_effects(request)
+            .await?,
+    ))
+}
+
+async fn convert_to_internal_transfer(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(request): Json<ConvertToTransferRequest>,
+) -> ApiResult<Json<InternalTransferPairResponse>> {
+    let pair = state
+        .activity_service
+        .convert_to_internal_transfer(request)
         .await?;
     state.health_service.clear_cache().await;
     Ok(Json(pair))
@@ -209,6 +274,26 @@ async fn link_transfer_activities(
     state.health_service.clear_cache().await;
     // Domain events handle portfolio recalculation
     Ok(Json(pair))
+}
+
+#[derive(serde::Deserialize)]
+struct LinkTransferPairsBody {
+    pairs: Vec<TransferPairLinkRequest>,
+}
+
+async fn link_transfer_pairs(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<LinkTransferPairsBody>,
+) -> ApiResult<Json<LinkTransferPairsResult>> {
+    let result = state
+        .activity_service
+        .link_transfer_pairs(body.pairs)
+        .await?;
+    if !result.linked.is_empty() {
+        state.health_service.clear_cache().await;
+    }
+    // Domain events handle portfolio recalculation
+    Ok(Json(result))
 }
 
 async fn unlink_transfer_activities(
@@ -451,6 +536,14 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/activities/search", post(search_activities))
         .route("/activities", post(create_activity).put(update_activity))
         .route("/activities/bulk", post(save_activities))
+        .route(
+            "/activities/split-effects",
+            post(review_activity_split_effects),
+        )
+        .route(
+            "/activities/transfer-pair/split-effects",
+            post(review_internal_transfer_pair_split_effects),
+        )
         .route("/activities/{id}", delete(delete_activity))
         .route(
             "/activities/{id}/transfer-pair",
@@ -461,10 +554,20 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
             post(save_internal_transfer_pair),
         )
         .route(
+            "/activities/convert-to-transfer",
+            post(convert_to_internal_transfer),
+        )
+        .route(
+            "/activities/convert-to-transfer/split-effects",
+            post(review_convert_to_transfer_split_effects),
+        )
+        .route(
             "/activities/transfer-match-candidates",
             post(find_transfer_match_candidates),
         )
+        .route("/activities/transfer-review", get(review_transfer_matches))
         .route("/activities/link", post(link_transfer_activities))
+        .route("/activities/link-pairs", post(link_transfer_pairs))
         .route("/activities/unlink", post(unlink_transfer_activities))
         .route(
             "/activities/import/check",

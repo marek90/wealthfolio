@@ -1,3 +1,5 @@
+import { DiscardChangesDialog } from "@/components/discard-changes-dialog";
+import { isActivityEditCancelled } from "@/features/spending/components/activity-split-review-provider";
 import { getTransferRate } from "../../hooks/use-internal-transfer-currencies";
 import { logger } from "@/adapters";
 import { buildAssetResolutionInput } from "@/lib/asset-resolution-input";
@@ -26,18 +28,31 @@ import {
 } from "@/lib/activity-utils";
 import { buildOccSymbol, isValidOptionExpiration, parseOccSymbol } from "@/lib/occ-symbol";
 import { generateId } from "@/lib/id";
+import { normalizeCurrency } from "@/lib/utils";
 import type { ActivityCreate, ActivityDetails, ActivityUpdate } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useForm, type Resolver, type SubmitHandler } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import { useActivityMutations } from "../../hooks/use-activity-mutations";
+import { isConversionActivity } from "../../utils/conversion-counterpart";
+import { ActivityForm } from "../activity-form";
+import { CashActivityReclassification } from "../cash-activity-reclassification";
 import { showValidationToast, type AccountSelectOption } from "../forms/fields";
-import { newActivitySchema, type NewActivityFormValues } from "../forms/schemas";
+import { createActivitySchemas, type NewActivityFormValues } from "../forms/schemas";
+import type { IncomeAmountTypedLast } from "../forms/use-income-amounts";
+import { calculateIncomeReceivedAmount } from "@/lib/activity-final-amount";
+import { chargeLineDefaults, chargeLinesMetadata } from "@/lib/activity-charges";
 import { MobileActivitySteps } from "./mobile-activity-steps";
-import { getMobileActivityAssetId, hasStoredCustomTradeAmount } from "./mobile-activity-utils";
+import {
+  getMobileActivityAssetId,
+  hasStoredCustomTradeAmount,
+  mobileChargeLineCategories,
+} from "./mobile-activity-utils";
+import { Spinner } from "@wealthfolio/ui";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 
 interface MobileActivityFormProps {
   accounts: AccountSelectOption[];
@@ -54,6 +69,7 @@ interface MobileActivityFormProps {
 
 export interface TransferValidationInput {
   activityType: string;
+  accountId?: string;
   transferMode?: string;
   isExternal?: boolean;
   direction?: string;
@@ -109,8 +125,7 @@ function isValidMobileActivityType(
 }
 
 /**
- * Validates transfer-specific fields that the Zod schema can't enforce
- * (transferActivitySchema lives inside a discriminatedUnion which doesn't support superRefine).
+ * Validates transfer-specific fields that the Zod schema doesn't enforce.
  * Returns null if valid, or the first error found.
  */
 export function validateTransferFields(
@@ -200,11 +215,35 @@ export function validateTransferFields(
     }
   }
 
+  if (!isExternal && input.accountId && input.accountId === input.toAccountId) {
+    if (!isCash) {
+      return {
+        field: "toAccountId",
+        message: tr(
+          "activity:form.err_accounts_different",
+          "Source and destination accounts must be different.",
+        ),
+      };
+    }
+    if (
+      normalizeCurrency(input.sourceCurrency ?? undefined) ===
+      normalizeCurrency(input.destinationCurrency ?? undefined)
+    ) {
+      return {
+        field: "destinationCurrency",
+        message: tr(
+          "activity:form.err_same_account_currencies",
+          "Choose different currencies for a same-account transfer.",
+        ),
+      };
+    }
+  }
+
   return null;
 }
 
 /**
- * Validates trade fields that the Zod schema can't enforce in a discriminatedUnion.
+ * Validates trade fields that the Zod schema doesn't enforce.
  * For options: requires all structured fields. For stocks/bonds: requires assetId.
  */
 export function validateTradeFields(
@@ -317,10 +356,15 @@ export function MobileActivityForm({
   const shouldStartOnDetails = Boolean(activity?.id || startOnDetails) && !needsTypeSelection;
   const initialStep = shouldStartOnDetails ? 2 : 1;
   const [currentStep, setCurrentStep] = useState(initialStep);
+  // A conversion is two rows: the sheet form records and edits it.
+  const [recordsConversion, setRecordsConversion] = useState(false);
   // True when an existing stored total is custom or after the user types in
   // the amount field. Owned here so step navigation cannot reset it before
   // submit reads it.
   const amountWasEdited = useRef(false);
+  // Which cash income amount (before tax or received) the user typed last;
+  // owned here for the same reason.
+  const incomeAmountTypedLast = useRef<IncomeAmountTypedLast>("gross");
   const {
     addActivityMutation,
     updateActivityMutation,
@@ -396,8 +440,10 @@ export function MobileActivityForm({
           : activity?.unitPrice
             ? Number(activity.unitPrice)
             : undefined,
-      fee: activity?.fee ? Number(activity.fee) : 0,
-      tax: activity?.tax ? Number(activity.tax) : 0,
+      // Saved charges arrive as strings: "0" opens empty too, so typing replaces it.
+      fee: Number(activity?.fee) || undefined,
+      tax: Number(activity?.tax) || undefined,
+      ...chargeLineDefaults(activity, mobileChargeLineCategories(activity?.activityType)),
       comment: activity?.comment ?? null,
       subtype: activity?.subtype ?? null,
       fxRate,
@@ -405,11 +451,16 @@ export function MobileActivityForm({
         isTransferType && !isSecurityTransferActivity
           ? undefined
           : getMobileActivityAssetId(activity),
+      ...(activity?.activityType === ActivityType.SELL &&
+        !isOptionActivity &&
+        activity.assetId && { existingAssetId: activity.assetId }),
       activityDate: activity?.date ? new Date(activity.date) : new Date(),
       currency: activity?.currency ?? "",
       quoteMode:
         activity?.assetQuoteMode === QuoteMode.MANUAL ? QuoteMode.MANUAL : QuoteMode.MARKET,
       exchangeMic: activity?.exchangeMic,
+      symbolInstrumentType: activity?.instrumentType ?? undefined,
+      symbolQuoteCcy: activity?.assetQuoteCcy ?? activity?.currency ?? undefined,
       showCurrencySelect: false,
       ...(isTransferType && {
         transferMode: initialTransferMode,
@@ -425,7 +476,6 @@ export function MobileActivityForm({
       ...(isOptionActivity && {
         assetType: "option" as const,
         assetKind: "OPTION",
-        symbolQuoteCcy: activity?.currency ?? undefined,
         underlyingSymbol: parsedOcc?.underlying ?? "",
         strikePrice: parsedOcc?.strikePrice,
         expirationDate: parsedOcc?.expiration,
@@ -436,19 +486,20 @@ export function MobileActivityForm({
       ...(isBondActivity && {
         assetType: "bond" as const,
         assetKind: "BOND",
-        symbolQuoteCcy: activity?.currency ?? undefined,
       }),
     };
   }, [activity]);
 
+  const schema = useMemo(() => createActivitySchemas(t).newActivity, [t]);
+
   const form = useForm<NewActivityFormValues>({
-    resolver: zodResolver(newActivitySchema) as Resolver<NewActivityFormValues>,
+    resolver: zodResolver(schema) as Resolver<NewActivityFormValues>,
     defaultValues: defaultValues as any,
   });
   const { reset } = form;
   const storedAmountIsCustom = useMemo(() => hasStoredCustomTradeAmount(activity), [activity]);
 
-  useEffect(() => {
+  useEffectOnChange(() => {
     if (!open) return;
 
     const nextDefaultValues = activity?.date
@@ -456,8 +507,10 @@ export function MobileActivityForm({
       : { ...defaultValues, activityDate: new Date() };
 
     amountWasEdited.current = storedAmountIsCustom;
+    incomeAmountTypedLast.current = "gross";
     reset(nextDefaultValues);
     setCurrentStep(shouldStartOnDetails ? 2 : 1);
+    setRecordsConversion(false);
   }, [activity?.date, defaultValues, open, reset, shouldStartOnDetails, storedAmountIsCustom]);
 
   // Transfers may target any account (incl. spending/saving accounts the Spending
@@ -467,10 +520,22 @@ export function MobileActivityForm({
   // whatever was typed belonged to the previous type, so amount ownership
   // resets and the calculated trade total takes over again. Without this, a
   // deposit amount typed before switching to BUY/SELL would be submitted as
-  // an attested custom trade total.
-  useEffect(() => {
+  // an attested custom trade total. Only on a switch: a phone screen shown
+  // again replays its effects, which would drop a total typed after the switch.
+  useEffectOnChange(() => {
     if (form.getFieldState("activityType").isDirty) {
       amountWasEdited.current = false;
+      const categories = mobileChargeLineCategories(watchedActivityType);
+      if (!categories.includes("fee")) {
+        form.setValue("feeLines", undefined, { shouldDirty: true });
+      }
+      if (!categories.includes("tax")) {
+        form.setValue("taxLines", undefined, { shouldDirty: true });
+      }
+      // Dividend has no fee field; a previous type's fee must not stay hidden.
+      if (watchedActivityType === ActivityType.DIVIDEND && (form.getValues("fee") ?? 0) !== 0) {
+        form.setValue("fee", 0, { shouldDirty: true });
+      }
     }
   }, [form, watchedActivityType]);
   const effectiveAccounts =
@@ -479,12 +544,30 @@ export function MobileActivityForm({
       : accounts;
 
   // Handle sheet close - reset form and step
-  const handleOpenChange = (isOpen: boolean) => {
-    if (!isOpen) {
-      setCurrentStep(shouldStartOnDetails ? 2 : 1);
-      form.reset(defaultValues);
-    }
+  // Read during render so the form tracks them for the close check below.
+  // A successful save resets the form and closes it itself; a failed one keeps the input.
+  const { dirtyFields } = form.formState;
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const closeSheet = () => {
+    setCurrentStep(shouldStartOnDetails ? 2 : 1);
+    form.reset(defaultValues);
     onClose?.();
+  };
+  const handleOpenChange = (isOpen: boolean) => {
+    if (isOpen) {
+      onClose?.();
+      return;
+    }
+    // Picking the type of a new activity alone is not worth asking about; anything
+    // typed after it is, and so is changing an existing activity's type.
+    const hasUnsavedInput = Object.keys(dirtyFields).some(
+      (field) => Boolean(activity?.id) || field !== "activityType",
+    );
+    if (hasUnsavedInput) {
+      setConfirmDiscard(true);
+      return;
+    }
+    closeSheet();
   };
 
   const isLoading =
@@ -509,6 +592,13 @@ export function MobileActivityForm({
         expirationDate: _expiration,
         optionType: _optType,
         contractMultiplier: _multiplier,
+        // Cash income's amount before tax is input only; the received amount is saved.
+        grossAmount: _grossAmount,
+        // Fee and tax lines are saved as metadata below.
+        feeLines: _feeLines,
+        taxLines: _taxLines,
+        hadChargeLines: _hadChargeLines,
+        chargeLinesLocked: _chargeLinesLocked,
         id,
         ...submitData
       } = data as any;
@@ -530,6 +620,18 @@ export function MobileActivityForm({
       const assetIncomeError = validateAssetBackedIncomeFields(submitData, t);
       if (assetIncomeError) {
         form.setError(assetIncomeError.field as any, { message: assetIncomeError.message });
+        return;
+      }
+
+      // The schema drops the input-only amount before tax, so read the form.
+      // Interest shows a fee next to the tax here, and it comes off too.
+      const receivedBeforeClamp = calculateIncomeReceivedAmount({
+        grossAmount: form.getValues("grossAmount" as any),
+        tax: submitData.tax,
+        fee: submitData.activityType === ActivityType.INTEREST ? submitData.fee : undefined,
+      });
+      if (receivedBeforeClamp !== undefined && receivedBeforeClamp < 0) {
+        form.setError("tax", { message: t("activity:form.err_charges_exceed_amount_before_tax") });
         return;
       }
 
@@ -556,15 +658,31 @@ export function MobileActivityForm({
         submitData.symbolInstrumentType = submitData.symbolInstrumentType ?? "BOND";
       }
 
+      // Only the types that show a lines editor save its lines.
+      const chargeCategories = mobileChargeLineCategories(submitData.activityType);
+      const chargesPatch =
+        chargeCategories.length > 0
+          ? chargeLinesMetadata({
+              feeLines: chargeCategories.includes("fee") ? _feeLines : undefined,
+              taxLines: chargeCategories.includes("tax") ? _taxLines : undefined,
+              hadChargeLines: _hadChargeLines,
+              chargeLinesLocked: _chargeLinesLocked,
+            })
+          : undefined;
+      if (chargesPatch) {
+        submitData.metadata = { ...submitData.metadata, ...chargesPatch };
+      }
+
       // Ensure symbolQuoteCcy is set — manual/custom symbols leave it undefined
       if (!submitData.symbolQuoteCcy && submitData.currency) {
         submitData.symbolQuoteCcy = submitData.currency;
       }
 
-      // Validate transfer-specific required fields (schema can't use superRefine in discriminatedUnion)
+      // Validate transfer-specific required fields (not enforced by the schema)
       const transferError = validateTransferFields(
         {
           activityType: submitData.activityType,
+          accountId: submitData.accountId,
           transferMode: _tm,
           isExternal: _isExternal,
           direction: _direction,
@@ -623,6 +741,7 @@ export function MobileActivityForm({
           }
 
           await saveInternalTransferPairMutation.mutateAsync({
+            editedActivityId: id,
             transferOutId: id ? transferOutId : undefined,
             transferInId: id ? transferInId : undefined,
             fromAccountId: submitData.accountId,
@@ -814,6 +933,16 @@ export function MobileActivityForm({
       }
 
       if (id) {
+        // A transfer's empty fee is left out so a pair keeps both legs' fees, but
+        // an external transfer is one record: a fee the user cleared saves as 0,
+        // where omission would keep the old fee.
+        if (
+          transferIsExternal &&
+          submitData.fee === undefined &&
+          form.getFieldState("fee").isDirty
+        ) {
+          submitData.fee = 0;
+        }
         const wasAssetBackedIncome = isAssetBackedIncomeSubtype(
           activity?.activityType ?? "",
           activity?.subtype,
@@ -842,12 +971,11 @@ export function MobileActivityForm({
       form.reset(defaultValues);
       setCurrentStep(initialStep);
     } catch (error) {
-      toast.error(t("activity:mobile_form.save_failed"), {
-        description: extractErrorMessage(error, t),
-      });
-      logger.error(
-        `Mobile Activity Form Submit Error: ${JSON.stringify({ error, formValues: form.getValues() })}`,
-      );
+      if (isActivityEditCancelled(error)) return;
+      const message = extractErrorMessage(error, t);
+      toast.error(t("activity:mobile_form.save_failed"), { description: message });
+      // The form values are the user's financial data; keep them out of the log.
+      logger.error(`Mobile Activity Form Submit Error (${data.activityType}): ${message}`);
       return;
     }
   };
@@ -928,107 +1056,151 @@ export function MobileActivityForm({
     }
   };
 
+  if (recordsConversion || isConversionActivity(activity)) {
+    return (
+      <ActivityForm
+        accounts={accounts}
+        transferAccounts={transferAccounts}
+        activity={
+          recordsConversion
+            ? {
+                ...activity,
+                activityType: ActivityType.ADJUSTMENT,
+                subtype: ACTIVITY_SUBTYPES.CONVERSION_OUT,
+              }
+            : activity
+        }
+        open={open}
+        onClose={() => {
+          setRecordsConversion(false);
+          onClose?.();
+        }}
+        hidePicker={recordsConversion}
+      />
+    );
+  }
+
   return (
-    <Sheet open={open} onOpenChange={handleOpenChange}>
-      <SheetContent side="bottom" className="rounded-t-4xl mx-1 flex h-[90vh] flex-col p-0">
-        <SheetHeader className="border-b px-6 py-4">
-          <div className="flex flex-col items-center space-y-2">
-            <SheetTitle>
-              {activity?.id
-                ? t("activity:mobile_update_activity")
-                : t("activity:mobile_add_activity")}
-            </SheetTitle>
-            {!shouldStartOnDetails && (
-              <div className="flex gap-1.5">
-                {[1, 2].map((step) => (
-                  <div
-                    key={step}
-                    className={`h-1.5 w-10 rounded-full transition-colors ${
-                      step === currentStep
-                        ? "bg-primary"
-                        : step < currentStep
-                          ? "bg-primary/50"
-                          : "bg-muted"
-                    }`}
-                  />
-                ))}
-              </div>
-            )}
-            {activity?.id ? (
-              <SheetDescription>{t("activity:mobile_form.update_details")}</SheetDescription>
-            ) : (
-              // Always describe the dialog for a11y; the add flow shows step dots
-              // instead of visible description text, so keep it screen-reader only.
-              <SheetDescription className="sr-only">
-                {t("activity:mobile_form.add_details")}
-              </SheetDescription>
-            )}
-          </div>
-        </SheetHeader>
-
-        <div className="flex-1 overflow-y-auto">
-          <div className="p-4">
-            <Form {...form}>
-              <form onSubmit={handleValidatedSubmit} className="flex h-full flex-col">
-                <MobileActivitySteps
-                  currentStep={currentStep}
-                  accounts={effectiveAccounts}
-                  isEditing={!!activity?.id}
-                  needsTypeSelection={needsTypeSelection}
-                  amountWasEdited={amountWasEdited}
-                />
-              </form>
-            </Form>
-          </div>
-        </div>
-
-        <SheetFooter className="mt-auto border-t px-6 py-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-          <div className="flex w-full gap-3">
-            {currentStep > 1 && !shouldStartOnDetails && (
-              <Button
-                type="button"
-                variant="outline"
-                size="default"
-                onClick={handleBack}
-                className="flex-1"
-              >
-                <Icons.ArrowLeft className="mr-2 h-4 w-4" />
-                {t("activity:mobile_back")}
-              </Button>
-            )}
-
-            {currentStep < 2 ? (
-              <Button
-                type="button"
-                size="default"
-                onClick={handleNext}
-                className="flex-1 font-medium"
-                disabled={!form.watch("activityType") && currentStep === 1}
-              >
-                {t("activity:mobile_next")}
-                <Icons.ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                size="default"
-                onClick={handleValidatedSubmit}
-                className="flex-1 font-medium"
-                disabled={isLoading}
-              >
-                {isLoading ? (
-                  <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Icons.Check className="mr-2 h-4 w-4" />
-                )}
+    <>
+      <Sheet open={open} onOpenChange={handleOpenChange}>
+        <SheetContent
+          side="bottom"
+          className="mx-1 flex flex-col overflow-hidden rounded-t-4xl p-0 [--overlay-max-height:90dvh]"
+        >
+          <SheetHeader floating className="shrink-0 px-6 py-4">
+            <div className="flex flex-col items-center space-y-2">
+              <SheetTitle>
                 {activity?.id
                   ? t("activity:mobile_update_activity")
                   : t("activity:mobile_add_activity")}
-              </Button>
-            )}
+              </SheetTitle>
+              {!shouldStartOnDetails && (
+                <div className="flex gap-1.5">
+                  {[1, 2].map((step) => (
+                    <div
+                      key={step}
+                      className={`h-1.5 w-10 rounded-full transition-colors ${
+                        step === currentStep
+                          ? "bg-primary"
+                          : step < currentStep
+                            ? "bg-primary/50"
+                            : "bg-muted"
+                      }`}
+                    />
+                  ))}
+                </div>
+              )}
+              {activity?.id ? (
+                <SheetDescription>{t("activity:mobile_form.update_details")}</SheetDescription>
+              ) : (
+                // Always describe the dialog for a11y; the add flow shows step dots
+                // instead of visible description text, so keep it screen-reader only.
+                <SheetDescription className="sr-only">
+                  {t("activity:mobile_form.add_details")}
+                </SheetDescription>
+              )}
+            </div>
+          </SheetHeader>
+
+          {/* The header floats over this scroll area, which starts below it. The bottom
+              scroll padding keeps the message under a field focused on Add Activity in view. */}
+          <div className="min-h-0 flex-auto scroll-pt-(--sheet-header-height) scroll-pb-12 overflow-y-auto pt-(--sheet-header-height)">
+            <div className="p-4">
+              <CashActivityReclassification
+                activity={activity}
+                onSuccess={onClose}
+                disabled={isLoading}
+              />
+              <Form {...form}>
+                <form onSubmit={handleValidatedSubmit} className="flex flex-col">
+                  <MobileActivitySteps
+                    currentStep={currentStep}
+                    accounts={effectiveAccounts}
+                    isEditing={!!activity?.id}
+                    originalActivity={activity}
+                    needsTypeSelection={needsTypeSelection}
+                    amountWasEdited={amountWasEdited}
+                    incomeAmountTypedLast={incomeAmountTypedLast}
+                    onSelectConversion={() => setRecordsConversion(true)}
+                  />
+                </form>
+              </Form>
+            </div>
           </div>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+
+          <SheetFooter className="shrink-0 border-t px-6 py-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+            <div className="flex w-full gap-3">
+              {currentStep > 1 && !shouldStartOnDetails && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="default"
+                  onClick={handleBack}
+                  className="flex-1"
+                >
+                  <Icons.ArrowLeft className="me-2 h-4 w-4 rtl:rotate-180" />
+                  {t("activity:mobile_back")}
+                </Button>
+              )}
+
+              {currentStep < 2 ? (
+                <Button
+                  type="button"
+                  size="default"
+                  onClick={handleNext}
+                  className="flex-1 font-medium"
+                  disabled={!form.watch("activityType") && currentStep === 1}
+                >
+                  {t("activity:mobile_next")}
+                  <Icons.ArrowRight className="ms-2 h-4 w-4 rtl:rotate-180" />
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="default"
+                  onClick={handleValidatedSubmit}
+                  className="flex-1 font-medium"
+                  disabled={isLoading}
+                >
+                  {isLoading ? (
+                    <Spinner className="me-2 h-4 w-4" />
+                  ) : (
+                    <Icons.Check className="me-2 h-4 w-4" />
+                  )}
+                  {activity?.id
+                    ? t("activity:mobile_update_activity")
+                    : t("activity:mobile_add_activity")}
+                </Button>
+              )}
+            </div>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+      <DiscardChangesDialog
+        open={confirmDiscard}
+        onOpenChange={setConfirmDiscard}
+        onDiscard={closeSheet}
+      />
+    </>
   );
 }

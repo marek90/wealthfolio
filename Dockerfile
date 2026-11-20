@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Global build args
-ARG RUST_IMAGE=rust:1.98.1-alpine
+ARG RUST_IMAGE=rust:1.99.1-alpine
 
 # Stage 1: build frontend
 # Use --platform=$BUILDPLATFORM to run on the native runner (fast)
@@ -97,7 +97,7 @@ RUN --mount=type=secret,id=connect-storage-hosts \
     cp target/$(xx-cargo --print-target-triple)/release/wealthfolio-server /wealthfolio-server
 
 # Final stage
-FROM alpine:3.19 AS runtime
+FROM alpine:3.24 AS runtime
 WORKDIR /app
 # Copy from backend (which is now build platform, but binary is target platform)
 COPY --from=backend /wealthfolio-server /usr/local/bin/wealthfolio-server

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Separator } from "@wealthfolio/ui";
@@ -17,9 +17,11 @@ import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { RefreshQuotesConfirmDialog } from "./refresh-quotes-confirm-dialog";
 
 import { useHoldings } from "@/hooks/use-holdings";
+import { HoldingsScopeNotice } from "@/components/holdings-scope-notice";
 import { useIsCompactTableViewport } from "@/hooks/use-platform";
 import { useSyncMarketDataMutation } from "@/hooks/use-sync-market-data";
 import { useSettingsContext } from "@/lib/settings-provider";
+import type { LatestQuoteSnapshot } from "@/lib/types";
 import { SettingsHeader } from "../settings/settings-header";
 import { AssetEditSheet } from "./asset-edit-sheet";
 import { isExpiredOptionAsset, ParsedAsset, toParsedAsset } from "./asset-utils";
@@ -30,6 +32,8 @@ import { useAssetManagement } from "./hooks/use-asset-management";
 import { useAssets } from "./hooks/use-assets";
 import { useLatestQuotes } from "./hooks/use-latest-quotes";
 
+const NO_QUOTES: Record<string, LatestQuoteSnapshot> = {};
+
 export default function AssetsPage() {
   const { t } = useTranslation();
   const { assets, isLoading } = useAssets();
@@ -37,11 +41,13 @@ export default function AssetsPage() {
   const refetchQuotesMutation = useSyncMarketDataMutation(true);
   const updateQuotesMutation = useSyncMarketDataMutation(false);
   const isCompactTableViewport = useIsCompactTableViewport();
-  const { holdings } = useHoldings({ type: "all" });
+  const holdingsQuery = useHoldings({ type: "all" });
+  const { holdings } = holdingsQuery;
   const { settings } = useSettingsContext();
   const appTimezone = settings?.timezone?.trim() || undefined;
 
   const heldAssetIds = useMemo(() => {
+    if (!holdingsQuery.isComplete) return null;
     const ids = new Set<string>();
     for (const h of holdings) {
       if (h.instrument?.id) {
@@ -49,7 +55,7 @@ export default function AssetsPage() {
       }
     }
     return ids;
-  }, [holdings]);
+  }, [holdings, holdingsQuery.isComplete]);
 
   const parsedAssets = useMemo(() => assets.map(toParsedAsset), [assets]);
   const visibleAssets = useMemo(
@@ -57,12 +63,20 @@ export default function AssetsPage() {
     [parsedAssets, appTimezone],
   );
   const assetIds = useMemo(() => visibleAssets.map((asset) => asset.id), [visibleAssets]);
-  const { data: latestQuotes = {}, isLoading: isQuotesLoading } = useLatestQuotes(assetIds);
+  const { data: latestQuotes = NO_QUOTES, isLoading: isQuotesLoading } = useLatestQuotes(assetIds);
 
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [editingAsset, setEditingAsset] = useState<ParsedAsset | null>(null);
   const [assetPendingDelete, setAssetPendingDelete] = useState<ParsedAsset | null>(null);
   const [assetPendingRefetch, setAssetPendingRefetch] = useState<ParsedAsset | null>(null);
+
+  // The tables build their columns from these. New functions on each render (every
+  // holdings refetch) would remount the rows and close an open row menu.
+  const { mutate: updateQuotes } = updateQuotesMutation;
+  const updateAssetQuotes = useCallback(
+    (asset: ParsedAsset) => updateQuotes([asset.id]),
+    [updateQuotes],
+  );
 
   const handleDelete = async () => {
     if (!assetPendingDelete) return;
@@ -72,13 +86,32 @@ export default function AssetsPage() {
 
   return (
     <div className="space-y-6">
-      <SettingsHeader heading={t("asset:securities.heading")} text={t("asset:securities.subtitle")}>
-        <Button onClick={() => setCreateDialogOpen(true)} size="sm">
-          <Icons.Plus className="mr-2 h-4 w-4" />
-          {t("asset:securities.add_security")}
-        </Button>
+      <SettingsHeader
+        heading={t("settings:nav.items.securities")}
+        text={t("asset:securities.subtitle")}
+        actionsInline
+      >
+        <>
+          <Button
+            size="icon"
+            className="sm:hidden"
+            onClick={() => setCreateDialogOpen(true)}
+            aria-label={t("asset:securities.add_security")}
+          >
+            <Icons.Plus className="h-4 w-4" />
+          </Button>
+          <Button
+            size="sm"
+            className="hidden sm:inline-flex"
+            onClick={() => setCreateDialogOpen(true)}
+          >
+            <Icons.Plus className="me-2 h-4 w-4" />
+            {t("asset:securities.add_security")}
+          </Button>
+        </>
       </SettingsHeader>
       <Separator />
+      <HoldingsScopeNotice {...holdingsQuery} />
       <div className="w-full">
         {isCompactTableViewport ? (
           <AssetsTableMobile
@@ -86,10 +119,10 @@ export default function AssetsPage() {
             latestQuotes={latestQuotes}
             heldAssetIds={heldAssetIds}
             isLoading={isLoading || isQuotesLoading}
-            onEdit={(asset) => setEditingAsset(asset)}
-            onDelete={(asset) => setAssetPendingDelete(asset)}
-            onUpdateQuotes={(asset) => updateQuotesMutation.mutate([asset.id])}
-            onRefetchQuotes={(asset) => setAssetPendingRefetch(asset)}
+            onEdit={setEditingAsset}
+            onDelete={setAssetPendingDelete}
+            onUpdateQuotes={updateAssetQuotes}
+            onRefetchQuotes={setAssetPendingRefetch}
             isUpdatingQuotes={updateQuotesMutation.isPending}
             isRefetchingQuotes={refetchQuotesMutation.isPending}
           />
@@ -99,10 +132,10 @@ export default function AssetsPage() {
             latestQuotes={latestQuotes}
             heldAssetIds={heldAssetIds}
             isLoading={isLoading || isQuotesLoading}
-            onEdit={(asset) => setEditingAsset(asset)}
-            onDelete={(asset) => setAssetPendingDelete(asset)}
-            onUpdateQuotes={(asset) => updateQuotesMutation.mutate([asset.id])}
-            onRefetchQuotes={(asset) => setAssetPendingRefetch(asset)}
+            onEdit={setEditingAsset}
+            onDelete={setAssetPendingDelete}
+            onUpdateQuotes={updateAssetQuotes}
+            onRefetchQuotes={setAssetPendingRefetch}
             isUpdatingQuotes={updateQuotesMutation.isPending}
             isRefetchingQuotes={refetchQuotesMutation.isPending}
           />
@@ -147,7 +180,7 @@ export default function AssetsPage() {
             <AlertDialogAction
               onClick={handleDelete}
               disabled={deleteAssetMutation.isPending}
-              className="bg-destructive hover:bg-destructive/90 dark:text-foreground"
+              variant="destructive"
             >
               {deleteAssetMutation.isPending ? t("asset:securities.deleting") : t("common:delete")}
             </AlertDialogAction>
@@ -173,9 +206,14 @@ export default function AssetsPage() {
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
         onSubmit={(payload) => {
-          createAssetMutation.mutate(payload, {
-            onSuccess: () => setCreateDialogOpen(false),
-          });
+          // Closes once the save itself ends: React Query skips callbacks passed
+          // to mutate() while a phone screen is out of sight, which left the
+          // dialog open, ready to create the security a second time.
+          void createAssetMutation.mutateAsync(payload).then(
+            () => setCreateDialogOpen(false),
+            // The mutation reports the error; the dialog stays open to try again.
+            () => undefined,
+          );
         }}
         isPending={createAssetMutation.isPending}
       />

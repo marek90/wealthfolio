@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::{errors::ValidationError, Error, Result};
 
-use super::accounts_constants::account_types;
+use super::accounts_constants::{account_types, ACCOUNT_NUMBER_MAX_CHARS};
 
 /// Tracking mode for an account - determines how holdings are tracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -411,6 +411,19 @@ impl Account {
     }
 }
 
+/// The account number a user entered for a manual account, as stored: trimmed,
+/// and `None` when blank. Broker-synced accounts keep the number their broker
+/// sends and never go through this.
+pub fn normalize_account_number(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.chars().count() > ACCOUNT_NUMBER_MAX_CHARS {
+        return Err(Error::Validation(ValidationError::InvalidInput(format!(
+            "Account number must not be longer than {ACCOUNT_NUMBER_MAX_CHARS} characters"
+        ))));
+    }
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
 /// Input model for creating a new account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -465,7 +478,12 @@ pub struct AccountUpdate {
     pub id: Option<String>,
     pub name: String,
     pub account_type: String,
-    pub group: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_account_group",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group: Option<Option<String>>,
     pub is_default: bool,
     pub is_active: bool,
     pub platform_id: Option<String>,
@@ -475,6 +493,12 @@ pub struct AccountUpdate {
     pub provider_account_id: Option<String>,
     pub is_archived: Option<bool>,
     pub tracking_mode: Option<TrackingMode>,
+}
+
+pub fn deserialize_account_group<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl AccountUpdate {

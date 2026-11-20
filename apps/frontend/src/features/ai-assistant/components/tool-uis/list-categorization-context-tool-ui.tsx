@@ -4,26 +4,29 @@ import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
 import type { ListCategorizationContextArgs, ListCategorizationContextOutput } from "../../types";
+import { Spinner } from "@wealthfolio/ui";
+import { unwrapSpendingResult } from "./spending-result-utils";
 
 type Props = ToolCallMessagePartProps<
   ListCategorizationContextArgs,
   ListCategorizationContextOutput
 >;
 
-function ListCategorizationContextContentImpl({ result, status }: Props) {
+export function ListCategorizationContextContentImpl({ result, status }: Props) {
   const { t } = useTranslation();
   const isLoading = status?.type === "running";
   if (isLoading) {
     return (
       <div className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
-        <Icons.Spinner className="h-3 w-3 animate-spin" />
+        <Spinner className="h-3 w-3" />
         <span>{t("ai:categorizationContext.loading")}</span>
       </div>
     );
   }
-  if (!result) return null;
+  const summary = unwrapSpendingResult<ListCategorizationContextOutput>(result)?.summary;
+  if (!summary) return null;
 
-  const { total, deterministicallyProposed, needsAiJudgement } = result.summary;
+  const { total, deterministicallyProposed, needsAiJudgement } = summary;
   return (
     <div className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
       <Icons.Sparkles className="h-3 w-3" />

@@ -80,6 +80,7 @@ fn sync_entity_name(entity: &SyncEntity) -> &'static str {
         SyncEntity::AiMessage => "ai_message",
         SyncEntity::AiThreadTag => "ai_thread_tag",
         SyncEntity::ContributionLimit => "contribution_limit",
+        SyncEntity::ContributionLimitV2 => "contribution_limit_v2",
         SyncEntity::Platform => "platform",
         SyncEntity::Snapshot => "snapshot",
         SyncEntity::CustomProvider => "custom_provider",
@@ -132,6 +133,25 @@ fn parse_event_operation(event_type: &str) -> Option<SyncOperation> {
         "update" => Some(SyncOperation::Update),
         "delete" => Some(SyncOperation::Delete),
         _ => None,
+    }
+}
+
+/// Authenticated plaintext framing for atomic category-merge receipts. Legacy
+/// engines require plain JSON and stop at payload decoding before permissive
+/// storage replay can skip the receipt. The relay and E2EE format are unchanged.
+const CATEGORY_MERGE_PAYLOAD_HEADER: &str = "wealthfolio-sync:category-merge:v1\n";
+
+fn framed_sync_payload(
+    event: &wealthfolio_core::sync::SyncOutboxEvent,
+) -> Result<String, serde_json::Error> {
+    if event.entity == SyncEntity::CustomTaxonomy
+        && event
+            .entity
+            .requires_atomic_replay(&serde_json::from_str(&event.payload)?)
+    {
+        Ok(format!("{CATEGORY_MERGE_PAYLOAD_HEADER}{}", event.payload))
+    } else {
+        Ok(event.payload.clone())
     }
 }
 
@@ -226,28 +246,6 @@ where
         pushed_count: 0,
         pulled_count: 0,
     };
-
-    match ports.is_sync_allowed().await {
-        Ok(true) => {}
-        Ok(false) => {
-            return ctx
-                .fail(
-                    "subscription_required",
-                    "Device sync is paused: an active subscription is required.".to_string(),
-                    Some(300),
-                )
-                .await
-        }
-        Err(err) => {
-            return ctx
-                .fail(
-                    "subscription_check_error",
-                    format!("Could not verify sync subscription: {}", err),
-                    Some(60),
-                )
-                .await
-        }
-    }
 
     let identity = match ports.get_sync_identity() {
         Some(value) => value,
@@ -357,7 +355,9 @@ where
     let has_pending = ports.has_pending_outbox().await.unwrap_or(false);
     match reconcile.action.as_str() {
         "NOOP" => {
-            if !has_pending {
+            // The server's device cursor can advance before incoming changes are applied locally.
+            let has_remote_changes = reconcile.cursor.is_some_and(|c| c > ctx.local_cursor);
+            if !has_pending && !has_remote_changes {
                 debug!(
                     "[DeviceSync] Reconcile action=NOOP and no pending outbox, skipping push+pull"
                 );
@@ -381,7 +381,7 @@ where
                     dead_letter_count: 0,
                 });
             }
-            debug!("[DeviceSync] Reconcile action=NOOP but has pending outbox, proceeding with push+pull");
+            debug!("[DeviceSync] Reconcile action=NOOP but has pending outbox or remote changes, proceeding with push+pull");
         }
         "BOOTSTRAP_SNAPSHOT" => {
             if post_bootstrap {
@@ -500,8 +500,20 @@ where
             continue;
         }
         let payload_key_version = event.payload_key_version.max(1);
+        let plaintext_payload = match framed_sync_payload(&event) {
+            Ok(value) => value,
+            Err(err) => {
+                return ctx
+                    .fail(
+                        "push_prepare_error",
+                        format!("Sync payload decode failed: {err}"),
+                        Some(15),
+                    )
+                    .await
+            }
+        };
         let encrypted_payload =
-            match ports.encrypt_sync_payload(&event.payload, &identity, payload_key_version) {
+            match ports.encrypt_sync_payload(&plaintext_payload, &identity, payload_key_version) {
                 Ok(payload) => payload,
                 Err(err) => {
                     return ctx
@@ -563,6 +575,7 @@ where
     }
 
     let mut pushed_count = 0usize;
+    let mut retryable_push_failure = None;
     if !push_events.is_empty() {
         match ports
             .push_events(
@@ -700,6 +713,10 @@ where
                             )
                             .await
                             .map_err(|e| e.to_string())?;
+                        // Keep the original deadline while incoming changes arrive.
+                        let retry_at =
+                            (Utc::now() + chrono::Duration::seconds(backoff)).to_rfc3339();
+                        retryable_push_failure = Some((format!("Push failed: {}", err), retry_at));
                     }
                     ApiRetryClass::Permanent => {
                         ports
@@ -710,11 +727,11 @@ where
                             )
                             .await
                             .map_err(|e| e.to_string())?;
+                        return ctx
+                            .fail("push_error", format!("Push failed: {}", err), Some(backoff))
+                            .await;
                     }
                 }
-                return ctx
-                    .fail("push_error", format!("Push failed: {}", err), Some(backoff))
-                    .await;
             }
         }
     }
@@ -887,8 +904,10 @@ where
                             .await;
                     }
                 };
-                let payload_json: serde_json::Value = match serde_json::from_str(&decrypted_payload)
-                {
+                let decoded_payload = decrypted_payload
+                    .strip_prefix(CATEGORY_MERGE_PAYLOAD_HEADER)
+                    .unwrap_or(&decrypted_payload);
+                let payload_json: serde_json::Value = match serde_json::from_str(decoded_payload) {
                     Ok(payload) => payload,
                     Err(err) => {
                         return ctx
@@ -921,6 +940,18 @@ where
             {
                 Ok(applied) => applied,
                 Err(err) => {
+                    if decoded_events
+                        .iter()
+                        .any(|event| event.entity.requires_atomic_replay(&event.payload))
+                    {
+                        return ctx
+                            .fail(
+                                "replay_blocked",
+                                format!("Category merge replay blocked: {err}"),
+                                Some(10),
+                            )
+                            .await;
+                    }
                     warn!(
                         "[DeviceSync] Batch replay apply failed ({}). Falling back to per-event apply with dead-letter skip.",
                         err
@@ -990,11 +1021,20 @@ where
         let _ = ports.prune_applied_events_up_to_seq(prune_seq).await;
     }
 
+    let (status, next_retry_at) = if let Some((message, retry_at)) = retryable_push_failure {
+        ports
+            .mark_engine_error(message)
+            .await
+            .map_err(|e| e.to_string())?;
+        ("push_error", Some(retry_at))
+    } else {
+        ("ok", None)
+    };
     ports
         .mark_cycle_outcome(
-            "ok".to_string(),
+            status.to_string(),
             cycle_started_at.elapsed().as_millis() as i64,
-            None,
+            next_retry_at,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1007,7 +1047,7 @@ where
     }
 
     Ok(SyncCycleResult {
-        status: "ok".to_string(),
+        status: status.to_string(),
         lock_version,
         pushed_count,
         pulled_count,
@@ -1047,8 +1087,15 @@ where
         }
     }
 
-    if !subscription_paused && ports.has_pending_outbox().await.unwrap_or(false) {
-        delay_ms = delay_ms.min(2_000 + (jitter_ms % 500));
+    if !subscription_paused {
+        if ports.has_pending_outbox().await.unwrap_or(false) {
+            delay_ms = delay_ms.min(2_000 + (jitter_ms % 500));
+        } else if let Ok(Some(retry_at)) = ports.next_outbox_retry_at().await {
+            // Waiting uploads need a wake even if a download changed the cycle deadline.
+            if let Some(wait_ms) = millis_until_rfc3339(&retry_at) {
+                delay_ms = delay_ms.min(wait_ms.saturating_add(jitter_ms).max(1_000));
+            }
+        }
     }
 
     delay_ms
@@ -1217,7 +1264,7 @@ mod tests {
     struct TestPorts {
         has_cloud_session: bool,
         session_read_results: Arc<std::sync::Mutex<VecDeque<Result<bool, String>>>>,
-        sync_allowed: Result<bool, String>,
+        reconcile_error: Option<TransportError>,
         token_lookup_gate: Option<(Arc<Mutex<()>>, Arc<tokio::sync::Notify>)>,
         cursor: i64,
         identity: Option<SyncIdentity>,
@@ -1226,13 +1273,18 @@ mod tests {
         pending_outbox: Arc<Mutex<Vec<wealthfolio_core::sync::SyncOutboxEvent>>>,
         dead_outbox_batches: Arc<Mutex<Vec<Vec<String>>>>,
         pull_responses: Arc<Mutex<VecDeque<crate::SyncPullResponse>>>,
+        pull_cursors: Arc<Mutex<Vec<Option<i64>>>>,
         set_cursor_calls: Arc<Mutex<Vec<i64>>>,
         applied_events: Arc<Mutex<Vec<ReplayEvent>>>,
+        fail_batch_replay: bool,
+        per_event_apply_calls: Arc<AtomicUsize>,
+        pull_complete_counts: Arc<Mutex<Vec<usize>>>,
         push_error: Option<TransportError>,
         push_batches: Arc<Mutex<Vec<Vec<String>>>>,
         reconcile_response: crate::ReconcileReadyStateResponse,
         persisted_trust_states: Arc<Mutex<Vec<String>>>,
         cycle_outcomes: Arc<Mutex<Vec<String>>>,
+        last_cycle_retry_at: Arc<Mutex<Option<String>>>,
         engine_errors: Arc<Mutex<Vec<String>>>,
         prune_calls: Arc<AtomicUsize>,
         reconcile_delay_ms: u64,
@@ -1245,7 +1297,7 @@ mod tests {
             Self {
                 has_cloud_session: true,
                 session_read_results: Arc::new(std::sync::Mutex::new(VecDeque::new())),
-                sync_allowed: Ok(true),
+                reconcile_error: None,
                 token_lookup_gate: None,
                 cursor: 0,
                 identity,
@@ -1254,8 +1306,12 @@ mod tests {
                 pending_outbox: Arc::new(Mutex::new(Vec::new())),
                 dead_outbox_batches: Arc::new(Mutex::new(Vec::new())),
                 pull_responses: Arc::new(Mutex::new(VecDeque::new())),
+                pull_cursors: Arc::new(Mutex::new(Vec::new())),
                 set_cursor_calls: Arc::new(Mutex::new(Vec::new())),
                 applied_events: Arc::new(Mutex::new(Vec::new())),
+                fail_batch_replay: false,
+                per_event_apply_calls: Arc::new(AtomicUsize::new(0)),
+                pull_complete_counts: Arc::new(Mutex::new(Vec::new())),
                 push_error: None,
                 push_batches: Arc::new(Mutex::new(Vec::new())),
                 reconcile_response: crate::ReconcileReadyStateResponse {
@@ -1265,6 +1321,7 @@ mod tests {
                 },
                 persisted_trust_states: Arc::new(Mutex::new(Vec::new())),
                 cycle_outcomes: Arc::new(Mutex::new(Vec::new())),
+                last_cycle_retry_at: Arc::new(Mutex::new(None)),
                 engine_errors: Arc::new(Mutex::new(Vec::new())),
                 prune_calls: Arc::new(AtomicUsize::new(0)),
                 reconcile_delay_ms: 0,
@@ -1287,7 +1344,19 @@ mod tests {
         ) -> Result<Vec<wealthfolio_core::sync::SyncOutboxEvent>, String> {
             let pending = self.pending_outbox.lock().await.clone();
             let max = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
-            Ok(pending.into_iter().take(max).collect())
+            let now = Utc::now().to_rfc3339();
+            Ok(pending
+                .into_iter()
+                .filter(|event| {
+                    !event.sent
+                        && event.status == wealthfolio_core::sync::SyncOutboxStatus::Pending
+                        && event
+                            .next_retry_at
+                            .as_deref()
+                            .is_none_or(|retry_at| retry_at <= now.as_str())
+                })
+                .take(max)
+                .collect())
         }
 
         async fn mark_outbox_dead(
@@ -1307,17 +1376,32 @@ mod tests {
             Ok(())
         }
 
-        async fn mark_outbox_sent(&self, _event_ids: Vec<String>) -> Result<(), String> {
+        async fn mark_outbox_sent(&self, event_ids: Vec<String>) -> Result<(), String> {
+            for event in self.pending_outbox.lock().await.iter_mut() {
+                if event_ids.contains(&event.event_id) {
+                    event.sent = true;
+                    event.status = wealthfolio_core::sync::SyncOutboxStatus::Sent;
+                }
+            }
             Ok(())
         }
 
         async fn schedule_outbox_retry(
             &self,
-            _event_ids: Vec<String>,
-            _delay_seconds: i64,
-            _error_message: Option<String>,
-            _error_code: Option<String>,
+            event_ids: Vec<String>,
+            delay_seconds: i64,
+            error_message: Option<String>,
+            error_code: Option<String>,
         ) -> Result<(), String> {
+            let retry_at = (Utc::now() + chrono::Duration::seconds(delay_seconds)).to_rfc3339();
+            for event in self.pending_outbox.lock().await.iter_mut() {
+                if event_ids.contains(&event.event_id) {
+                    event.retry_count += 1;
+                    event.next_retry_at = Some(retry_at.clone());
+                    event.last_error = error_message.clone();
+                    event.last_error_code = error_code.clone();
+                }
+            }
             Ok(())
         }
 
@@ -1326,7 +1410,20 @@ mod tests {
         }
 
         async fn has_pending_outbox(&self) -> Result<bool, String> {
-            Ok(!self.pending_outbox.lock().await.is_empty())
+            Ok(!self.list_pending_outbox(1).await?.is_empty())
+        }
+
+        async fn next_outbox_retry_at(&self) -> Result<Option<String>, String> {
+            Ok(self
+                .pending_outbox
+                .lock()
+                .await
+                .iter()
+                .filter(|event| {
+                    !event.sent && event.status == wealthfolio_core::sync::SyncOutboxStatus::Pending
+                })
+                .filter_map(|event| event.next_retry_at.clone())
+                .min())
         }
     }
 
@@ -1353,16 +1450,23 @@ mod tests {
             &self,
             events: Vec<ReplayEvent>,
         ) -> Result<usize, String> {
+            if self.fail_batch_replay {
+                return Err("peer configuration conflicts with category merge".into());
+            }
             let applied = events.len();
             self.applied_events.lock().await.extend(events);
             Ok(applied)
         }
 
         async fn apply_remote_event_lww(&self, _event: ReplayEvent) -> Result<bool, String> {
+            self.per_event_apply_calls.fetch_add(1, Ordering::SeqCst);
             Ok(false)
         }
 
         async fn mark_pull_completed(&self) -> Result<(), String> {
+            // Match the real store, which clears the previous error and retry time.
+            self.engine_errors.lock().await.clear();
+            *self.last_cycle_retry_at.lock().await = None;
             Ok(())
         }
 
@@ -1370,9 +1474,10 @@ mod tests {
             &self,
             status: String,
             _duration_ms: i64,
-            _next_retry_at: Option<String>,
+            next_retry_at: Option<String>,
         ) -> Result<(), String> {
             self.cycle_outcomes.lock().await.push(status);
+            *self.last_cycle_retry_at.lock().await = next_retry_at;
             if self.fail_mark_cycle_outcome {
                 return Err("forced cycle_outcome failure".to_string());
             }
@@ -1404,10 +1509,15 @@ mod tests {
                 last_pull_at: None,
                 last_error: None,
                 consecutive_failures: 0,
-                next_retry_at: None,
+                next_retry_at: self.last_cycle_retry_at.lock().await.clone(),
                 last_cycle_status: self.cycle_outcomes.lock().await.last().cloned(),
                 last_cycle_duration_ms: None,
             })
+        }
+
+        async fn on_pull_complete(&self, pulled_count: usize) -> Result<(), String> {
+            self.pull_complete_counts.lock().await.push(pulled_count);
+            Ok(())
         }
     }
 
@@ -1448,9 +1558,10 @@ mod tests {
             &self,
             _token: &str,
             _device_id: &str,
-            _from_cursor: Option<i64>,
+            from_cursor: Option<i64>,
             _limit: Option<i64>,
         ) -> Result<crate::SyncPullResponse, TransportError> {
+            self.pull_cursors.lock().await.push(from_cursor);
             self.pull_responses
                 .lock()
                 .await
@@ -1468,6 +1579,9 @@ mod tests {
             _token: &str,
             _device_id: &str,
         ) -> Result<crate::ReconcileReadyStateResponse, TransportError> {
+            if let Some(error) = &self.reconcile_error {
+                return Err(error.clone());
+            }
             let active = self.active_reconcile_count.fetch_add(1, Ordering::SeqCst) + 1;
             loop {
                 let current_max = self.max_active_reconcile_count.load(Ordering::SeqCst);
@@ -1498,10 +1612,6 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Ok(self.has_cloud_session))
-        }
-
-        async fn is_sync_allowed(&self) -> Result<bool, String> {
-            self.sync_allowed.clone()
         }
 
         fn get_sync_identity(&self) -> Option<SyncIdentity> {
@@ -1607,7 +1717,12 @@ mod tests {
     #[tokio::test]
     async fn inactive_subscription_preserves_pending_changes_and_resumes() {
         let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
-        ports.sync_allowed = Ok(false);
+        ports.reconcile_error = Some(TransportError {
+            message: "Subscription required".into(),
+            retry_class: ApiRetryClass::Permanent,
+            error_code: Some("SUBSCRIPTION_REQUIRED".into()),
+            details: None,
+        });
         ports.pending_outbox.lock().await.push(outbox_event(
             "event-1",
             "019cb093-06a8-7534-8677-546317b17957",
@@ -1616,10 +1731,9 @@ mod tests {
         let paused = run_sync_cycle(&ports, false).await.unwrap();
         assert_eq!(paused.status, "subscription_required");
         assert_eq!(ports.pending_outbox.lock().await.len(), 1);
-        assert!(ports.persisted_trust_states.lock().await.is_empty());
         assert_eq!(ports.max_active_reconcile_count.load(Ordering::SeqCst), 0);
-        assert!(compute_cycle_delay_ms(&ports, 0).await >= 300_000);
-        ports.sync_allowed = Ok(true);
+        assert!((299_000..=300_000).contains(&compute_cycle_delay_ms(&ports, 0).await));
+        ports.reconcile_error = None;
         let resumed = run_sync_cycle(&ports, false).await.unwrap();
         assert_eq!(resumed.status, "ok");
         assert_eq!(ports.push_batches.lock().await.len(), 1);
@@ -1654,16 +1768,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_lookup_failure_cannot_push_or_pull() {
+    async fn reconcile_failure_cannot_push_or_pull() {
         let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
-        ports.sync_allowed = Err("service unavailable".to_string());
+        ports.reconcile_error = Some(TransportError {
+            message: "service unavailable".into(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
         assert_eq!(
             run_sync_cycle(&ports, false).await.unwrap().status,
-            "subscription_check_error"
+            "reconcile_error"
         );
         assert!(ports.push_batches.lock().await.is_empty());
         assert!(ports.applied_events.lock().await.is_empty());
-        assert!(ports.persisted_trust_states.lock().await.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -2292,6 +2410,570 @@ mod tests {
             gc_watermark: None,
             latest_snapshot_seq: None,
         }
+    }
+
+    #[test]
+    fn merge_receipts_frame_plaintext_before_encryption_to_block_legacy_decoding() {
+        let mut event = outbox_event("merge", "spending_categories", 1);
+        event.entity = SyncEntity::CustomTaxonomy;
+        for payload in [
+            r#"{"merge_operation":true,"category_merges":[{}]}"#,
+            r#"{"category_merges":[{}]}"#,
+        ] {
+            event.payload = payload.into();
+            let framed = framed_sync_payload(&event).expect("valid payload");
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&framed).is_err(),
+                "legacy engines must stop before storage replay"
+            );
+            assert_eq!(
+                framed.strip_prefix(CATEGORY_MERGE_PAYLOAD_HEADER),
+                Some(payload)
+            );
+        }
+        event.payload = r#"{"categories":[]}"#.into();
+        assert_eq!(
+            framed_sync_payload(&event).expect("valid payload"),
+            event.payload
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_or_malformed_payload_header_keeps_cursor_before_batch_apply() {
+        for payload in [
+            "wealthfolio-sync:category-merge:v999\n{}",
+            "wealthfolio-sync:category-merge:v1\n{broken",
+        ] {
+            let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            ports.cursor = 5;
+            ports.reconcile_response.cursor = Some(8);
+            ports
+                .pull_responses
+                .lock()
+                .await
+                .push_back(single_event_pull_response(
+                    8,
+                    pull_event(
+                        "merge",
+                        "custom_taxonomy",
+                        "custom_taxonomy.update.v1",
+                        "spending_categories",
+                        8,
+                        payload,
+                    ),
+                ));
+            let result = run_sync_cycle(&ports, false).await.expect("blocked cycle");
+            assert_eq!(result.status, "replay_error");
+            assert_eq!(result.cursor, 5);
+            assert!(ports.set_cursor_calls.lock().await.is_empty());
+            assert!(ports.applied_events.lock().await.is_empty());
+            assert_eq!(ports.per_event_apply_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_conflict_keeps_cursor_without_fallback_and_retries_after_resolution() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.fail_batch_replay = true;
+        let response = single_event_pull_response(
+            8,
+            pull_event(
+                "merge-remote",
+                "custom_taxonomy",
+                "custom_taxonomy.update.v1",
+                "spending_categories",
+                8,
+                r#"{"category_merges":[{"source_id":"s","destination_id":"d"}],"merge_operation":true}"#,
+            ),
+        );
+        let mut response = response;
+        response.events[0].payload = format!(
+            "{CATEGORY_MERGE_PAYLOAD_HEADER}{}",
+            response.events[0].payload
+        );
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(response.clone());
+        let result = run_sync_cycle(&ports, false).await.expect("blocked cycle");
+        assert_eq!(result.status, "replay_blocked");
+        assert_eq!(result.cursor, 5);
+        assert!(ports.set_cursor_calls.lock().await.is_empty());
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert_eq!(ports.per_event_apply_calls.load(Ordering::SeqCst), 0);
+        assert!(ports.pull_complete_counts.lock().await.is_empty());
+        // An explicit local resolution allows the same receipt to be retried.
+        ports.fail_batch_replay = false;
+        ports.pull_responses.lock().await.push_back(response);
+        let result = run_sync_cycle(&ports, false).await.expect("resolved cycle");
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.cursor, 8);
+        assert_eq!(ports.set_cursor_calls.lock().await.as_slice(), [8]);
+        assert_eq!(ports.applied_events.lock().await.len(), 1);
+        assert_eq!(
+            ports.pull_cursors.lock().await.as_slice(),
+            [Some(5), Some(5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_push_failure_downloads_without_clearing_upload_error_or_backoff() {
+        for (retry_count, delay_seconds) in [(0, 5), (3, 40), (12, 1280)] {
+            for has_incoming in [true, false] {
+                let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+                ports.cursor = 5;
+                ports.reconcile_response.cursor = Some(if has_incoming { 8 } else { 5 });
+                ports.push_error = Some(TransportError {
+                    message: "503 Service Unavailable".to_string(),
+                    retry_class: ApiRetryClass::Retryable,
+                    error_code: None,
+                    details: None,
+                });
+                let mut event = outbox_event("evt-local", "account-local", 1);
+                event.retry_count = retry_count;
+                ports.pending_outbox.lock().await.push(event);
+                if has_incoming {
+                    ports
+                        .pull_responses
+                        .lock()
+                        .await
+                        .push_back(single_event_pull_response(
+                            8,
+                            pull_event(
+                                "evt-remote",
+                                "account",
+                                "account.update.v1",
+                                "account-remote",
+                                8,
+                                r#"{"id":"account-remote","name":"Checking"}"#,
+                            ),
+                        ));
+                }
+                let before = Utc::now();
+
+                let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+                assert_eq!(result.status, "push_error");
+                assert_eq!(result.pushed_count, 0);
+                assert_eq!(result.pulled_count, usize::from(has_incoming));
+                assert_eq!(result.cursor, if has_incoming { 8 } else { 5 });
+                assert_eq!(
+                    ports.push_batches.lock().await.as_slice(),
+                    [vec!["evt-local".to_string()]]
+                );
+                assert_eq!(
+                    ports.applied_events.lock().await.len(),
+                    usize::from(has_incoming)
+                );
+                if has_incoming {
+                    assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+                    assert_eq!(ports.set_cursor_calls.lock().await.as_slice(), [8]);
+                    assert_eq!(ports.pull_complete_counts.lock().await.as_slice(), [1]);
+                } else {
+                    assert!(ports.pull_cursors.lock().await.is_empty());
+                    assert!(ports.set_cursor_calls.lock().await.is_empty());
+                    assert!(ports.pull_complete_counts.lock().await.is_empty());
+                }
+                assert!(ports.dead_outbox_batches.lock().await.is_empty());
+                assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["push_error"]);
+                assert_eq!(
+                    ports.engine_errors.lock().await.as_slice(),
+                    ["Push failed: 503 Service Unavailable"]
+                );
+                let pending = ports.pending_outbox.lock().await;
+                assert_eq!(pending.len(), 1);
+                assert!(!pending[0].sent);
+                assert_eq!(
+                    pending[0].status,
+                    wealthfolio_core::sync::SyncOutboxStatus::Pending
+                );
+                assert_eq!(pending[0].retry_count, retry_count + 1);
+                assert_eq!(
+                    pending[0].last_error.as_deref(),
+                    Some("503 Service Unavailable")
+                );
+                assert_eq!(pending[0].last_error_code.as_deref(), Some("retryable"));
+                for retry_at in [
+                    pending[0].next_retry_at.clone(),
+                    ports.last_cycle_retry_at.lock().await.clone(),
+                ] {
+                    let retry_at =
+                        chrono::DateTime::parse_from_rfc3339(&retry_at.expect("retry time"))
+                            .expect("valid retry time");
+                    assert!(retry_at >= before + chrono::Duration::seconds(delay_seconds));
+                    assert!(retry_at <= Utc::now() + chrono::Duration::seconds(delay_seconds));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_push_failure_does_not_extend_retry_deadline_while_downloading() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3; // Existing backoff: 40 seconds.
+        ports.pending_outbox.lock().await.push(event);
+
+        // Hold the response to pause the download after the upload retry is scheduled.
+        let mut responses = ports.pull_responses.lock().await;
+        responses.push_back(single_event_pull_response(
+            8,
+            pull_event(
+                "evt-remote",
+                "account",
+                "account.update.v1",
+                "account-remote",
+                8,
+                r#"{"id":"account-remote","name":"Checking"}"#,
+            ),
+        ));
+        let cycle_ports = ports.clone();
+        let cycle = tokio::spawn(async move { run_sync_cycle(&cycle_ports, false).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ports.pull_cursors.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cycle should reach the download");
+        let latest_original_deadline = Utc::now() + chrono::Duration::seconds(40);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drop(responses);
+
+        let result = cycle.await.expect("cycle task").expect("cycle");
+
+        assert_eq!(result.status, "push_error");
+        assert_eq!(result.cursor, 8);
+        assert_eq!(result.pulled_count, 1);
+        let retry_at = ports
+            .last_cycle_retry_at
+            .lock()
+            .await
+            .clone()
+            .expect("retry time");
+        let retry_at = chrono::DateTime::parse_from_rfc3339(&retry_at).expect("valid retry time");
+        assert!(
+            retry_at <= latest_original_deadline,
+            "download extended the upload retry deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_push_failure_preserves_upload_retry_when_download_also_fails() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        ports
+            .pending_outbox
+            .lock()
+            .await
+            .push(outbox_event("evt-local", "account-local", 1));
+        // With no queued response, the transport fails the download.
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "pull_error");
+        assert_eq!(result.cursor, 5);
+        assert_eq!(result.pushed_count, 0);
+        assert_eq!(result.pulled_count, 0);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert!(ports.set_cursor_calls.lock().await.is_empty());
+        assert!(ports.pull_complete_counts.lock().await.is_empty());
+        assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["pull_error"]);
+        let pending = ports.pending_outbox.lock().await;
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].sent);
+        assert_eq!(pending[0].retry_count, 1);
+        assert!(pending[0].next_retry_at.is_some());
+        assert_eq!(
+            pending[0].last_error.as_deref(),
+            Some("503 Service Unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_retry_wakes_after_download_recovers_during_backoff() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3; // Existing backoff: 40 seconds.
+        ports.pending_outbox.lock().await.push(event);
+
+        // No response: the first download fails and schedules a 10-second retry.
+        let failed = run_sync_cycle(&ports, false).await.expect("failed cycle");
+        assert_eq!(failed.status, "pull_error");
+        let download_delay = compute_cycle_delay_ms(&ports, 0).await;
+        assert!((1_000..=10_000).contains(&download_delay));
+        let upload_retry_at = ports.pending_outbox.lock().await[0]
+            .next_retry_at
+            .clone()
+            .expect("upload retry deadline");
+
+        // Run the recovery cycle before the upload becomes eligible again.
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-remote",
+                    "account",
+                    "account.update.v1",
+                    "account-remote",
+                    8,
+                    r#"{"id":"account-remote","name":"Checking"}"#,
+                ),
+            ));
+        let recovered = run_sync_cycle(&ports, false).await.expect("recovery cycle");
+        assert_eq!(recovered.status, "ok");
+        assert_eq!(recovered.cursor, 8);
+        assert_eq!(recovered.pulled_count, 1);
+        assert_eq!(ports.push_batches.lock().await.len(), 1);
+        assert!(ports.last_cycle_retry_at.lock().await.is_none());
+        assert!(!ports.has_pending_outbox().await.expect("ready uploads"));
+        assert_eq!(
+            ports.pending_outbox.lock().await[0]
+                .next_retry_at
+                .as_deref(),
+            Some(upload_retry_at.as_str())
+        );
+        let remaining_ms = millis_until_rfc3339(&upload_retry_at).expect("retry time");
+        let delay_ms = compute_cycle_delay_ms(&ports, 0).await;
+        assert!(
+            (1_000..=remaining_ms).contains(&delay_ms),
+            "upload retry was delayed until the periodic cycle: {delay_ms} ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_retry_wakes_before_unsupported_download_backoff() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3;
+        ports.pending_outbox.lock().await.push(event);
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-remote",
+                    "account",
+                    "account.future.v1",
+                    "account-remote",
+                    8,
+                    "{}",
+                ),
+            ));
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+        assert_eq!(result.status, "replay_blocked");
+        assert_eq!(result.cursor, 5);
+        assert!(ports.applied_events.lock().await.is_empty());
+        let cycle_retry_at = ports
+            .last_cycle_retry_at
+            .lock()
+            .await
+            .clone()
+            .expect("replay retry");
+        assert!(millis_until_rfc3339(&cycle_retry_at).expect("retry time") > 21_000_000);
+        let upload_retry_at = ports.pending_outbox.lock().await[0]
+            .next_retry_at
+            .clone()
+            .expect("upload retry deadline");
+        let remaining_ms = millis_until_rfc3339(&upload_retry_at).expect("retry time");
+        let delay_ms = compute_cycle_delay_ms(&ports, 0).await;
+        assert!(
+            (1_000..=remaining_ms).contains(&delay_ms),
+            "upload retry was delayed by the replay backoff: {delay_ms} ms"
+        );
+        assert_eq!(ports.push_batches.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_retry_does_not_shorten_subscription_pause() {
+        for (status, seconds) in [
+            ("subscription_required", 300),
+            ("subscription_check_error", 60),
+        ] {
+            let ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            let mut event = outbox_event("evt-local", "account-local", 1);
+            event.next_retry_at = Some((Utc::now() + chrono::Duration::seconds(40)).to_rfc3339());
+            ports.pending_outbox.lock().await.push(event);
+            ports
+                .mark_cycle_outcome(
+                    status.to_string(),
+                    0,
+                    Some((Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()),
+                )
+                .await
+                .expect("subscription pause");
+            assert!(compute_cycle_delay_ms(&ports, 0).await > 40_000);
+            assert!(ports.push_batches.lock().await.is_empty());
+            assert!(ports.pull_cursors.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn other_push_failures_still_stop_before_downloading() {
+        for (retry_class, code, message, status) in [
+            (
+                ApiRetryClass::Permanent,
+                None,
+                "400 Bad Request",
+                "push_error",
+            ),
+            (
+                ApiRetryClass::ReauthRequired,
+                None,
+                "401 Unauthorized",
+                "auth_error",
+            ),
+            (
+                ApiRetryClass::Retryable,
+                Some("SUBSCRIPTION_REQUIRED"),
+                "Subscription required",
+                "subscription_required",
+            ),
+            (
+                ApiRetryClass::Retryable,
+                Some("SYNC_KEY_VERSION_MISMATCH"),
+                "KEY_VERSION_MISMATCH",
+                "key_version_mismatch",
+            ),
+        ] {
+            let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            ports.reconcile_response.cursor = Some(8);
+            ports.push_error = Some(TransportError {
+                message: message.to_string(),
+                retry_class,
+                error_code: code.map(str::to_string),
+                details: None,
+            });
+            ports
+                .pending_outbox
+                .lock()
+                .await
+                .push(outbox_event("evt-local", "account-local", 1));
+
+            let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+            assert_eq!(result.status, status);
+            assert_eq!(result.cursor, 0);
+            assert!(ports.pull_cursors.lock().await.is_empty());
+            assert!(ports.applied_events.lock().await.is_empty());
+            assert!(ports.set_cursor_calls.lock().await.is_empty());
+            assert!(ports.pull_complete_counts.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_pulls_when_server_cursor_is_ahead() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-account-1",
+                    "account",
+                    "account.update.v1",
+                    "account-1",
+                    8,
+                    r#"{"id":"account-1","name":"Checking"}"#,
+                ),
+            ));
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.cursor, 8);
+        assert_eq!(result.pulled_count, 1);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert_eq!(ports.set_cursor_calls.lock().await.as_slice(), [8]);
+        let applied_events = ports.applied_events.lock().await;
+        assert_eq!(applied_events.len(), 1);
+        assert_eq!(applied_events[0].event_id, "evt-account-1");
+        assert!(ports.push_batches.lock().await.is_empty());
+        assert!(ports.engine_errors.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_skips_pull_when_server_cursor_is_not_ahead() {
+        for server_cursor in [Some(5), Some(4), None] {
+            let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            ports.cursor = 5;
+            ports.reconcile_response.cursor = server_cursor;
+
+            let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+            assert_eq!(result.status, "ok");
+            assert_eq!(result.cursor, 5);
+            assert_eq!(result.lock_version, 0);
+            assert_eq!(result.pulled_count, 0);
+            assert!(ports.pull_cursors.lock().await.is_empty());
+            assert!(ports.set_cursor_calls.lock().await.is_empty());
+            assert!(ports.applied_events.lock().await.is_empty());
+            assert!(ports.push_batches.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_reports_pull_failure_when_server_cursor_is_ahead() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        // With no queued response, the transport fails the pull.
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "pull_error");
+        assert_eq!(result.cursor, 5);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert!(ports.set_cursor_calls.lock().await.is_empty());
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert!(ports.push_batches.lock().await.is_empty());
+        assert_eq!(ports.engine_errors.lock().await.len(), 1);
+        assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["pull_error"]);
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
-import { useState, useEffect } from "react";
+import { useIsMobileViewport } from "@/hooks/use-platform";
+import { cn } from "@/lib/utils";
+import { useState } from "react";
 import { ExternalLink } from "@/components/external-link";
+import { useEffectOnChange } from "@/hooks/use-effect-on-change";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Input } from "@wealthfolio/ui/components/ui/input";
 import { Label } from "@wealthfolio/ui/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@wealthfolio/ui";
+import { RadioGroup, RadioGroupItem, Spinner } from "@wealthfolio/ui";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import {
   Sheet,
@@ -51,6 +54,7 @@ export function NewAccountsFoundModal({
   onComplete,
 }: NewAccountsFoundModalProps) {
   const { t } = useTranslation();
+  const isMobile = useIsMobileViewport();
   const queryClient = useQueryClient();
   const [isSaving, setIsSaving] = useState(false);
 
@@ -58,7 +62,7 @@ export function NewAccountsFoundModal({
   const [accountSetups, setAccountSetups] = useState<Record<string, AccountSetup>>({});
 
   // Reset accountSetups when accounts change
-  useEffect(() => {
+  useEffectOnChange(() => {
     const initial: Record<string, AccountSetup> = {};
     accounts.forEach((acc) => {
       initial[acc.id] = {
@@ -126,7 +130,13 @@ export function NewAccountsFoundModal({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="flex h-full w-full flex-col p-0 sm:max-w-xl">
+      <SheetContent
+        side={isMobile ? "bottom" : "inline-end"}
+        className={cn(
+          "flex h-full flex-col p-0",
+          isMobile ? "mx-1 rounded-t-4xl [--overlay-max-height:90dvh]" : "w-full sm:max-w-xl",
+        )}
+      >
         <SheetHeader className="border-b px-6 py-4">
           <SheetTitle className="flex items-center gap-2">
             <Icons.Users className="h-5 w-5" />
@@ -135,13 +145,10 @@ export function NewAccountsFoundModal({
           <SheetDescription>{t("connect:newAccounts.description")}</SheetDescription>
         </SheetHeader>
 
-        <div className="flex-1 overflow-hidden">
-          <ScrollArea className="h-[calc(100vh-220px)]">
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ScrollArea className="h-full">
             <div className="space-y-6 p-6">
-              <Alert
-                variant="warning"
-                className="px-3 py-2.5 [&>svg]:left-3 [&>svg]:top-2.5 [&>svg~*]:pl-6"
-              >
+              <Alert variant="warning" className="px-3 py-2.5">
                 <Icons.AlertTriangle className="h-4 w-4" />
                 <AlertDescription className="text-sm">
                   <Trans
@@ -260,12 +267,12 @@ export function NewAccountsFoundModal({
           <Button onClick={handleSaveAndSync} disabled={isSaving}>
             {isSaving ? (
               <>
-                <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="me-2 h-4 w-4" />
                 {t("connect:newAccounts.saving")}
               </>
             ) : (
               <>
-                <Icons.Check className="mr-2 h-4 w-4" />
+                <Icons.Check className="me-2 h-4 w-4" />
                 {t("connect:newAccounts.saveAndSync")}
               </>
             )}

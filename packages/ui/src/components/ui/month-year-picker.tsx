@@ -28,6 +28,8 @@ const FULL_MONTHS = [
 interface MonthYearPickerProps {
   /** Currently selected month (YYYY-MM format) */
   value?: string;
+  /** Disable when value only seeds the displayed year, without selecting a month. */
+  highlightSelection?: boolean;
   /** Callback when month is selected */
   onChange?: (value: string) => void;
   /** Minimum selectable date (YYYY-MM format) */
@@ -38,7 +40,14 @@ interface MonthYearPickerProps {
   className?: string;
 }
 
-function MonthYearPicker({ value, onChange, minDate, maxDate, className }: MonthYearPickerProps) {
+function MonthYearPicker({
+  value,
+  highlightSelection = true,
+  onChange,
+  minDate,
+  maxDate,
+  className,
+}: MonthYearPickerProps) {
   const formatting = useDateFormatting();
   const { t } = useTranslation();
   const [selectedYear, selectedMonth] = React.useMemo(() => {
@@ -114,11 +123,11 @@ function MonthYearPicker({ value, onChange, minDate, maxDate, className }: Month
 
   const isMonthSelected = (monthIndex: number) => {
     const month = monthIndex + 1;
-    return viewYear === selectedYear && month === selectedMonth;
+    return highlightSelection && viewYear === selectedYear && month === selectedMonth;
   };
 
   return (
-    <div className={cn("w-[240px] p-3", className)} data-slot="month-year-picker">
+    <div className={cn("w-60 p-3", className)} data-slot="month-year-picker">
       <div className="mb-3 flex items-center justify-between">
         <Button
           variant="ghost"
@@ -128,7 +137,7 @@ function MonthYearPicker({ value, onChange, minDate, maxDate, className }: Month
           onClick={handlePrevYear}
           disabled={!canGoPrevYear}
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="h-4 w-4 rtl:rotate-180" />
         </Button>
         <span className="text-sm font-medium">{yearLabel}</span>
         <Button
@@ -139,7 +148,7 @@ function MonthYearPicker({ value, onChange, minDate, maxDate, className }: Month
           onClick={handleNextYear}
           disabled={!canGoNextYear}
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4 rtl:rotate-180" />
         </Button>
       </div>
       <div className="grid grid-cols-3 gap-2">
@@ -159,6 +168,7 @@ function MonthYearPicker({ value, onChange, minDate, maxDate, className }: Month
               onClick={() => !disabled && handleMonthClick(index)}
               disabled={disabled}
               aria-label={month.long}
+              aria-pressed={selected}
             >
               {month.short}
             </Button>
